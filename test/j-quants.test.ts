@@ -38,6 +38,26 @@ test('creates the JQuantsFinancialSummary table with ticker/discDate key and RET
   });
 });
 
+test('creates a private S3 bucket and CloudFront distribution for the frontend, with SPA fallback', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::S3::Bucket', {
+    PublicAccessBlockConfiguration: Match.objectLike({
+      BlockPublicAcls: true,
+      BlockPublicPolicy: true,
+    }),
+  });
+
+  template.hasResourceProperties('AWS::CloudFront::Distribution', {
+    DistributionConfig: Match.objectLike({
+      DefaultRootObject: 'index.html',
+      CustomErrorResponses: Match.arrayWith([
+        Match.objectLike({ ErrorCode: 404, ResponseCode: 200, ResponsePagePath: '/index.html' }),
+      ]),
+    }),
+  });
+});
+
 test('creates the JQuantsWatchlist table (ticker only key) with RETAIN policy', () => {
   const template = synth();
 

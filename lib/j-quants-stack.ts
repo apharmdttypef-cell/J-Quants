@@ -8,6 +8,9 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { Construct } from 'constructs';
 
 export class JQuantsStack extends cdk.Stack {
@@ -16,6 +19,8 @@ export class JQuantsStack extends cdk.Stack {
   public readonly watchlistTable: dynamodb.Table;
   public readonly apiKeySecret: secretsmanager.Secret;
   public readonly api: apigwv2.HttpApi;
+  public readonly frontendBucket: s3.Bucket;
+  public readonly distribution: cloudfront.Distribution;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -112,11 +117,34 @@ export class JQuantsStack extends cdk.Stack {
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 
-    // フロント(S3+CloudFront)からのブラウザアクセスを許可。オリジンはフロント実装時に絞り込む。
+    // ビルド成果物を置くだけの静的ホスティング用バケット。セーブデータ等の
+    // 永続資産ではないため、他テーブルと違いdestroy時に消えて構わない。
+    this.frontendBucket = new s3.Bucket(this, 'FrontendBucket', {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+    });
+
+    this.distribution = new cloudfront.Distribution(this, 'FrontendDistribution', {
+      defaultRootObject: 'index.html',
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(this.frontendBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      // SPA(React Router)のクライアントサイドルーティングのため、
+      // 存在しないパスもindex.htmlにフォールバックさせる。
+      errorResponses: [
+        { httpStatus: 403, responseHttpStatus: 200, responsePagePath: '/index.html' },
+        { httpStatus: 404, responseHttpStatus: 200, responsePagePath: '/index.html' },
+      ],
+    });
+
+    // フロント(CloudFront配信)からのブラウザアクセスのみ許可。ローカル開発用にVite既定ポートも許可する。
     this.api = new apigwv2.HttpApi(this, 'JQuantsApi', {
       apiName: 'JQuants Reference API',
       corsPreflight: {
-        allowOrigins: ['*'],
+        allowOrigins: [`https://${this.distribution.distributionDomainName}`, 'http://localhost:5173'],
         allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.DELETE],
         allowHeaders: ['Content-Type'],
       },
@@ -144,5 +172,8 @@ export class JQuantsStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'ApiEndpoint', { value: this.api.apiEndpoint });
+    new cdk.CfnOutput(this, 'FrontendUrl', { value: `https://${this.distribution.distributionDomainName}` });
+    new cdk.CfnOutput(this, 'FrontendBucketName', { value: this.frontendBucket.bucketName });
+    new cdk.CfnOutput(this, 'DistributionId', { value: this.distribution.distributionId });
   }
 }
