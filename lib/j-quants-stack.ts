@@ -26,7 +26,7 @@ export class JQuantsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // J-Quants Freeプランは直近12週間分しか再取得できないため、
+    // J-Quants Freeプランは過去2年分を12週間遅延で配信する(直近12週間分は取得不可)。
     // 蓄積データはスタック destroy 時も残す(RETAIN + PITR)。
     this.stockPricesTable = new dynamodb.Table(this, 'JQuantsStockPricesTable', {
       tableName: 'JQuantsStockPrices',
@@ -38,7 +38,7 @@ export class JQuantsStack extends cdk.Stack {
     });
 
     // 開示は四半期ごとで頻度は低いが、価格データと同じ理由(Freeプランは
-    // 直近12週間しか再取得できない)でRETAIN + PITRにする。
+    // 直近12週間分は取得できない)でRETAIN + PITRにする。
     this.financialSummaryTable = new dynamodb.Table(this, 'JQuantsFinancialSummaryTable', {
       tableName: 'JQuantsFinancialSummary',
       partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },

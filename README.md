@@ -40,6 +40,15 @@ EventBridge(毎日 JST18:00)
 | `JQuantsApiKey` | J-Quants APIキー(V2) | `cdk deploy`後に手動: `aws secretsmanager put-secret-value --secret-id JQuantsApiKey --secret-string <APIキー>` |
 | `JQuantsAppPassword` | フロント/APIの共有パスワード | `cdk deploy`時の`APP_PASSWORD`環境変数の値がそのまま入る(手動投入不要) |
 
+### J-Quants Freeプランの実際の挙動(実機で判明)
+
+要件定義段階では「直近12週間分のみ取得可能」と想定していたが、実際に接続して判明した正しい仕様は次の通り:
+
+- **過去2年分のデータを、12週間遅延で配信**する(直近12週間分だけが取得できない、が正しい)。
+- `/equities/bars/daily`に配信対象外の日付(=直近12週間以内)を含む`from`/`to`を指定すると、部分的に返るのではなく**HTTP 400**(`Your subscription covers the following dates: ...`)で全体が失敗する。
+- そのため`BatchFetchFunction`は`to`を"今日"ではなく"今日-12週間-1日(バッファ)"を基準に計算している(`lambda/batch-fetch/index.ts`の`DELIVERY_DELAY_DAYS`)。
+- 同じ理由で`ReferenceApiFunction`の価格取得も"今日からN日前"という日付フィルタではなく、保存済みの最新N件をそのまま返す方式にしている(バッチが保存する日付は常に配信遅延分だけ過去になるため)。
+
 ### Lambda
 
 | 関数 | トリガー | 役割 |
@@ -55,7 +64,7 @@ EventBridge(毎日 JST18:00)
 | `GET /tickers` | ウォッチリスト一覧 |
 | `POST /tickers` | 銘柄コードを追加(`/equities/master`で会社名を1回だけ引き当てて保存) |
 | `DELETE /tickers/{ticker}` | ウォッチリストから削除(価格・財務の蓄積データ自体は残る) |
-| `GET /tickers/{ticker}/prices?range=12w` | 直近12週間の四本値・出来高(Freeプランの取得可能範囲がそのまま上限) |
+| `GET /tickers/{ticker}/prices?range=12w` | 保存済みデータのうち直近12週間分(≈60営業日)の四本値・出来高。日付フィルタではなく最新N件取得なので、配信遅延で古い日付になっていても正しく返る |
 | `GET /tickers/{ticker}/summary` | 直近の決算サマリ。バッチが1度も取得していなければ404 |
 
 CORSの`allowOrigins`はCloudFrontの配信ドメインと`http://localhost:5173`(ローカル開発用)のみ。

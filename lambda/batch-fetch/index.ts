@@ -154,7 +154,7 @@ async function upsertBars(ticker: string, bars: DailyBar[]): Promise<void> {
 }
 
 // code のみ指定(from/to なし)。/fins/summary は日付範囲パラメータを持たず、
-// Freeプランの直近12週間制約はAPI側で自動的にかかる。
+// Freeプランの配信遅延(直近12週間分は非公開)制約はAPI側で自動的にかかる。
 async function fetchFinancialSummaries(ticker: string, apiKey: string): Promise<FinancialSummary[]> {
   const summaries: FinancialSummary[] = [];
   let paginationKey: string | undefined;
