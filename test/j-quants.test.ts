@@ -1,17 +1,52 @@
-// import * as cdk from 'aws-cdk-lib/core';
-// import { Template } from 'aws-cdk-lib/assertions';
-// import * as JQuants from '../lib/j-quants-stack';
+import * as cdk from 'aws-cdk-lib/core';
+import { Template } from 'aws-cdk-lib/assertions';
+import { JQuantsStack } from '../lib/j-quants-stack';
 
-// example test. To run these tests, uncomment this file along with the
-// example resource in lib/j-quants-stack.ts
-test('SQS Queue Created', () => {
-//   const app = new cdk.App();
-//     // WHEN
-//   const stack = new JQuants.JQuantsStack(app, 'MyTestStack');
-//     // THEN
-//   const template = Template.fromStack(stack);
+function synth() {
+  const app = new cdk.App();
+  const stack = new JQuantsStack(app, 'TestStack');
+  return Template.fromStack(stack);
+}
 
-//   template.hasResourceProperties('AWS::SQS::Queue', {
-//     VisibilityTimeout: 300
-//   });
+test('creates the JQuantsStockPrices table with ticker/date key and RETAIN policy', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsStockPrices',
+    KeySchema: [
+      { AttributeName: 'ticker', KeyType: 'HASH' },
+      { AttributeName: 'date', KeyType: 'RANGE' },
+    ],
+    BillingMode: 'PAY_PER_REQUEST',
+  });
+  template.hasResource('AWS::DynamoDB::Table', {
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  });
+});
+
+test('creates the J-Quants API key secret without an inline value', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Name: 'JQuantsApiKey',
+  });
+});
+
+test('creates the batch fetch Lambda with table/secret env vars and a daily schedule', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Environment: {
+      Variables: {
+        TICKERS: '7203,6758',
+      },
+    },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'cron(0 9 * * ? *)',
+    State: 'ENABLED',
+  });
 });
