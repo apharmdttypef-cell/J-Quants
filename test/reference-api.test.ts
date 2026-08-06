@@ -12,6 +12,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 }));
 
 process.env.TABLE_NAME = 'JQuantsStockPrices';
+process.env.FINANCIAL_TABLE_NAME = 'JQuantsFinancialSummary';
 process.env.TICKERS = '7203,6758';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -71,10 +72,52 @@ test('GET /tickers/{ticker}/prices queries DynamoDB and maps items', async () =>
   });
 });
 
-test('GET /tickers/{ticker}/summary returns 501 (data collection not implemented yet)', async () => {
+test('GET /tickers/{ticker}/summary returns 404 for an unknown ticker', async () => {
+  const result = await handler(makeEvent('GET /tickers/{ticker}/summary', { ticker: '9999' }));
+
+  expect((result as { statusCode: number }).statusCode).toBe(404);
+  expect(mockSend).not.toHaveBeenCalled();
+});
+
+test('GET /tickers/{ticker}/summary returns 404 when no disclosure has been collected yet', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [] });
+
   const result = await handler(makeEvent('GET /tickers/{ticker}/summary', { ticker: '7203' }));
 
-  expect((result as { statusCode: number }).statusCode).toBe(501);
+  expect((result as { statusCode: number }).statusCode).toBe(404);
+});
+
+test('GET /tickers/{ticker}/summary returns the latest disclosure', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [
+      {
+        ticker: '7203',
+        discDate: '2026-05-08',
+        docType: 'FYFinancialStatements_Consolidated_IFRS',
+        curPerType: 'FY',
+        sales: '45095325000000',
+        operatingProfit: '4795586000000',
+        ordinaryProfit: '',
+        netProfit: '4765002000000',
+        eps: '345.42',
+      },
+    ],
+  });
+
+  const result = await handler(makeEvent('GET /tickers/{ticker}/summary', { ticker: '7203' }));
+
+  expect((result as { statusCode: number }).statusCode).toBe(200);
+  expect(body(result)).toEqual({
+    ticker: '7203',
+    discDate: '2026-05-08',
+    docType: 'FYFinancialStatements_Consolidated_IFRS',
+    curPerType: 'FY',
+    sales: '45095325000000',
+    operatingProfit: '4795586000000',
+    ordinaryProfit: '',
+    netProfit: '4765002000000',
+    eps: '345.42',
+  });
 });
 
 test('unknown route returns 404', async () => {

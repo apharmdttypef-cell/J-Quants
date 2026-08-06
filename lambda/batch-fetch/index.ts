@@ -3,11 +3,13 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
+const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const TICKERS = (process.env.TICKERS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '7');
 // Freeプランは5req/分。余裕を持たせて13秒間隔にする(60000ms / 5req = 12000ms が下限)。
+// fetchWithRetry が呼び出しごとに待つので、価格・財務どちらのAPI呼び出しにも一律に効く。
 const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '13000');
 const MAX_RETRIES = 5;
 
@@ -28,6 +30,23 @@ interface DailyBar {
 
 interface DailyBarsResponse {
   data: DailyBar[];
+  pagination_key?: string;
+}
+
+interface FinancialSummary {
+  Code: string;
+  DiscDate: string;
+  DocType: string;
+  CurPerType: string;
+  Sales: string;
+  OP: string;
+  OdP: string;
+  NP: string;
+  EPS: string;
+}
+
+interface FinancialSummaryResponse {
+  data: FinancialSummary[];
   pagination_key?: string;
 }
 
@@ -53,6 +72,7 @@ function normalizeDate(raw: string): string {
   return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
 }
 
+// 呼び出しのたびにレート制限分スリープするので、呼び出し側は間隔を意識しなくてよい。
 async function fetchWithRetry(url: string, apiKey: string, attempt = 0): Promise<Response> {
   const response = await fetch(url, { headers: { 'x-api-key': apiKey } });
 
@@ -67,6 +87,7 @@ async function fetchWithRetry(url: string, apiKey: string, attempt = 0): Promise
     throw new Error(`J-Quants API error ${response.status}: ${await response.text()}`);
   }
 
+  await sleep(REQUEST_INTERVAL_MS);
   return response;
 }
 
@@ -82,10 +103,6 @@ async function fetchDailyBars(ticker: string, apiKey: string, from: string, to: 
     const body = (await response.json()) as DailyBarsResponse;
     bars.push(...body.data);
     paginationKey = body.pagination_key;
-
-    if (paginationKey) {
-      await sleep(REQUEST_INTERVAL_MS);
-    }
   } while (paginationKey);
 
   return bars;
@@ -113,6 +130,50 @@ async function upsertBars(ticker: string, bars: DailyBar[]): Promise<void> {
   }
 }
 
+// code のみ指定(from/to なし)。/fins/summary は日付範囲パラメータを持たず、
+// Freeプランの直近12週間制約はAPI側で自動的にかかる。
+async function fetchFinancialSummaries(ticker: string, apiKey: string): Promise<FinancialSummary[]> {
+  const summaries: FinancialSummary[] = [];
+  let paginationKey: string | undefined;
+
+  do {
+    const params = new URLSearchParams({ code: ticker });
+    if (paginationKey) params.set('pagination_key', paginationKey);
+
+    const response = await fetchWithRetry(`${API_BASE_URL}/fins/summary?${params}`, apiKey);
+    const body = (await response.json()) as FinancialSummaryResponse;
+    summaries.push(...body.data);
+    paginationKey = body.pagination_key;
+  } while (paginationKey);
+
+  return summaries;
+}
+
+async function upsertFinancialSummaries(ticker: string, summaries: FinancialSummary[]): Promise<void> {
+  const updatedAt = new Date().toISOString();
+
+  for (const summary of summaries) {
+    await ddbDocClient.send(
+      new PutCommand({
+        TableName: FINANCIAL_TABLE_NAME,
+        Item: {
+          ticker,
+          discDate: normalizeDate(summary.DiscDate),
+          docType: summary.DocType,
+          curPerType: summary.CurPerType,
+          // 桁数が大きく精度が必要なためAPIが返す文字列のまま保持する。
+          sales: summary.Sales,
+          operatingProfit: summary.OP,
+          ordinaryProfit: summary.OdP,
+          netProfit: summary.NP,
+          eps: summary.EPS,
+          updated_at: updatedAt,
+        },
+      }),
+    );
+  }
+}
+
 export const handler = async (): Promise<void> => {
   if (TICKERS.length === 0) {
     console.warn('TICKERS is empty; nothing to fetch');
@@ -123,17 +184,21 @@ export const handler = async (): Promise<void> => {
   const to = formatDate(new Date());
   const from = formatDate(new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000));
 
-  for (const [index, ticker] of TICKERS.entries()) {
+  for (const ticker of TICKERS) {
     try {
       const bars = await fetchDailyBars(ticker, apiKey, from, to);
       await upsertBars(ticker, bars);
       console.log(`${ticker}: upserted ${bars.length} bars`);
     } catch (error) {
-      console.error(`${ticker}: failed to fetch/upsert`, error);
+      console.error(`${ticker}: failed to fetch/upsert daily bars`, error);
     }
 
-    if (index < TICKERS.length - 1) {
-      await sleep(REQUEST_INTERVAL_MS);
+    try {
+      const summaries = await fetchFinancialSummaries(ticker, apiKey);
+      await upsertFinancialSummaries(ticker, summaries);
+      console.log(`${ticker}: upserted ${summaries.length} financial summaries`);
+    } catch (error) {
+      console.error(`${ticker}: failed to fetch/upsert financial summaries`, error);
     }
   }
 };

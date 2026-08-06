@@ -25,6 +25,19 @@ test('creates the JQuantsStockPrices table with ticker/date key and RETAIN polic
   });
 });
 
+test('creates the JQuantsFinancialSummary table with ticker/discDate key and RETAIN policy', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsFinancialSummary',
+    KeySchema: [
+      { AttributeName: 'ticker', KeyType: 'HASH' },
+      { AttributeName: 'discDate', KeyType: 'RANGE' },
+    ],
+    BillingMode: 'PAY_PER_REQUEST',
+  });
+});
+
 test('creates the J-Quants API key secret without an inline value', () => {
   const template = synth();
 

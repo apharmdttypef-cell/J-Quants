@@ -13,6 +13,7 @@ import { WATCHLIST_TICKERS } from './watchlist-tickers';
 
 export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
+  public readonly financialSummaryTable: dynamodb.Table;
   public readonly apiKeySecret: secretsmanager.Secret;
   public readonly api: apigwv2.HttpApi;
 
@@ -30,6 +31,17 @@ export class JQuantsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // 開示は四半期ごとで頻度は低いが、価格データと同じ理由(Freeプランは
+    // 直近12週間しか再取得できない)でRETAIN + PITRにする。
+    this.financialSummaryTable = new dynamodb.Table(this, 'JQuantsFinancialSummaryTable', {
+      tableName: 'JQuantsFinancialSummary',
+      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'discDate', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // APIキーの値自体はCDKに含めず、deploy後に
     // `aws secretsmanager put-secret-value` で投入する想定。
     this.apiKeySecret = new secretsmanager.Secret(this, 'JQuantsApiKeySecret', {
@@ -41,19 +53,22 @@ export class JQuantsStack extends cdk.Stack {
       entry: path.join(__dirname, '..', 'lambda', 'batch-fetch', 'index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
-      // 銘柄数×13秒間隔(5req/分制限)のポーリングを直列で行うため長めに確保
-      timeout: cdk.Duration.minutes(10),
+      // 銘柄あたり四本値+財務サマリの2リクエストを13秒間隔(5req/分制限)で
+      // 直列に行うため長めに確保。ウォッチリストが増える場合は要見直し。
+      timeout: cdk.Duration.minutes(14),
       memorySize: 256,
       // AWS SDK v3はNode.js 20系ランタイムに同梱されているためバンドルしない
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
+        FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
         SECRET_ARN: this.apiKeySecret.secretArn,
         TICKERS: WATCHLIST_TICKERS.join(','),
       },
     });
 
     this.stockPricesTable.grantWriteData(batchFetchFn);
+    this.financialSummaryTable.grantWriteData(batchFetchFn);
     this.apiKeySecret.grantRead(batchFetchFn);
 
     // J-Quants Freeプランは配信12週間遅延のため取得時刻はシビアでなくてよい。
@@ -72,11 +87,13 @@ export class JQuantsStack extends cdk.Stack {
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
+        FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
         TICKERS: WATCHLIST_TICKERS.join(','),
       },
     });
 
     this.stockPricesTable.grantReadData(referenceApiFn);
+    this.financialSummaryTable.grantReadData(referenceApiFn);
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 

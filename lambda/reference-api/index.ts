@@ -3,6 +3,7 @@ import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
+const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
 const TICKERS = (process.env.TICKERS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 // J-Quants Freeプランは直近12週間分しか取得できないため、公開する範囲もそれに合わせる。
 const PRICE_RANGE_DAYS = 12 * 7;
@@ -55,12 +56,37 @@ async function getPrices(ticker: string, range: string | undefined): Promise<API
   });
 }
 
-function getSummary(ticker: string): APIGatewayProxyResultV2 {
+async function getSummary(ticker: string): Promise<APIGatewayProxyResultV2> {
   if (!TICKERS.includes(ticker)) {
     return jsonResponse(404, { message: `Unknown ticker: ${ticker}` });
   }
-  // 財務情報サマリの取得・蓄積バッチは未実装(要件書5節のスコープ外・今後の課題)。
-  return jsonResponse(501, { message: 'Financial summary data collection is not implemented yet' });
+
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: FINANCIAL_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      ScanIndexForward: false,
+      Limit: 1,
+    }),
+  );
+
+  const latest = result.Items?.[0];
+  if (!latest) {
+    return jsonResponse(404, { message: `No financial summary available yet for ${ticker}` });
+  }
+
+  return jsonResponse(200, {
+    ticker,
+    discDate: latest.discDate,
+    docType: latest.docType,
+    curPerType: latest.curPerType,
+    sales: latest.sales,
+    operatingProfit: latest.operatingProfit,
+    ordinaryProfit: latest.ordinaryProfit,
+    netProfit: latest.netProfit,
+    eps: latest.eps,
+  });
 }
 
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
@@ -74,7 +100,7 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
         ? getPrices(ticker, event.queryStringParameters?.range)
         : jsonResponse(400, { message: 'Missing ticker' });
     case 'GET /tickers/{ticker}/summary':
-      return ticker ? getSummary(ticker) : jsonResponse(400, { message: 'Missing ticker' });
+      return ticker ? await getSummary(ticker) : jsonResponse(400, { message: 'Missing ticker' });
     default:
       return jsonResponse(404, { message: 'Not found' });
   }
