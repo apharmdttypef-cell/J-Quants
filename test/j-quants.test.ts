@@ -50,3 +50,16 @@ test('creates the batch fetch Lambda with table/secret env vars and a daily sche
     State: 'ENABLED',
   });
 });
+
+test('creates the HTTP API with the three reference routes', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
+    ProtocolType: 'HTTP',
+  });
+
+  const routeKeys = ['GET /tickers', 'GET /tickers/{ticker}/prices', 'GET /tickers/{ticker}/summary'];
+  for (const routeKey of routeKeys) {
+    template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: routeKey });
+  }
+});

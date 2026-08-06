@@ -6,12 +6,15 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { Construct } from 'constructs';
 import { WATCHLIST_TICKERS } from './watchlist-tickers';
 
 export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
   public readonly apiKeySecret: secretsmanager.Secret;
+  public readonly api: apigwv2.HttpApi;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -59,5 +62,49 @@ export class JQuantsStack extends cdk.Stack {
       schedule: events.Schedule.cron({ minute: '0', hour: '9' }),
       targets: [new targets.LambdaFunction(batchFetchFn)],
     });
+
+    const referenceApiFn = new nodejs.NodejsFunction(this, 'ReferenceApiFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'reference-api', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        TABLE_NAME: this.stockPricesTable.tableName,
+        TICKERS: WATCHLIST_TICKERS.join(','),
+      },
+    });
+
+    this.stockPricesTable.grantReadData(referenceApiFn);
+
+    const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
+
+    // フロント(S3+CloudFront)からのブラウザアクセスを許可。オリジンはフロント実装時に絞り込む。
+    this.api = new apigwv2.HttpApi(this, 'JQuantsApi', {
+      apiName: 'JQuants Reference API',
+      corsPreflight: {
+        allowOrigins: ['*'],
+        allowMethods: [apigwv2.CorsHttpMethod.GET],
+      },
+    });
+
+    this.api.addRoutes({
+      path: '/tickers',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: referenceApiIntegration,
+    });
+    this.api.addRoutes({
+      path: '/tickers/{ticker}/prices',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: referenceApiIntegration,
+    });
+    this.api.addRoutes({
+      path: '/tickers/{ticker}/summary',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: referenceApiIntegration,
+    });
+
+    new cdk.CfnOutput(this, 'ApiEndpoint', { value: this.api.apiEndpoint });
   }
 }
