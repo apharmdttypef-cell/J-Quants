@@ -1,4 +1,5 @@
 import type { FinancialSummary, PricesResponse, WatchlistTicker } from './types';
+import { clearStoredAppPassword, getStoredAppPassword } from '../lib/appPassword';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
 
@@ -19,8 +20,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-app-password': getStoredAppPassword() ?? '',
+      ...init?.headers,
+    },
   });
+
+  if (response.status === 401) {
+    clearStoredAppPassword();
+    throw new ApiError(401, 'パスワードが正しくありません');
+  }
 
   if (response.status === 204) {
     return undefined as T;

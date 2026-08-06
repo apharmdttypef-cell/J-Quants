@@ -2,6 +2,8 @@ import * as cdk from 'aws-cdk-lib/core';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { JQuantsStack } from '../lib/j-quants-stack';
 
+process.env.APP_PASSWORD = 'test-app-password';
+
 function synth() {
   const app = new cdk.App();
   const stack = new JQuantsStack(app, 'TestStack');
@@ -113,5 +115,48 @@ test('creates the HTTP API with tickers CRUD and the price/summary routes', () =
   ];
   for (const routeKey of routeKeys) {
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: routeKey });
+  }
+});
+
+test('protects every route with the shared-password Lambda authorizer', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::ApiGatewayV2::Authorizer', {
+    AuthorizerType: 'REQUEST',
+    IdentitySource: ['$request.header.x-app-password'],
+  });
+
+  const routes = template.findResources('AWS::ApiGatewayV2::Route');
+  const routeKeys = Object.values(routes).map((r) => (r as { Properties: { RouteKey: string } }).Properties.RouteKey);
+  expect(routeKeys.length).toBeGreaterThan(0);
+  for (const route of Object.values(routes)) {
+    expect((route as { Properties: { AuthorizerId?: unknown } }).Properties.AuthorizerId).toBeDefined();
+  }
+});
+
+test('protects the frontend with a CloudFront Function performing Basic auth', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::CloudFront::Function', {
+    FunctionConfig: Match.objectLike({ Runtime: 'cloudfront-js-2.0' }),
+  });
+
+  template.hasResourceProperties('AWS::CloudFront::Distribution', {
+    DistributionConfig: Match.objectLike({
+      DefaultCacheBehavior: Match.objectLike({
+        FunctionAssociations: Match.arrayWith([Match.objectLike({ EventType: 'viewer-request' })]),
+      }),
+    }),
+  });
+});
+
+test('throws a clear error when APP_PASSWORD is not set', () => {
+  const original = process.env.APP_PASSWORD;
+  delete process.env.APP_PASSWORD;
+
+  try {
+    expect(() => new JQuantsStack(new cdk.App(), 'TestStack')).toThrow('APP_PASSWORD');
+  } finally {
+    process.env.APP_PASSWORD = original;
   }
 });

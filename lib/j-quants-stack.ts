@@ -8,6 +8,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import { HttpLambdaAuthorizer, HttpLambdaResponseType } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
@@ -63,6 +64,39 @@ export class JQuantsStack extends cdk.Stack {
     this.apiKeySecret = new secretsmanager.Secret(this, 'JQuantsApiKeySecret', {
       secretName: 'JQuantsApiKey',
       description: 'J-Quants API key (V2)',
+    });
+
+    // フロント/APIを未認証で公開しないための共有パスワード。CDKデプロイ時に
+    // 環境変数で必須入力させ、Secrets Managerとフロント配信の両方に同じ値を反映する。
+    const appPassword = process.env.APP_PASSWORD;
+    if (!appPassword) {
+      throw new Error(
+        'APP_PASSWORD environment variable is required (protects the frontend/API from being publicly open). ' +
+          'Example: APP_PASSWORD=xxxxx npx cdk deploy',
+      );
+    }
+
+    const appPasswordSecret = new secretsmanager.Secret(this, 'JQuantsAppPasswordSecret', {
+      secretName: 'JQuantsAppPassword',
+      description: 'Shared password protecting the frontend/API (checked by the Lambda authorizer)',
+      secretStringValue: cdk.SecretValue.unsafePlainText(appPassword),
+    });
+
+    const authorizerFn = new nodejs.NodejsFunction(this, 'AuthorizerFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'authorizer', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(5),
+      memorySize: 128,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: { SECRET_ARN: appPasswordSecret.secretArn },
+    });
+    appPasswordSecret.grantRead(authorizerFn);
+
+    const apiAuthorizer = new HttpLambdaAuthorizer('ApiAuthorizer', authorizerFn, {
+      responseTypes: [HttpLambdaResponseType.SIMPLE],
+      identitySource: ['$request.header.x-app-password'],
+      resultsCacheTtl: cdk.Duration.minutes(5),
     });
 
     const batchFetchFn = new nodejs.NodejsFunction(this, 'BatchFetchFunction', {
@@ -126,11 +160,36 @@ export class JQuantsStack extends cdk.Stack {
       enforceSSL: true,
     });
 
+    // フロントも同じ共有パスワードでBasic認証をかける(CloudFront FunctionはSecrets
+    // Managerを実行時に参照できないため、synth時にAPP_PASSWORDを埋め込む)。
+    const basicAuthValue = Buffer.from(`jquants:${appPassword}`).toString('base64');
+    const basicAuthFn = new cloudfront.Function(this, 'BasicAuthFunction', {
+      code: cloudfront.FunctionCode.fromInline(`
+function handler(event) {
+  var request = event.request;
+  var expected = "Basic ${basicAuthValue}";
+  var provided = request.headers.authorization && request.headers.authorization.value;
+
+  if (provided !== expected) {
+    return {
+      statusCode: 401,
+      statusDescription: "Unauthorized",
+      headers: { "www-authenticate": { value: 'Basic realm="J-Quants"' } },
+    };
+  }
+
+  return request;
+}
+      `),
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+    });
+
     this.distribution = new cloudfront.Distribution(this, 'FrontendDistribution', {
       defaultRootObject: 'index.html',
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(this.frontendBucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        functionAssociations: [{ function: basicAuthFn, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST }],
       },
       // SPA(React Router)のクライアントサイドルーティングのため、
       // 存在しないパスもindex.htmlにフォールバックさせる。
@@ -143,10 +202,11 @@ export class JQuantsStack extends cdk.Stack {
     // フロント(CloudFront配信)からのブラウザアクセスのみ許可。ローカル開発用にVite既定ポートも許可する。
     this.api = new apigwv2.HttpApi(this, 'JQuantsApi', {
       apiName: 'JQuants Reference API',
+      defaultAuthorizer: apiAuthorizer,
       corsPreflight: {
         allowOrigins: [`https://${this.distribution.distributionDomainName}`, 'http://localhost:5173'],
         allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.DELETE],
-        allowHeaders: ['Content-Type'],
+        allowHeaders: ['Content-Type', 'x-app-password'],
       },
     });
 
