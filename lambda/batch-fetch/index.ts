@@ -1,11 +1,11 @@
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
+const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
-const TICKERS = (process.env.TICKERS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '7');
 // Freeプランは5req/分。余裕を持たせて13秒間隔にする(60000ms / 5req = 12000ms が下限)。
@@ -60,6 +60,25 @@ async function getApiKey(): Promise<string> {
   }
   cachedApiKey = result.SecretString;
   return cachedApiKey;
+}
+
+// ウォッチリスト管理画面での追加/削除を次回実行から反映するため、
+// 銘柄リストは(env var固定ではなく)実行のたびにDynamoDBから読む。
+async function getWatchlistTickers(): Promise<string[]> {
+  const tickers: string[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({ TableName: WATCHLIST_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
+    );
+    for (const item of result.Items ?? []) {
+      if (typeof item.ticker === 'string') tickers.push(item.ticker);
+    }
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  return tickers;
 }
 
 function formatDate(date: Date): string {
@@ -175,8 +194,9 @@ async function upsertFinancialSummaries(ticker: string, summaries: FinancialSumm
 }
 
 export const handler = async (): Promise<void> => {
-  if (TICKERS.length === 0) {
-    console.warn('TICKERS is empty; nothing to fetch');
+  const tickers = await getWatchlistTickers();
+  if (tickers.length === 0) {
+    console.warn('Watchlist is empty; nothing to fetch');
     return;
   }
 
@@ -184,7 +204,7 @@ export const handler = async (): Promise<void> => {
   const to = formatDate(new Date());
   const from = formatDate(new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000));
 
-  for (const ticker of TICKERS) {
+  for (const ticker of tickers) {
     try {
       const bars = await fetchDailyBars(ticker, apiKey, from, to);
       await upsertBars(ticker, bars);

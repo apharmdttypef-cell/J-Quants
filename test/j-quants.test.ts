@@ -1,5 +1,5 @@
 import * as cdk from 'aws-cdk-lib/core';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { JQuantsStack } from '../lib/j-quants-stack';
 
 function synth() {
@@ -38,6 +38,16 @@ test('creates the JQuantsFinancialSummary table with ticker/discDate key and RET
   });
 });
 
+test('creates the JQuantsWatchlist table (ticker only key) with RETAIN policy', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsWatchlist',
+    KeySchema: [{ AttributeName: 'ticker', KeyType: 'HASH' }],
+    BillingMode: 'PAY_PER_REQUEST',
+  });
+});
+
 test('creates the J-Quants API key secret without an inline value', () => {
   const template = synth();
 
@@ -46,16 +56,19 @@ test('creates the J-Quants API key secret without an inline value', () => {
   });
 });
 
-test('creates the batch fetch Lambda with table/secret env vars and a daily schedule', () => {
+test('creates the batch fetch Lambda wired to all three tables and a daily schedule', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Environment: {
-      Variables: {
-        TICKERS: '7203,6758',
-      },
+      Variables: Match.objectLike({
+        TABLE_NAME: Match.anyValue(),
+        FINANCIAL_TABLE_NAME: Match.anyValue(),
+        WATCHLIST_TABLE_NAME: Match.anyValue(),
+        SECRET_ARN: Match.anyValue(),
+      }),
     },
   });
   template.hasResourceProperties('AWS::Events::Rule', {
@@ -64,14 +77,20 @@ test('creates the batch fetch Lambda with table/secret env vars and a daily sche
   });
 });
 
-test('creates the HTTP API with the three reference routes', () => {
+test('creates the HTTP API with tickers CRUD and the price/summary routes', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     ProtocolType: 'HTTP',
   });
 
-  const routeKeys = ['GET /tickers', 'GET /tickers/{ticker}/prices', 'GET /tickers/{ticker}/summary'];
+  const routeKeys = [
+    'GET /tickers',
+    'POST /tickers',
+    'DELETE /tickers/{ticker}',
+    'GET /tickers/{ticker}/prices',
+    'GET /tickers/{ticker}/summary',
+  ];
   for (const routeKey of routeKeys) {
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: routeKey });
   }

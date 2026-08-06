@@ -9,11 +9,11 @@ import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { Construct } from 'constructs';
-import { WATCHLIST_TICKERS } from './watchlist-tickers';
 
 export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
   public readonly financialSummaryTable: dynamodb.Table;
+  public readonly watchlistTable: dynamodb.Table;
   public readonly apiKeySecret: secretsmanager.Secret;
   public readonly api: apigwv2.HttpApi;
 
@@ -42,6 +42,17 @@ export class JQuantsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // ウォッチリスト管理画面から追加/削除される、取得対象銘柄の正本。
+    // 消えても銘柄コードを打ち直せば復旧できるためRETAINは必須ではないが、
+    // 他テーブルと運用を揃えるため同じ方針にする。
+    this.watchlistTable = new dynamodb.Table(this, 'JQuantsWatchlistTable', {
+      tableName: 'JQuantsWatchlist',
+      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // APIキーの値自体はCDKに含めず、deploy後に
     // `aws secretsmanager put-secret-value` で投入する想定。
     this.apiKeySecret = new secretsmanager.Secret(this, 'JQuantsApiKeySecret', {
@@ -62,13 +73,14 @@ export class JQuantsStack extends cdk.Stack {
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
         FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
+        WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
         SECRET_ARN: this.apiKeySecret.secretArn,
-        TICKERS: WATCHLIST_TICKERS.join(','),
       },
     });
 
     this.stockPricesTable.grantWriteData(batchFetchFn);
     this.financialSummaryTable.grantWriteData(batchFetchFn);
+    this.watchlistTable.grantReadData(batchFetchFn);
     this.apiKeySecret.grantRead(batchFetchFn);
 
     // J-Quants Freeプランは配信12週間遅延のため取得時刻はシビアでなくてよい。
@@ -88,12 +100,15 @@ export class JQuantsStack extends cdk.Stack {
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
         FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
-        TICKERS: WATCHLIST_TICKERS.join(','),
+        WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
+        SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
 
     this.stockPricesTable.grantReadData(referenceApiFn);
     this.financialSummaryTable.grantReadData(referenceApiFn);
+    this.watchlistTable.grantReadWriteData(referenceApiFn);
+    this.apiKeySecret.grantRead(referenceApiFn);
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 
@@ -102,13 +117,19 @@ export class JQuantsStack extends cdk.Stack {
       apiName: 'JQuants Reference API',
       corsPreflight: {
         allowOrigins: ['*'],
-        allowMethods: [apigwv2.CorsHttpMethod.GET],
+        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.DELETE],
+        allowHeaders: ['Content-Type'],
       },
     });
 
     this.api.addRoutes({
       path: '/tickers',
-      methods: [apigwv2.HttpMethod.GET],
+      methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+      integration: referenceApiIntegration,
+    });
+    this.api.addRoutes({
+      path: '/tickers/{ticker}',
+      methods: [apigwv2.HttpMethod.DELETE],
       integration: referenceApiIntegration,
     });
     this.api.addRoutes({
