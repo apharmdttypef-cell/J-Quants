@@ -131,20 +131,31 @@ test('GET /tickers/{ticker}/prices rejects unsupported range values', async () =
   expect((result as { statusCode: number }).statusCode).toBe(400);
 });
 
-test('GET /tickers/{ticker}/prices queries DynamoDB and maps items', async () => {
+test('GET /tickers/{ticker}/prices queries the most recent stored rows regardless of "today"', async () => {
   mockSend.mockResolvedValueOnce({ Item: { ticker: '7203' } });
+  // DynamoDB側はScanIndexForward:falseで新しい順に返す想定なので、そのまま渡す。
   mockSend.mockResolvedValueOnce({
-    Items: [{ ticker: '7203', date: '2026-08-01', open: 100, high: 110, low: 95, close: 105, volume: 1000 }],
+    Items: [
+      { ticker: '7203', date: '2026-05-08', open: 105, high: 112, low: 100, close: 108, volume: 900 },
+      { ticker: '7203', date: '2026-05-07', open: 100, high: 110, low: 95, close: 105, volume: 1000 },
+    ],
   });
 
   const result = await handler(makeEvent('GET /tickers/{ticker}/prices', { pathParameters: { ticker: '7203' } }));
 
   expect((result as { statusCode: number }).statusCode).toBe(200);
+  // 配信遅延で"今日"より何ヶ月も前の日付しか保存されていなくても、日付フィルタなしで返す。
+  // レスポンスは日付昇順に揃える。
   expect(body(result)).toEqual({
     ticker: '7203',
     range: '12w',
-    prices: [{ date: '2026-08-01', open: 100, high: 110, low: 95, close: 105, volume: 1000 }],
+    prices: [
+      { date: '2026-05-07', open: 100, high: 110, low: 95, close: 105, volume: 1000 },
+      { date: '2026-05-08', open: 105, high: 112, low: 100, close: 108, volume: 900 },
+    ],
   });
+
+  expect(mockSend.mock.calls[1][0]).toMatchObject({ ScanIndexForward: false, Limit: 60 });
 });
 
 test('GET /tickers/{ticker}/summary returns 404 for an unwatched ticker', async () => {

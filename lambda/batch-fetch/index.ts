@@ -8,6 +8,10 @@ const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '7');
+// Freeプランは配信12週間遅延(=84日)。この境界を過ぎた日付を要求すると
+// 「Your subscription covers the following dates: ...」400エラーになるため、
+// "今日" を基準にせず配信済みの範囲まで遡る。日付境界のズレを避け+1日のバッファを持たせる。
+const DELIVERY_DELAY_DAYS = Number(process.env.DELIVERY_DELAY_DAYS ?? String(12 * 7 + 1));
 // Freeプランは5req/分。余裕を持たせて13秒間隔にする(60000ms / 5req = 12000ms が下限)。
 // fetchWithRetry が呼び出しごとに待つので、価格・財務どちらのAPI呼び出しにも一律に効く。
 const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '13000');
@@ -201,8 +205,8 @@ export const handler = async (): Promise<void> => {
   }
 
   const apiKey = await getApiKey();
-  const to = formatDate(new Date());
-  const from = formatDate(new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000));
+  const to = formatDate(new Date(Date.now() - DELIVERY_DELAY_DAYS * 24 * 60 * 60 * 1000));
+  const from = formatDate(new Date(Date.now() - (DELIVERY_DELAY_DAYS + LOOKBACK_DAYS) * 24 * 60 * 60 * 1000));
 
   for (const ticker of tickers) {
     try {

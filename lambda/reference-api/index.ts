@@ -8,8 +8,10 @@ const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
 const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
-// J-Quants Freeプランは直近12週間分しか取得できないため、公開する範囲もそれに合わせる。
-const PRICE_RANGE_DAYS = 12 * 7;
+// J-Quants Freeプランは配信12週間遅延のため、"今日からN日前" で絞ると実際に
+// 保存されているデータ(遅延分だけ過去の日付)が範囲外になる。日付を基準にせず、
+// 保存済みの最新N件(12週間分の営業日 ≈ 60件)をそのまま返す方式にする。
+const PRICE_RANGE_TRADING_DAYS = 60;
 // 4桁(普通株式)または5桁(末尾0付き)の銘柄コードのみ受け付ける。
 const TICKER_CODE_PATTERN = /^\d{4,5}$/;
 
@@ -138,30 +140,28 @@ async function getPrices(ticker: string, range: string | undefined): Promise<API
     return jsonResponse(400, { message: 'Only range=12w is supported (J-Quants Free plan constraint)' });
   }
 
-  const fromDate = new Date(Date.now() - PRICE_RANGE_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-
   const result = await ddbDocClient.send(
     new QueryCommand({
       TableName: TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker AND #date >= :fromDate',
-      ExpressionAttributeNames: { '#date': 'date' },
-      ExpressionAttributeValues: { ':ticker': ticker, ':fromDate': fromDate },
-      ScanIndexForward: true,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      ScanIndexForward: false,
+      Limit: PRICE_RANGE_TRADING_DAYS,
     }),
   );
 
-  return jsonResponse(200, {
-    ticker,
-    range: '12w',
-    prices: (result.Items ?? []).map((item) => ({
-      date: item.date,
+  const prices = (result.Items ?? [])
+    .map((item) => ({
+      date: item.date as string,
       open: item.open,
       high: item.high,
       low: item.low,
       close: item.close,
       volume: item.volume,
-    })),
-  });
+    }))
+    .reverse();
+
+  return jsonResponse(200, { ticker, range: '12w', prices });
 }
 
 async function getSummary(ticker: string): Promise<APIGatewayProxyResultV2> {
