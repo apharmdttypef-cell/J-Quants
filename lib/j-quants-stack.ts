@@ -199,6 +199,29 @@ export class JQuantsStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(marginBalanceBatchFn)],
     });
 
+    const gyakuhibuHistoryBatchFn = new nodejs.NodejsFunction(this, 'GyakuhibuHistoryBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'gyakuhibu-history-batch', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_RIGHTS_DATE_TABLE_NAME: this.yutaiRightsDateTable.tableName,
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
+      },
+    });
+
+    this.yutaiRightsDateTable.grantReadData(gyakuhibuHistoryBatchFn);
+    this.yutaiMasterTable.grantReadData(gyakuhibuHistoryBatchFn);
+    this.gyakuhibuActualTable.grantReadWriteData(gyakuhibuHistoryBatchFn);
+
+    new events.Rule(this, 'GyakuhibuHistoryBatchSchedule', {
+      schedule: events.Schedule.cron({ minute: '0', hour: '10' }),
+      targets: [new targets.LambdaFunction(gyakuhibuHistoryBatchFn)],
+    });
+
     const referenceApiFn = new nodejs.NodejsFunction(this, 'ReferenceApiFunction', {
       entry: path.join(__dirname, '..', 'lambda', 'reference-api', 'index.ts'),
       handler: 'handler',

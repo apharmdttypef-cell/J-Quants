@@ -218,6 +218,24 @@ test('creates the margin balance batch Lambda wired to the yutai and margin tabl
   });
 });
 
+test('creates the gyakuhibu history batch Lambda wired to the rights-date/master/actual tables, on a daily schedule', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Environment: {
+      Variables: Match.objectLike({
+        YUTAI_RIGHTS_DATE_TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'cron(0 10 * * ? *)',
+    State: 'ENABLED',
+  });
+});
+
 test('throws a clear error when APP_PASSWORD is not set', () => {
   const original = process.env.APP_PASSWORD;
   delete process.env.APP_PASSWORD;
