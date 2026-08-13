@@ -26,6 +26,10 @@ process.env.TABLE_NAME = 'JQuantsStockPrices';
 process.env.FINANCIAL_TABLE_NAME = 'JQuantsFinancialSummary';
 process.env.WATCHLIST_TABLE_NAME = 'JQuantsWatchlist';
 process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
+process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
+process.env.YUTAI_RIGHTS_DATE_TABLE_NAME = 'JQuantsYutaiRightsDate';
+process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
+process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/reference-api/index') as {
@@ -213,4 +217,50 @@ test('unknown route returns 404', async () => {
   const result = await handler(makeEvent('GET /unknown'));
 
   expect((result as { statusCode: number }).statusCode).toBe(404);
+});
+
+test('GET /yutai returns each ticker with its next rights date and a safe/danger/na risk badge', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', companyName: '○○HD', content: 'QUOカード', value: 1000, unitShares: 100 }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', rightsDate: '2026-08-20' }] }) // rights-date query for 1234
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10', financingBalance: 100, lendingBalance: 200 }] }) // margin balance presence check
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500 }] }); // latest close price
+
+  // fetchTradingCalendar hits global fetch (not ddbDocClient.send) and is called twice:
+  // once inside calcRiskStatus (settlement calendar for the rights date) and once for
+  // the current-month banner calendar.
+  mockFetch
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ Date: '2026-08-21', HolDiv: '1' }, { Date: '2026-08-24', HolDiv: '1' }] }),
+    })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ Date: '2026-08-21', HolDiv: '1' }, { Date: '2026-08-24', HolDiv: '1' }] }),
+    });
+
+  const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
+
+  expect((result as { statusCode: number }).statusCode).toBe(200);
+  const parsed = body(result) as { tickers: Array<{ ticker: string; riskStatus: string }>; currentMonthLastTradableDate: string };
+  expect(parsed.tickers[0]).toMatchObject({ ticker: '1234' });
+  expect(['safe', 'danger', 'na']).toContain(parsed.tickers[0].riskStatus);
+  expect(parsed.currentMonthLastTradableDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('GET /yutai filters by keyword against company name and content', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '1234', companyName: '○○ホールディングス', content: 'QUOカード', value: 1000, unitShares: 100 },
+        { ticker: '5678', companyName: '△△工業', content: '自社製品', value: 3000, unitShares: 100 },
+      ],
+    })
+    .mockResolvedValue({ Items: [] }); // rights-date/margin-balance queries: no data → treated as 対象外
+  mockFetch.mockResolvedValue({ ok: true, json: async () => ({ data: [] }) });
+
+  const result = await handler(makeEvent('GET /yutai', { queryStringParameters: { keyword: 'QUO' } }));
+
+  const parsed = body(result) as { tickers: Array<{ ticker: string }> };
+  expect(parsed.tickers.map((t) => t.ticker)).toEqual(['1234']);
 });

@@ -211,6 +211,10 @@ export class JQuantsStack extends cdk.Stack {
         FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
         WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
         SECRET_ARN: this.apiKeySecret.secretArn,
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        YUTAI_RIGHTS_DATE_TABLE_NAME: this.yutaiRightsDateTable.tableName,
+        MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
       },
     });
 
@@ -218,6 +222,10 @@ export class JQuantsStack extends cdk.Stack {
     this.financialSummaryTable.grantReadData(referenceApiFn);
     this.watchlistTable.grantReadWriteData(referenceApiFn);
     this.apiKeySecret.grantRead(referenceApiFn);
+    this.yutaiMasterTable.grantReadData(referenceApiFn);
+    this.yutaiRightsDateTable.grantReadData(referenceApiFn);
+    this.marginBalanceTable.grantReadData(referenceApiFn);
+    this.gyakuhibuActualTable.grantReadData(referenceApiFn);
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 
@@ -297,6 +305,11 @@ function handler(event) {
     });
     this.api.addRoutes({
       path: '/tickers/{ticker}/summary',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: referenceApiIntegration,
+    });
+    this.api.addRoutes({
+      path: '/yutai',
       methods: [apigwv2.HttpMethod.GET],
       integration: referenceApiIntegration,
     });

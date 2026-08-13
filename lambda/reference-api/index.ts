@@ -2,11 +2,16 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
+import { calcMaxGyakuhibu } from '../shared/gyakuhibu-calc';
+import { fetchTradingCalendar, isTradingDay, settlementDate, calendarDaysBetween } from '../shared/trading-calendar';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
 const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
+const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
+const YUTAI_RIGHTS_DATE_TABLE_NAME = process.env.YUTAI_RIGHTS_DATE_TABLE_NAME!;
+const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 // J-Quants Freeプランは配信12週間遅延のため、"今日からN日前" で絞ると実際に
 // 保存されているデータ(遅延分だけ過去の日付)が範囲外になる。日付を基準にせず、
@@ -197,6 +202,158 @@ async function getSummary(ticker: string): Promise<APIGatewayProxyResultV2> {
   });
 }
 
+interface YutaiMasterRow {
+  ticker: string;
+  companyName?: string;
+  content: string;
+  value: number;
+  unitShares: number;
+}
+
+async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
+  const rows: YutaiMasterRow[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({ TableName: YUTAI_MASTER_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
+    );
+    for (const item of result.Items ?? []) {
+      rows.push({
+        ticker: item.ticker,
+        companyName: item.companyName,
+        content: item.content,
+        value: item.value,
+        unitShares: item.unitShares,
+      });
+    }
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  return rows;
+}
+
+async function nextRightsDate(ticker: string): Promise<string | undefined> {
+  const today = new Date().toISOString().slice(0, 10);
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: YUTAI_RIGHTS_DATE_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker AND rightsDate >= :today',
+      ExpressionAttributeValues: { ':ticker': ticker, ':today': today },
+      ScanIndexForward: true,
+      Limit: 1,
+    }),
+  );
+  return result.Items?.[0]?.rightsDate;
+}
+
+async function hasMarginBalance(ticker: string): Promise<boolean> {
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: MARGIN_BALANCE_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      Limit: 1,
+    }),
+  );
+  return (result.Items ?? []).length > 0;
+}
+
+async function latestClose(ticker: string): Promise<number | undefined> {
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      ScanIndexForward: false,
+      Limit: 1,
+    }),
+  );
+  const close = result.Items?.[0]?.close;
+  return typeof close === 'number' ? close : undefined;
+}
+
+type RiskStatus = 'safe' | 'danger' | 'na';
+
+async function calcRiskStatus(
+  row: YutaiMasterRow,
+  rightsDate: string | undefined,
+  apiBaseUrl: string,
+  apiKey: string,
+): Promise<RiskStatus> {
+  if (!rightsDate) return 'na';
+  if (!(await hasMarginBalance(row.ticker))) return 'na';
+
+  const closePrice = await latestClose(row.ticker);
+  if (closePrice === undefined) return 'na';
+
+  const calendarTo = new Date(rightsDate);
+  calendarTo.setDate(calendarTo.getDate() + 14);
+  const calendar = await fetchTradingCalendar(
+    apiBaseUrl,
+    apiKey,
+    rightsDate,
+    calendarTo.toISOString().slice(0, 10),
+  );
+  const settlement = settlementDate(calendar, rightsDate);
+  const days = calendarDaysBetween(rightsDate, settlement);
+
+  const maxGyakuhibu = calcMaxGyakuhibu(closePrice, row.unitShares, days);
+  return row.value > maxGyakuhibu ? 'safe' : 'danger';
+}
+
+// 当月末の最終営業日から2営業日前(受渡T+2)を「権利付き最終日」の目安として返す。
+// 月末が権利確定日の銘柄が多いため、このバナー1つを一覧全体で使い回す(銘柄ごとには計算しない)。
+function currentMonthLastTradableDate(calendar: { date: string; holDiv: string }[]): string {
+  const businessDays = calendar.filter(isTradingDay).map((d) => d.date).sort();
+  const cutoffIndex = Math.max(businessDays.length - 3, 0);
+  return businessDays[cutoffIndex];
+}
+
+async function listYutai(query: Record<string, string | undefined>): Promise<APIGatewayProxyResultV2> {
+  const rightsDateFrom = query.rightsDateFrom;
+  const rightsDateTo = query.rightsDateTo;
+  const keyword = query.keyword?.toLowerCase();
+  const riskStatusFilter = query.riskStatus && query.riskStatus !== 'all' ? query.riskStatus : undefined;
+
+  const apiKey = await getApiKey();
+  const rows = await scanYutaiMaster();
+
+  const items = [];
+  for (const row of rows) {
+    if (keyword) {
+      const haystack = `${row.companyName ?? ''} ${row.content}`.toLowerCase();
+      if (!haystack.includes(keyword)) continue;
+    }
+
+    const rightsDate = await nextRightsDate(row.ticker);
+    if (rightsDateFrom && (!rightsDate || rightsDate < rightsDateFrom)) continue;
+    if (rightsDateTo && (!rightsDate || rightsDate > rightsDateTo)) continue;
+
+    const riskStatus = await calcRiskStatus(row, rightsDate, API_BASE_URL, apiKey);
+    if (riskStatusFilter && riskStatus !== riskStatusFilter) continue;
+
+    items.push({
+      ticker: row.ticker,
+      companyName: row.companyName,
+      content: row.content,
+      value: row.value,
+      rightsDate,
+      riskStatus,
+    });
+  }
+
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+  const monthCalendar = await fetchTradingCalendar(API_BASE_URL, apiKey, monthStart, monthEnd);
+
+  return jsonResponse(200, {
+    tickers: items,
+    currentMonthLastTradableDate: currentMonthLastTradableDate(monthCalendar),
+  });
+}
+
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
   const ticker = event.pathParameters?.ticker;
 
@@ -213,6 +370,8 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
         : jsonResponse(400, { message: 'Missing ticker' });
     case 'GET /tickers/{ticker}/summary':
       return ticker ? await getSummary(ticker) : jsonResponse(400, { message: 'Missing ticker' });
+    case 'GET /yutai':
+      return listYutai(event.queryStringParameters ?? {});
     default:
       return jsonResponse(404, { message: 'Not found' });
   }

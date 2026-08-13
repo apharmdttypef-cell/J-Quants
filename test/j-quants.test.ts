@@ -113,6 +113,7 @@ test('creates the HTTP API with tickers CRUD and the price/summary routes', () =
     'DELETE /tickers/{ticker}',
     'GET /tickers/{ticker}/prices',
     'GET /tickers/{ticker}/summary',
+    'GET /yutai',
   ];
   for (const routeKey of routeKeys) {
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: routeKey });
