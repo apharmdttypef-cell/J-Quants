@@ -1,4 +1,11 @@
-import type { FinancialSummary, PricesResponse, WatchlistTicker } from './types';
+import type {
+  FinancialSummary,
+  MarginTrendResponse,
+  PricesResponse,
+  WatchlistTicker,
+  YutaiDetail,
+  YutaiListResponse,
+} from './types';
 import { clearStoredAppPassword, getStoredAppPassword } from '../lib/appPassword';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
@@ -64,4 +71,28 @@ export function addTicker(ticker: string): Promise<WatchlistTicker> {
 
 export function removeTicker(ticker: string): Promise<void> {
   return request(`/tickers/${ticker}`, { method: 'DELETE' });
+}
+
+export interface YutaiListParams {
+  rightsDateFrom?: string;
+  rightsDateTo?: string;
+  keyword?: string;
+  riskStatus?: 'safe' | 'danger' | 'na' | 'all';
+}
+
+export function fetchYutaiList(params: YutaiListParams): Promise<YutaiListResponse> {
+  const query = new URLSearchParams();
+  if (params.rightsDateFrom) query.set('rightsDateFrom', params.rightsDateFrom);
+  if (params.rightsDateTo) query.set('rightsDateTo', params.rightsDateTo);
+  if (params.keyword) query.set('keyword', params.keyword);
+  if (params.riskStatus) query.set('riskStatus', params.riskStatus);
+  return request(`/yutai?${query}`);
+}
+
+export function fetchYutaiDetail(ticker: string): Promise<YutaiDetail> {
+  return request(`/yutai/${ticker}`);
+}
+
+export function fetchYutaiMarginTrend(ticker: string): Promise<MarginTrendResponse> {
+  return request(`/yutai/${ticker}/margin-trend`);
 }
