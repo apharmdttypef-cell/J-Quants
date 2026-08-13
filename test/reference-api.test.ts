@@ -282,3 +282,63 @@ test('GET /yutai returns rightsDate: null (not a missing key) when there is no u
   expect(parsed.tickers[0]).toHaveProperty('rightsDate', null);
   expect(parsed.tickers[0].riskStatus).toBe('na');
 });
+
+test('GET /yutai/{ticker} returns basic info, risk calc, and rights history', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Item: { ticker: '1234', companyName: '○○HD', content: 'QUOカード', value: 1000, unitShares: 100 } }) // yutai master get
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500, volume: 10000 }] }) // latest price
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', discDate: '2026-05-08', eps: '10.0', sales: '100', operatingProfit: '10', netProfit: '5' }] }) // financial summary
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', rightsDate: '2026-08-20' }] }) // next rights date
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10' }] }) // margin balance presence
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '1234', rightsDate: '2026-03-30', totalAmount: 680, days: 2, avgRate: 0.4 }],
+    }); // gyakuhibu actual history
+  mockFetch.mockResolvedValue({
+    ok: true,
+    json: async () => ({ data: [{ Date: '2026-08-21', HolDiv: '1' }, { Date: '2026-08-24', HolDiv: '1' }] }),
+  });
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '1234' } }));
+
+  expect((result as { statusCode: number }).statusCode).toBe(200);
+  const parsed = body(result) as {
+    basicInfo: { closePrice: number; per: number | null };
+    risk: { maxGyakuhibu: number };
+    rightsHistory: Array<{ rightsDate: string; totalAmount: number }>;
+  };
+  expect(parsed.basicInfo.closePrice).toBe(500);
+  expect(parsed.risk.maxGyakuhibu).toBeGreaterThan(0);
+  expect(parsed.rightsHistory).toEqual([{ rightsDate: '2026-03-30', totalAmount: 680, days: 2, avgRate: 0.4 }]);
+});
+
+test('GET /yutai/{ticker} returns 404 for a ticker not in the yutai master', async () => {
+  mockSend.mockResolvedValueOnce({ Item: undefined });
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '9999' } }));
+
+  expect((result as { statusCode: number }).statusCode).toBe(404);
+});
+
+test('GET /yutai/{ticker} returns rightsDate: null (not a missing key) and an all-null risk object when there is no upcoming rights date', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Item: { ticker: '1234', companyName: '○○HD', content: 'QUOカード', value: 1000, unitShares: 100 } }) // yutai master get
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500, volume: 10000 }] }) // latest price
+    .mockResolvedValueOnce({ Items: [] }) // financial summary: none yet
+    .mockResolvedValueOnce({ Items: [] }) // next rights date: none upcoming
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actual history: none
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '1234' } }));
+
+  expect((result as { statusCode: number }).statusCode).toBe(200);
+  // JSON.stringify drops keys whose value is `undefined`, so this only passes if the
+  // implementation coerces a missing rights date to `null` before returning.
+  const rawBody = (result as { body: string }).body;
+  expect(rawBody).toContain('"rightsDate":null');
+
+  const parsed = body(result) as {
+    rightsDate: string | null;
+    risk: { maxGyakuhibu: number | null; maxRate: number | null; days: number | null; riskStatus: string };
+  };
+  expect(parsed.rightsDate).toBeNull();
+  expect(parsed.risk).toEqual({ maxGyakuhibu: null, maxRate: null, days: null, riskStatus: 'na' });
+});

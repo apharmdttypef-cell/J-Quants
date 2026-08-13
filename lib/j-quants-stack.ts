@@ -313,6 +313,11 @@ function handler(event) {
       methods: [apigwv2.HttpMethod.GET],
       integration: referenceApiIntegration,
     });
+    this.api.addRoutes({
+      path: '/yutai/{ticker}',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: referenceApiIntegration,
+    });
 
     new cdk.CfnOutput(this, 'ApiEndpoint', { value: this.api.apiEndpoint });
     new cdk.CfnOutput(this, 'FrontendUrl', { value: `https://${this.distribution.distributionDomainName}` });
