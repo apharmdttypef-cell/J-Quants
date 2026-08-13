@@ -160,6 +160,7 @@ export class JQuantsStack extends cdk.Stack {
         TABLE_NAME: this.stockPricesTable.tableName,
         FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
         WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
@@ -167,6 +168,7 @@ export class JQuantsStack extends cdk.Stack {
     this.stockPricesTable.grantWriteData(batchFetchFn);
     this.financialSummaryTable.grantWriteData(batchFetchFn);
     this.watchlistTable.grantReadData(batchFetchFn);
+    this.yutaiMasterTable.grantReadData(batchFetchFn);
     this.apiKeySecret.grantRead(batchFetchFn);
 
     // J-Quants Freeプランは配信12週間遅延のため取得時刻はシビアでなくてよい。

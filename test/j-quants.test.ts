@@ -89,6 +89,7 @@ test('creates the batch fetch Lambda wired to all three tables and a daily sched
         TABLE_NAME: Match.anyValue(),
         FINANCIAL_TABLE_NAME: Match.anyValue(),
         WATCHLIST_TABLE_NAME: Match.anyValue(),
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         SECRET_ARN: Match.anyValue(),
       }),
     },

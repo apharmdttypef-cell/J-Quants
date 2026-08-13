@@ -5,6 +5,7 @@ import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dy
 const TABLE_NAME = process.env.TABLE_NAME!;
 const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
 const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
+const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '7');
@@ -66,15 +67,13 @@ async function getApiKey(): Promise<string> {
   return cachedApiKey;
 }
 
-// ウォッチリスト管理画面での追加/削除を次回実行から反映するため、
-// 銘柄リストは(env var固定ではなく)実行のたびにDynamoDBから読む。
-async function getWatchlistTickers(): Promise<string[]> {
+async function scanTickerColumn(tableName: string): Promise<string[]> {
   const tickers: string[] = [];
   let exclusiveStartKey: Record<string, unknown> | undefined;
 
   do {
     const result = await ddbDocClient.send(
-      new ScanCommand({ TableName: WATCHLIST_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
+      new ScanCommand({ TableName: tableName, ExclusiveStartKey: exclusiveStartKey }),
     );
     for (const item of result.Items ?? []) {
       if (typeof item.ticker === 'string') tickers.push(item.ticker);
@@ -83,6 +82,18 @@ async function getWatchlistTickers(): Promise<string[]> {
   } while (exclusiveStartKey);
 
   return tickers;
+}
+
+// ウォッチリスト管理画面での追加/削除、優待マスタへの投入(アプリ外)を次回実行
+// から反映するため、対象銘柄は(env var固定ではなく)実行のたびにDynamoDBから読む。
+// 優待クロス対象銘柄は必ずしも個人のウォッチリストに入っているとは限らないため、
+// 両テーブルの和集合(重複排除)を対象にする。
+async function getTargetTickers(): Promise<string[]> {
+  const [watchlistTickers, yutaiTickers] = await Promise.all([
+    scanTickerColumn(WATCHLIST_TABLE_NAME),
+    scanTickerColumn(YUTAI_MASTER_TABLE_NAME),
+  ]);
+  return [...new Set([...watchlistTickers, ...yutaiTickers])];
 }
 
 function formatDate(date: Date): string {
@@ -198,9 +209,9 @@ async function upsertFinancialSummaries(ticker: string, summaries: FinancialSumm
 }
 
 export const handler = async (): Promise<void> => {
-  const tickers = await getWatchlistTickers();
+  const tickers = await getTargetTickers();
   if (tickers.length === 0) {
-    console.warn('Watchlist is empty; nothing to fetch');
+    console.warn('No target tickers (watchlist and yutai master are both empty); nothing to fetch');
     return;
   }
 
