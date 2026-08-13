@@ -115,8 +115,8 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `DELETE /tickers/{ticker}` | ウォッチリストから削除(価格・財務の蓄積データ自体は残る) |
 | `GET /tickers/{ticker}/prices?range=12w` | 保存済みデータのうち直近12週間分(≈60営業日)の四本値・出来高。日付フィルタではなく最新N件取得なので、配信遅延で古い日付になっていても正しく返る |
 | `GET /tickers/{ticker}/summary` | 直近の決算サマリ。バッチが1度も取得していなければ404 |
-| `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待実施銘柄の一覧(各銘柄の「次回の権利日」で絞り込み)+ 前日終値・単元株数から算出したリスクバッジ(`safe`/`danger`/`na`。`na`は信用残データ無し=貸借銘柄でない場合)+ `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
-| `GET /yutai/{ticker}` | 優待マスタ情報 + 銘柄基本情報(前日終値・出来高・PER・決算サマリ主要項目)+ 逆日歩リスク計算結果(最高料率・最大逆日歩額・品貸日数、次回権利日ベース)+ `rightsHistory`(過去の権利日ごとの実績逆日歩、taisyaku.jp直近3年分) |
+| `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待実施銘柄の一覧(各銘柄の「次回の権利日」で絞り込み)+ 前日終値・単元株数から算出したリスクバッジ(`safe`/`danger`/`na`。`na`になるのは、信用残データ無し=貸借銘柄でない場合・次回の権利日が無い場合・前日終値がまだ記録されていない場合、のいずれか)+ `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
+| `GET /yutai/{ticker}` | 優待マスタ情報 + 銘柄基本情報(前日終値・出来高・PER・決算サマリ主要項目)+ 逆日歩リスク計算結果(最高料率・最大逆日歩額・品貸日数・`riskStatus`〔`safe`/`danger`/`na`、詳細画面のバッジ表示に使用〕、次回権利日ベース)+ `rightsHistory`(過去の権利日ごとの実績逆日歩、taisyaku.jp直近3年分) |
 | `GET /yutai/{ticker}/margin-trend` | 信用残(融資残・貸株残)の時系列。直近1年分(365件)固定 |
 
 書き込み系(POST/PUT/DELETE)は`/yutai`系には無い(読み取り専用画面のため)。CORSの`allowOrigins`はCloudFrontの配信ドメインと`http://localhost:5173`(ローカル開発用)のみ。
@@ -154,7 +154,7 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 | `/screening` | 簡易スクリーニング(騰落率ソート・出来高急増フィルタ) |
 | `/watchlist` | ウォッチリスト管理(銘柄コードで追加/削除) |
 | `/yutai` | 優待クロス スクリーニング一覧(読み取り専用)。権利日範囲(デフォルト当月1日〜末日)・キーワード・リスク判定で絞り込み、当月の権利付き最終日をバナー表示 |
-| `/yutai/:ticker` | 優待クロス詳細画面。銘柄基本情報 → 優待内容 → 逆日歩リスク計算(最大逆日歩にホバーすると実績逆日歩履歴のツールチップ) → 信用残トレンドグラフ → `/tickers/:ticker`への相互リンク、の順 |
+| `/yutai/:ticker` | 優待クロス詳細画面。ページ上部(タイトル横)に`/tickers/:ticker`への相互リンク → 銘柄基本情報 → 優待内容 → 逆日歩リスク計算(最大逆日歩にホバーすると実績逆日歩履歴のツールチップ) → 信用残トレンドグラフ、の順 |
 
 デザイン: 日本市場の慣例に合わせ**上昇=赤/下落=緑**(米国式とは逆)。数値は`JetBrains Mono`のtabular-numsで統一表示。
 
