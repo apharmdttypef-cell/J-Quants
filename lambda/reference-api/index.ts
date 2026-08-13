@@ -465,6 +465,30 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
   });
 }
 
+const MARGIN_TREND_RANGE_DAYS = 365;
+
+async function getMarginTrend(ticker: string): Promise<APIGatewayProxyResultV2> {
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: MARGIN_BALANCE_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      ScanIndexForward: false,
+      Limit: MARGIN_TREND_RANGE_DAYS,
+    }),
+  );
+
+  const points = (result.Items ?? [])
+    .map((item) => ({
+      date: item.date as string,
+      financingBalance: item.financingBalance,
+      lendingBalance: item.lendingBalance,
+    }))
+    .reverse();
+
+  return jsonResponse(200, { ticker, range: '1y', points });
+}
+
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
   const ticker = event.pathParameters?.ticker;
 
@@ -485,6 +509,8 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return listYutai(event.queryStringParameters ?? {});
     case 'GET /yutai/{ticker}':
       return ticker ? getYutaiDetail(ticker) : jsonResponse(400, { message: 'Missing ticker' });
+    case 'GET /yutai/{ticker}/margin-trend':
+      return ticker ? getMarginTrend(ticker) : jsonResponse(400, { message: 'Missing ticker' });
     default:
       return jsonResponse(404, { message: 'Not found' });
   }

@@ -345,3 +345,26 @@ test('GET /yutai/{ticker} returns rightsDate: null and companyName: null (not mi
   expect(parsed.companyName).toBeNull();
   expect(parsed.risk).toEqual({ maxGyakuhibu: null, maxRate: null, days: null, riskStatus: 'na' });
 });
+
+test('GET /yutai/{ticker}/margin-trend returns the balance time series in ascending date order', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [
+      { ticker: '1234', date: '2026-08-05', financingBalance: 100, lendingBalance: 200 },
+      { ticker: '1234', date: '2026-08-04', financingBalance: 90, lendingBalance: 180 },
+    ],
+  });
+
+  const result = await handler(
+    makeEvent('GET /yutai/{ticker}/margin-trend', { pathParameters: { ticker: '1234' } }),
+  );
+
+  expect((result as { statusCode: number }).statusCode).toBe(200);
+  expect(body(result)).toEqual({
+    ticker: '1234',
+    range: '1y',
+    points: [
+      { date: '2026-08-04', financingBalance: 90, lendingBalance: 180 },
+      { date: '2026-08-05', financingBalance: 100, lendingBalance: 200 },
+    ],
+  });
+});
