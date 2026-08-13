@@ -65,6 +65,10 @@ EventBridge(毎日)
 
 優待マスタ(`JQuantsYutaiMaster`)へのレコード追加・更新はアプリの外(別途スクリプト等でDynamoDBへ直接投入)で行われる前提。両バッチとも自分で「未取得のデータ」を検知して取得を始めるため、マスタへの書き込みタイミングとバッチの連携を意識する必要がない。
 
+### 既存`BatchFetchFunction`の変更
+
+詳細画面に前日終値・出来高・決算サマリを表示するため(下記「画面構成・遷移」参照)、既存`BatchFetchFunction`(`lambda/batch-fetch/index.ts`)の対象銘柄を「`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`」(重複排除)に拡張する。優待クロス対象銘柄は必ずしも個人のウォッチリストに入っているとは限らないため。`JQuantsStockPrices` / `JQuantsFinancialSummary`のスキーマ・既存`/tickers`系APIへの影響は無い(対象銘柄が増えるだけ)。
+
 ## データモデル(DynamoDB、新規4テーブル)
 
 | テーブル | キー | 属性 | 用途 |
@@ -123,7 +127,7 @@ EventBridge(毎日)
 | メソッド/パス | 内容 |
 |---|---|
 | `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 各銘柄の「次回の権利日」(`JQuantsYutaiRightsDate`で`rightsDate >= 今日`の最小値)が指定範囲に入るものを絞り込んだ一覧 + 各銘柄の最新信用残から算出したリスクバッジ(`safe` / `danger` / `対象外`) + `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
-| `GET /yutai/{ticker}` | 優待マスタ情報 + 次回権利日の最新信用残 + 逆日歩リスク計算結果(措置率・最大逆日歩額・日数、次回権利日の予測) + `rightsHistory`(過去の権利日ごとの実績逆日歩、`[{rightsDate, actualGyakuhibu, days, avgRate}]`。taisyaku.jp直近3年分の範囲内・年複数回ある銘柄は件数分すべて含む) |
+| `GET /yutai/{ticker}` | 優待マスタ情報 + **銘柄基本情報**(前日終値・出来高・PER・決算サマリ主要項目) + 次回権利日の最新信用残 + 逆日歩リスク計算結果(措置率・最大逆日歩額・日数、次回権利日の予測) + `rightsHistory`(過去の権利日ごとの実績逆日歩、`[{rightsDate, actualGyakuhibu, days, avgRate}]`。taisyaku.jp直近3年分の範囲内・年複数回ある銘柄は件数分すべて含む) |
 | `GET /yutai/{ticker}/margin-trend?range=1y` | 信用残(融資残・貸株残)の時系列。既存`?range=12w`パターンを踏襲し`1y`をデフォルト |
 
 書き込み系エンドポイント(POST/PUT/DELETE)は無い。読み取り専用。CORS・認証(`x-app-password`ヘッダー、Lambdaオーソライザー)は既存ルートと共通の設定をそのまま適用する。
@@ -132,7 +136,8 @@ EventBridge(毎日)
 
 - 新規 `/yutai`: 優待クロス スクリーニング一覧。検索条件フォーム(権利日範囲・キーワード・リスク判定)+コスト比較バッジ付き一覧。**読み取り専用**(登録・編集・削除の導線は無い)
   - 権利日範囲は開始日・終了日の日付入力2つで指定する(プリセットは設けない、個人アプリのためシンプルさを優先)。デフォルト値は**当月の1日〜末日**(画面を開いた時点の月)。当月の優待を確認する用途が主なため
-- 新規 `/yutai/:ticker`: 詳細画面。信用残トレンドグラフ+優待内容+既存`/tickers/:ticker`への相互リンク
+- 新規 `/yutai/:ticker`: 詳細画面。**銘柄基本情報**+優待内容+逆日歩リスク計算+信用残トレンドグラフ+既存`/tickers/:ticker`への相互リンク、の順で並ぶ
+  - 「銘柄基本情報」カードは優待内容・逆日歩リスク計算の**上に**配置する。前日終値(既存`JQuantsStockPrices`を流用、既存画面と同じ上昇=赤/下落=緑)、出来高、PER(前日終値 ÷ 直近EPSで計算)、決算サマリ主要項目(売上・営業利益・純利益・EPS、既存`JQuantsFinancialSummary`を流用)を表示する。新規のデータ取得は不要(上記「既存`BatchFetchFunction`の変更」で対象銘柄を拡張済みのため)
   - 「最大逆日歩」の数値にマウスホバーすると、`rightsHistory`を使ったツールチップが表示される。過去の権利日を新しい順に並べ、権利日ごとの**実績**逆日歩額を一覧表示する(年複数回の銘柄はその件数分並ぶ、直近3年分)。データが1件も無い場合(taisyaku.jp取得未完了・非貸借銘柄・3年より古いなど)はツールチップ自体を出さない
     - 実装メモ: 「逆日歩リスク計算」カードは角丸のため`overflow:hidden`。ツールチップを`position:absolute`にするとカードからはみ出た分が見切れるため、`position:fixed`でトリガー要素の位置を都度計算して表示する
 - グローバルナビに「優待クロス」リンクを追加し`/yutai`への入口とする
@@ -153,6 +158,7 @@ EventBridge(毎日)
 - taisyaku.jpのレスポンス(CSV)をパースして`JQuantsGyakuhibuActual`の形に変換する処理も純粋関数として切り出し、フォーマット変化に気付きやすいようユニットテストを書く
 - `MarginBalanceBatchFunction`はdata-sourceモジュールをモックしたLambda単体テスト(「バックフィル対象の自動検知」と「通常の日次差分取得」の両分岐を検証)。フェーズ1・フェーズ2いずれのdata-source実装も同じテストで検証できるようにする
 - `GyakuhibuHistoryBatchFunction`はtaisyaku.jp呼び出し部分をモックしたLambda単体テスト(「未取得権利日の自動検知」「3年より古い権利日のスキップ」を検証)
+- 既存`BatchFetchFunction`の対象銘柄拡張(ウォッチリスト∪優待マスタ、重複排除)は既存テストに銘柄集合のケースを追加して検証する
 - フロントは既存同様、自動テストなし・手動確認(既存4画面もフロントの自動テストは無いため踏襲)
 
 ## スコープ外(保留事項)
@@ -161,3 +167,5 @@ EventBridge(毎日)
 - J-Quants Standardプランへの実際のアップグレード作業とdata-sourceのフェーズ2差し替え実装(別スコープ)
 - taisyaku.jpの検索・CSV出力がURLパラメータ等で機械的に取得できるか(ヘッドレスブラウザが必要かどうか)の実装時検証。フォーム構造が想定と異なる場合は取得方式を見直す
 - taisyaku.jpのサイト構造変更・利用条件変更に対する耐性(個人利用規模のため、壊れた場合は都度手直しする方針でよしとする)
+- **配当金額・配当利回り**: J-Quantsの配当エンドポイント(`/fins/dividend`)は**Premiumプラン専用**(Standardでは取得不可)。今回はStandardプランへの課金を抑える方針のため対象外とする
+- **PBR・時価総額**: 計算に必要な発行済株式数・BPSを取得できるエンドポイントを確認できておらず、安易に出せないため対象外とする
