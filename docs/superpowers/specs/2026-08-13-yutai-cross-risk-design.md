@@ -73,6 +73,16 @@ EventBridge(毎日)
 
 「日数」は権利確定日〜受渡日をJ-Quantsの取引カレンダー(Freeプランで取得可、フェーズ1から本番API使用)から自動算出する。96ut.comは手入力だが、ここでは自動化する。
 
+### 当月の権利付き最終日表示
+
+権利確定日が月末の銘柄が多いため、「今月あと何日買付猶予があるか」がひと目でわかるよう、`/yutai`一覧の上部に当月の権利付き最終日をバナー表示する。
+
+```
+当月権利付き最終日 = 当月末の最終営業日 - 2営業日(受渡T+2、取引カレンダーから自動算出)
+```
+
+個別銘柄ごとの実際の権利日・最大逆日歩額は詳細画面の計算結果(上記)を優先する。このバナーは「多くの銘柄が月末権利確定である」という一般的な目安であり、個別銘柄の権利日とは独立して計算する。`GET /yutai`のレスポンスに`currentMonthLastTradableDate`として1回だけ含める(銘柄ごとに計算しない)。
+
 一覧のリスクバッジ判定:
 - 信用残データが存在しない(貸借銘柄でない): `対象外`
 - 優待価値 > 最大逆日歩コスト: `安全`
@@ -92,7 +102,7 @@ EventBridge(毎日)
 
 | メソッド/パス | 内容 |
 |---|---|
-| `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待マスタを条件で絞り込んだ一覧 + 各銘柄の最新信用残から算出したリスクバッジ(`safe` / `danger` / `対象外`)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
+| `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待マスタを条件で絞り込んだ一覧 + 各銘柄の最新信用残から算出したリスクバッジ(`safe` / `danger` / `対象外`) + `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
 | `GET /yutai/{ticker}` | 優待マスタ情報 + 最新信用残 + 逆日歩リスク計算結果(措置率・最大逆日歩額・日数) |
 | `GET /yutai/{ticker}/margin-trend?range=1y` | 信用残(融資残・貸株残)の時系列。既存`?range=12w`パターンを踏襲し`1y`をデフォルト |
 
