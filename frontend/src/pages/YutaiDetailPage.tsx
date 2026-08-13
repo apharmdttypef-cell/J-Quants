@@ -140,6 +140,9 @@ export function YutaiDetailPage() {
       </div>
 
       <div className="section-heading">信用残トレンド(過去1年)</div>
+      <div className="disclaimer-banner">
+        ⚠️ 現在、信用残・貸借判定はダミーデータです(J-Quants Standardプラン移行後に実データに切り替わります)
+      </div>
       {trendState.loading && <StatusNote kind="loading" message="読み込み中…" />}
       {trendState.error && (
         <StatusNote kind="error" message={`取得に失敗しました: ${trendState.error.message}`} />
