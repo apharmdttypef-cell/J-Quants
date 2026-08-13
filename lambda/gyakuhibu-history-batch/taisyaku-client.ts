@@ -17,7 +17,13 @@ export function extractCsrfToken(html: string): string {
 // 品薄が発生しなかった日)や空でなければ、その値と「品貸日数」列から実績を組み立てる。
 // taisyaku.jpの品貸料率・最高料率は実データで検証済みの通り1株あたり・品貸日数分の金額
 // なので、unitShares(単元株数)を掛けるだけでよい(1,000株換算は不要)。
-export function parseTaisyakuCsv(csvText: string, rightsDate: string, unitShares: number): GyakuhibuActualPoint | undefined {
+// tickerはログ用(省略可)。
+export function parseTaisyakuCsv(
+  csvText: string,
+  rightsDate: string,
+  unitShares: number,
+  ticker?: string,
+): GyakuhibuActualPoint | undefined {
   const lines = csvText.trim().split('\n');
   const header = lines[0].split(',').map((h) => h.trim());
   const dateIdx = header.findIndex((h) => h.includes('申込日'));
@@ -29,9 +35,27 @@ export function parseTaisyakuCsv(csvText: string, rightsDate: string, unitShares
     throw new Error('Unexpected taisyaku.jp CSV header shape (expected 申込日/品貸料率/品貸日数 columns)');
   }
 
+  // CSV側の日付フォーマットは未確認("YYYY / MM / DD"の可能性が高いが、それ以外も
+  // ありうる)。少なくとも内部形式("YYYY-MM-DD")とは異なるため、数字以外を除去した
+  // 上で比較する(例: "2026-08-13" と "2026 / 08 / 13" はどちらも"20260813"になる)。
+  const normalizedRightsDate = rightsDate.replace(/\D/g, '');
+
   for (const line of lines.slice(1)) {
+    if (!line.trim()) continue; // 末尾の空行などをスキップ
+
     const cols = line.split(',').map((c) => c.trim());
-    if (cols[dateIdx] !== rightsDate) continue;
+    // 融資残高・貸株残高等の株数列はカンマ区切りの桁区切り("1,234,567")で入っている
+    // ことがあり、素朴なsplit(',')だと列がずれる。フルRFC4180パーサまでは実装せず、
+    // 列数が壊れていないかだけ確認して、ずれていれば読み違えを防ぐためスキップする。
+    if (cols.length !== header.length) {
+      console.warn(
+        `taisyaku.jp CSV row column count mismatch for ${ticker ?? '(unknown ticker)'} ${rightsDate} ` +
+          `(expected ${header.length} columns, got ${cols.length}); skipping row: ${line}`,
+      );
+      continue;
+    }
+
+    if (cols[dateIdx].replace(/\D/g, '') !== normalizedRightsDate) continue;
 
     const rateRaw = cols[rateIdx];
     if (!rateRaw || rateRaw === '-') return undefined; // その日は実際の品薄(逆日歩)が発生しなかった
@@ -47,6 +71,40 @@ export function parseTaisyakuCsv(csvText: string, rightsDate: string, unitShares
 }
 
 const TAISYAKU_BASE_URL = 'https://www.taisyaku.jp';
+// 一部サイトが素のundiciリクエストを弾くことがあるため、通常のブラウザらしいUser-Agentを付与する。
+const USER_AGENT = 'Mozilla/5.0 (compatible; JQuantsYutaiBot/1.0)';
+
+// ヘッダー行にこの文字列のどちらかが含まれていれば、そのエンコーディングでの
+// デコードが正しかったとみなす(逆に言えば、含まれなければセッション切れの
+// HTMLログインページ等が返ってきている可能性が高い)。
+const CSV_HEADER_MARKERS = ['申込日', '品貸料率'];
+
+function looksLikeExpectedCsvHeader(decodedText: string): boolean {
+  const headerLine = decodedText.split('\n', 1)[0] ?? '';
+  return CSV_HEADER_MARKERS.some((marker) => headerLine.includes(marker));
+}
+
+// 日本の金融系サイトはExcel互換のためShift_JISでCSVを配信することが多い一方、
+// fetchのresponse.text()は常にUTF-8としてデコードしてしまう(Fetch仕様)。
+// そのためarrayBuffer()で取得し、まずShift_JISでデコードを試み、ヘッダー行に
+// 想定の列名が見つからなければUTF-8にフォールバックする。どちらでも見つからない
+// 場合は、セッション切れ等の診断がCloudWatchログからできるようcontent-typeと
+// 先頭200文字を警告ログに残す(docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md
+// の「まだ確認できていないこと」参照)。
+function decodeCsvResponseBody(buffer: ArrayBuffer, contentType: string | null): string {
+  const shiftJisText = new TextDecoder('shift_jis').decode(buffer);
+  if (looksLikeExpectedCsvHeader(shiftJisText)) return shiftJisText;
+
+  const utf8Text = new TextDecoder('utf-8').decode(buffer);
+  if (looksLikeExpectedCsvHeader(utf8Text)) return utf8Text;
+
+  console.warn(
+    `taisyaku.jp CSV response did not contain an expected header marker (${CSV_HEADER_MARKERS.join('/')}) ` +
+      `in either Shift_JIS or UTF-8 decoding. content-type: ${contentType ?? '(none)'}. ` +
+      `First 200 chars (UTF-8 decode): ${utf8Text.slice(0, 200)}`,
+  );
+  return utf8Text;
+}
 
 // "YYYY-MM-DD" → "YYYY / MM / DD"(taisyaku.jpのフォーム入力形式)
 function toSlashDate(isoDate: string): string {
@@ -62,7 +120,7 @@ function cookieHeaderFrom(setCookies: string[]): string {
 // 取得できない(docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md 参照)。
 export async function fetchTaisyakuCsv(ticker: string, from: string, to: string): Promise<string> {
   const detailUrl = `${TAISYAKU_BASE_URL}/app/stock/detail/${ticker}-01`;
-  const pageResponse = await fetch(detailUrl);
+  const pageResponse = await fetch(detailUrl, { headers: { 'User-Agent': USER_AGENT } });
   if (!pageResponse.ok) {
     throw new Error(`taisyaku.jp error ${pageResponse.status} fetching ${detailUrl}`);
   }
@@ -85,7 +143,7 @@ export async function fetchTaisyakuCsv(ticker: string, from: string, to: string)
   });
   const searchResponse = await fetch(searchUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie, 'User-Agent': USER_AGENT },
     body: searchBody.toString(),
   });
   if (!searchResponse.ok) {
@@ -94,9 +152,10 @@ export async function fetchTaisyakuCsv(ticker: string, from: string, to: string)
   await searchResponse.text();
 
   const csvUrl = `${TAISYAKU_BASE_URL}/app/stock/detail/${ticker}/csv`;
-  const csvResponse = await fetch(csvUrl, { headers: { Cookie: cookie } });
+  const csvResponse = await fetch(csvUrl, { headers: { Cookie: cookie, 'User-Agent': USER_AGENT } });
   if (!csvResponse.ok) {
     throw new Error(`taisyaku.jp error ${csvResponse.status} fetching ${csvUrl}`);
   }
-  return csvResponse.text();
+  const buffer = await csvResponse.arrayBuffer();
+  return decodeCsvResponseBody(buffer, csvResponse.headers.get('content-type'));
 }
