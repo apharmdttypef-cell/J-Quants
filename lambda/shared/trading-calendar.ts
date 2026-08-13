@@ -33,17 +33,23 @@ export async function fetchTradingCalendar(
   return body.data.map((d) => ({ date: d.Date, holDiv: d.HolDiv }));
 }
 
+// dateのn営業日後を返す(n=1なら翌営業日、n=2はsettlementDateが計算するT+2と同じ)。
+// calendarにはdateより後の日を十分な件数(最低n営業日分)含めておくこと。
+export function businessDaysAfter(calendar: CalendarDay[], date: string, n: number): string {
+  const upcoming = calendar
+    .filter((d) => d.date > date && isTradingDay(d))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (upcoming.length < n) {
+    throw new Error(`Not enough trading calendar data after ${date} to compute T+${n}`);
+  }
+  return upcoming[n - 1].date;
+}
+
 // tradeDateのT+2営業日(受渡日)を返す。calendarにはtradeDateより後の日を
 // 十分な件数(最低2営業日分)含めておくこと。
 export function settlementDate(calendar: CalendarDay[], tradeDate: string): string {
-  const upcoming = calendar
-    .filter((d) => d.date > tradeDate && isTradingDay(d))
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  if (upcoming.length < 2) {
-    throw new Error(`Not enough trading calendar data after ${tradeDate} to compute T+2 settlement`);
-  }
-  return upcoming[1].date;
+  return businessDaysAfter(calendar, tradeDate, 2);
 }
 
 export function calendarDaysBetween(from: string, to: string): number {
