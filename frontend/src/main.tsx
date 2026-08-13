@@ -8,6 +8,7 @@ import { TickerListPage } from './pages/TickerListPage';
 import { TickerDetailPage } from './pages/TickerDetailPage';
 import { ScreeningPage } from './pages/ScreeningPage';
 import { WatchlistPage } from './pages/WatchlistPage';
+import { YutaiListPage } from './pages/YutaiListPage';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -19,6 +20,7 @@ createRoot(document.getElementById('root')!).render(
             <Route path="tickers/:ticker" element={<TickerDetailPage />} />
             <Route path="screening" element={<ScreeningPage />} />
             <Route path="watchlist" element={<WatchlistPage />} />
+            <Route path="yutai" element={<YutaiListPage />} />
           </Route>
         </Routes>
       </BrowserRouter>
