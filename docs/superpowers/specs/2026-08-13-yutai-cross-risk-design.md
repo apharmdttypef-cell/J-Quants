@@ -12,14 +12,18 @@
 
 - 既存4画面(`/`, `/tickers/:ticker`, `/screening`, `/watchlist`)には変更を加えない。
 - 優待実施銘柄を対象とした新規スクリーニング画面(`/yutai`系)を追加する。
-- 優待マスタ(銘柄・優待内容・権利日等)の収集方法(手動 or スクレイピング)は本スコープでは決定しない。登録はユーザーが手動でモーダルから行う前提とし、DBスキーマと計算ロジックを先に固める。
+- `/yutai`は**読み取り専用の検索・絞り込み画面**とする。優待マスタは常に全銘柄が投入済みの状態を前提とし、アプリのUIから新規登録・編集・削除は行わない(下記「優待マスタのデータ投入(スコープ外)」参照)。
 - J-Quants・TDnet・四季報等に優待データを直接取得できる正規APIが存在しないことは確認済み。
+
+### 優待マスタのデータ投入(スコープ外)
+
+優待マスタ(銘柄・優待内容・権利日等)への新規追加・内容更新・削除は、本アプリのUIではなく**別途の手段(手動スクリプト等でDynamoDBへ直接投入)**で行う。収集方法(手動 or スクレイピング)自体は本スコープでは決定しない。アプリ側はマスタが常に最新の状態で存在していることを前提にした検索・計算・表示のみを担う。TDnetの適時開示を監視して新規優待銘柄や内容変更を検知する機能(旧設計にあった`TdnetMonitorFunction`・`pendingReview`)は、検知結果を反映する編集UIが存在しなくなったため本機能のスコープから外す。
 
 ## フェーズ分け方針(ダミーAPI→本番API)
 
 J-Quants Standardプランへのアップグレードは月額課金が発生するため、**画面と画面遷移の動作確認が終わるまでアップグレードを遅らせる**。
 
-- **フェーズ1(本設計書のスコープ)**: AWS上に実際にデプロイし、DynamoDB・API Gateway・Lambda・フロントは本番と同一構成で動かす。ただし信用残データの取得元(`mkt-margin-int` / `mkt-margin-alert`、要Standardプラン)とTDnetの適時開示監視だけを、ダミーデータを生成する実装に差し替える。
+- **フェーズ1(本設計書のスコープ)**: AWS上に実際にデプロイし、DynamoDB・API Gateway・Lambda・フロントは本番と同一構成で動かす。ただし信用残データの取得元(`mkt-margin-int` / `mkt-margin-alert`、要Standardプラン)だけを、ダミーデータを生成する実装に差し替える。
 - **フェーズ2(別スコープ、本設計書には含めない)**: J-Quants Standardプランへアップグレードした後、ダミー実装を本番のJ-Quants API呼び出しに差し替える。
 
 この分割が成立するのは、ダミー/本番の差分を「データソースモジュール」に閉じ込め、DynamoDBスキーマ・API・逆日歩計算ロジック・フロントは一切変更不要にする設計にするため。取引カレンダー(権利確定日→受渡日の日数算出)はFreeプランでも取得可能なため、フェーズ1から本番APIをそのまま使う。
@@ -29,9 +33,6 @@ J-Quants Standardプランへのアップグレードは月額課金が発生す
 - `lambda/margin-batch/data-source.ts`: `fetchWeeklyBalances(ticker, from, to)` / `fetchDailyAlertBalances(tickers, date)` を export。呼び出し元(`MarginBalanceBatchFunction`)はこの関数がダミーか本番かを意識しない。
   - フェーズ1(ダミー): ticker+日付から決定的に生成した擬似乱数(単純なハッシュシード)でランダムウォーク型の融資残・貸株残を生成する。日次バッチが同じ日付に対して毎回同じ値を返す必要がある(実行のたびに値が変わるとトレンドグラフが毎日ジャンプしてしまうため)。
   - フェーズ2(本番): 同じ関数シグネチャのまま中身をJ-Quants `mkt-margin-int` / `mkt-margin-alert` 呼び出しに差し替える。
-- `lambda/tdnet-monitor/data-source.ts`: `fetchDisclosures(date)` を export。
-  - フェーズ1(ダミー): 常に空を返すのではなく、UIの`pendingReview`バッジ状態を確認できるよう、ticker+日付から決定的に約15%の確率で該当銘柄を「開示あり」として返す(みなしの優待関連キーワードマッチ扱い)。
-  - フェーズ2(本番): 同じ関数シグネチャのままTDnet `td-list` 呼び出しに差し替える。
 
 ## アーキテクチャ概要
 
@@ -40,26 +41,24 @@ J-Quants Standardプランへのアップグレードは月額課金が発生す
 ```
 EventBridge(毎日)
   → MarginBalanceBatchFunction(Lambda, 新規)
-      - JQuantsYutaiMasterから登録銘柄を取得
+      - JQuantsYutaiMasterの全銘柄を取得
+      - JQuantsMarginBalanceが1件も無い銘柄 → 1〜2年分バックフィルモードで取得
+      - 既存データがある銘柄 → 通常の日次差分取得
       - data-source経由で信用残(週次mkt-margin-int + 規制銘柄日次mkt-margin-alert相当)を取得
         (5req/分のレート制限想定で13秒間隔。本番切替後に有効)
       → JQuantsMarginBalance に upsert
 
-EventBridge(毎日)
-  → TdnetMonitorFunction(Lambda, 新規)
-      - data-source経由で前日分の適時開示相当を取得
-      - 登録銘柄×優待関連キーワードでマッチしたら pendingReview=true
-      → JQuantsYutaiMaster を更新
-
 ブラウザ
-  → 既存CloudFront/S3/API Gateway経由で /yutai 系エンドポイントを追加
+  → 既存CloudFront/S3/API Gateway経由で /yutai 系エンドポイントを追加(読み取り専用)
 ```
+
+優待マスタ(`JQuantsYutaiMaster`)へのレコード追加・更新はアプリの外(別途スクリプト等でDynamoDBへ直接投入)で行われる前提。`MarginBalanceBatchFunction`は自分でその追加を検知してバックフィルを自動的に始めるため、マスタへの書き込みタイミングとバッチの連携を意識する必要がない。
 
 ## データモデル(DynamoDB、新規2テーブル)
 
 | テーブル | キー | 属性 | 用途 |
 |---|---|---|---|
-| `JQuantsYutaiMaster` | PK `ticker` | `companyName`, `content`(優待内容), `value`(優待価値・円), `rightsDate`(権利日), `unitShares`(単元株数), `pendingReview`(bool) | 優待マスタ |
+| `JQuantsYutaiMaster` | PK `ticker` | `companyName`, `content`(優待内容), `value`(優待価値・円), `rightsDate`(権利日), `unitShares`(単元株数) | 優待マスタ。書き込みはアプリ外で行う(読み取り専用) |
 | `JQuantsMarginBalance` | PK `ticker` / SK `date` | `financingBalance`(融資残), `lendingBalance`(貸株残), `source`(`weekly` \| `daily-alert`) | 信用残時系列。`daily-alert`が存在する日はそちらを優先して逆日歩計算に使う |
 
 既存3テーブル同様 `RemovalPolicy.RETAIN` + PITR、オンデマンド課金。
@@ -81,76 +80,45 @@ EventBridge(毎日)
 
 この計算は純粋関数として切り出し、データソースがダミーか本番かに関わらず同一のロジックが動く。
 
-## Lambda(新規2本)
+## Lambda(新規1本)
 
 | 関数 | トリガー | 役割 |
 |---|---|---|
-| `MarginBalanceBatchFunction` | EventBridge毎日 | 登録銘柄の信用残を取得・upsert。登録直後は`POST /yutai`から`InvocationType: Event`(非同期)で1〜2年分バックフィルモードとしてもキックされる。登録銘柄数が増えるとバッチ時間が線形に伸びる制約あり(既存`BatchFetchFunction`同様13秒間隔想定) |
-| `TdnetMonitorFunction` | EventBridge毎日 | 前日分の適時開示相当を取得し、登録銘柄×優待関連キーワードでマッチしたら`pendingReview=true`。PDF内容の自動解析はしない(人間が確認する前提) |
+| `MarginBalanceBatchFunction` | EventBridge毎日 | `JQuantsYutaiMaster`の全銘柄について信用残を取得・upsert。`JQuantsMarginBalance`が1件も無い銘柄は1〜2年分バックフィルモード、既存データがある銘柄は通常の日次差分取得として扱う。銘柄数が増えるとバッチ時間が線形に伸びる制約あり(既存`BatchFetchFunction`同様13秒間隔想定) |
 
-### バックフィルの非同期実行
-
-既存`BatchFetchFunction`はレート制限待ちのためLambdaタイムアウト14分(`lib/j-quants-stack.ts:108`)。`POST /yutai`で1〜2年分をその場で取得しようとするとAPI Gatewayの同期タイムアウト(最大29秒)を超えるため同期処理は不可能。
-
-`POST /yutai`ハンドラは優待マスタのレコード保存のみ同期的に行いレスポンスを即座に返す。バックフィル自体は`MarginBalanceBatchFunction`を`InvocationType: Event`で非同期キックし、引数で「新規登録直後の1〜2年バックフィル」か「通常の日次差分取得」かを分岐させる。フロントは`JQuantsMarginBalance`にレコードが無い状態を「取得中」として表示する(専用の進捗フラグは持たない)。
+新規登録・内容更新はアプリ外(DynamoDB直接投入)で行われるため、登録操作をトリガーに何かを非同期キックするAPIハンドラは不要。日次バッチが「バックフィル未実施の銘柄」を毎回自動検知することで代替する。
 
 ## API設計
 
 | メソッド/パス | 内容 |
 |---|---|
-| `GET /yutai` | 優待マスタ一覧 + 各銘柄の最新信用残から算出したリスクバッジ(`safe` / `danger` / `対象外`) |
-| `POST /yutai` | 優待銘柄を新規登録(ticker, 優待内容, 優待価値, 権利日, 単元株数)。登録後、信用残の過去1〜2年バックフィルを非同期でキック |
-| `PUT /yutai/{ticker}` | 優待マスタの内容を編集。保存時に`pendingReview`をfalseに戻す |
-| `DELETE /yutai/{ticker}` | 優待マスタから削除。既存`/tickers`同様、蓄積済み`JQuantsMarginBalance`データ自体は残す |
+| `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待マスタを条件で絞り込んだ一覧 + 各銘柄の最新信用残から算出したリスクバッジ(`safe` / `danger` / `対象外`)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
 | `GET /yutai/{ticker}` | 優待マスタ情報 + 最新信用残 + 逆日歩リスク計算結果(措置率・最大逆日歩額・日数) |
-| `GET /yutai/{ticker}/margin-trend?range=1y` | 信用残(融資残・貸株残)の時系列。既存`?range=12w`パターンを踏襲し`1y`をデフォルト(バックフィル期間と一致) |
+| `GET /yutai/{ticker}/margin-trend?range=1y` | 信用残(融資残・貸株残)の時系列。既存`?range=12w`パターンを踏襲し`1y`をデフォルト |
 
-CORS・認証(`x-app-password`ヘッダー、Lambdaオーソライザー)は既存ルートと共通の設定をそのまま適用する。
+書き込み系エンドポイント(POST/PUT/DELETE)は無い。読み取り専用。CORS・認証(`x-app-password`ヘッダー、Lambdaオーソライザー)は既存ルートと共通の設定をそのまま適用する。
 
 ## 画面構成・遷移
 
-- 新規 `/yutai`: 優待クロス スクリーニング一覧。権利日フィルタ+コスト比較バッジ。`pendingReview=true`の銘柄には確認要のバッジを表示し、クリックで編集モーダルを開く
+- 新規 `/yutai`: 優待クロス スクリーニング一覧。検索条件フォーム(権利日範囲・キーワード・リスク判定)+コスト比較バッジ付き一覧。**読み取り専用**(登録・編集・削除の導線は無い)
 - 新規 `/yutai/:ticker`: 詳細画面。信用残トレンドグラフ+優待内容+既存`/tickers/:ticker`への相互リンク
-- 優待マスタの登録・編集は**モーダル方式**(専用ルートに切らない。既存`/watchlist`のインライン編集パターンを踏襲)
 - グローバルナビに「優待クロス」リンクを追加し`/yutai`への入口とする
-
-### 優待マスタ登録/編集モーダル
-
-`/yutai`画面右上の「+ 銘柄を登録」ボタン、または一覧行の「編集」から開く。
-
-```
-┌─ 優待銘柄を登録 ──────────────────────── ✕ ┐
-│  銘柄コード *        [ 1234        ]        │
-│  会社名(自動取得)     ○○ホールディングス     │
-│                       (/equities/masterで1回引当て)
-│  優待内容 *           [ QUOカード1000円分  ] │
-│  優待価値(円) *       [ 1000         ]      │
-│  権利日 *              [ 2026-09-30 📅 ]     │
-│  単元株数 *            [ 100          ]      │
-│  ─────────────────────────────────────      │
-│  [ 削除 ](編集時のみ)      [キャンセル][登録]│
-└──────────────────────────────────────────────┘
-```
-
-- 新規登録: 「登録」→`POST /yutai`→モーダルを閉じ一覧を再取得(バックフィルは裏で非同期進行、`JQuantsMarginBalance`未取得の間は該当行を「取得中」表示)
-- 編集: ボタンが「保存」に変わり`PUT /yutai/{ticker}`。「削除」は確認ダイアログを挟んで`DELETE /yutai/{ticker}`
-- バリデーションは必須項目(*)のみ。優待価値・単元株数は正の整数。サーバー側エラーは既存`/watchlist`同様モーダル内にインライン表示
+- `JQuantsMarginBalance`がまだ無い銘柄(バックフィル未実施)は一覧・詳細とも「信用残データ取得中」の表示にする
 
 ## エラーハンドリング方針
 
 - **貸借銘柄でない場合**(信用取引データが存在しない): リスクバッジを`対象外`とし、逆日歩計算自体をスキップする
-- **TDnet取得失敗時**: ログのみに残し`pendingReview`は更新しない。翌日のバッチで再試行される想定のため通知等は行わない
-- **バックフィル失敗時**(`MarginBalanceBatchFunction`初回実行): 途中まで保存されたデータはそのまま残し、以降は通常の日次差分取得に合流させる(全体ロールバックはしない)
+- **バックフィル失敗時**(`MarginBalanceBatchFunction`が新規銘柄を初めて処理する際): 途中まで保存されたデータはそのまま残し、翌日以降のバッチで自動的に再試行される(全体ロールバックはしない。バックフィル未完了かどうかは`JQuantsMarginBalance`の有無だけで判定するため、専用のリトライ管理は不要)
 - **J-Quants APIレート制限**(フェーズ2で有効化): 既存`BatchFetchFunction`と同じく13秒間隔待機で基本発生しない設計。万一発生した場合は当該銘柄をスキップしログに記録する(既存踏襲、新規の再試行機構は作らない)
 
 ## テスト方針
 
 - 既存同様Jestでスタック合成テスト(新規テーブル・Lambda・APIルートが定義通り生成されるか)
 - 逆日歩計算ロジック(措置率表参照・4倍ルール・日数算出)は純粋関数として切り出し、境界値を含むユニットテストを重点的に書く
-- `MarginBalanceBatchFunction` / `TdnetMonitorFunction`はdata-sourceモジュールをモックしたLambda単体テスト。フェーズ1・フェーズ2いずれのdata-source実装も同じテストで検証できるようにする
+- `MarginBalanceBatchFunction`はdata-sourceモジュールをモックしたLambda単体テスト(「バックフィル対象の自動検知」と「通常の日次差分取得」の両分岐を検証)。フェーズ1・フェーズ2いずれのdata-source実装も同じテストで検証できるようにする
 - フロントは既存同様、自動テストなし・手動確認(既存4画面もフロントの自動テストは無いため踏襲)
 
 ## スコープ外(保留事項)
 
-- 優待マスタへの銘柄登録手段(手動入力のみ確定。TDnet等からの自動候補提示は本設計に含まない)
+- 優待マスタへのデータ投入手段(別途スクリプト等でDynamoDB直接投入する想定のみ確定。収集方法自体・自動候補提示は本設計に含まない)
 - J-Quants Standardプランへの実際のアップグレード作業とdata-sourceのフェーズ2差し替え実装(別スコープ)
