@@ -18,6 +18,10 @@ export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
   public readonly financialSummaryTable: dynamodb.Table;
   public readonly watchlistTable: dynamodb.Table;
+  public readonly yutaiMasterTable: dynamodb.Table;
+  public readonly yutaiRightsDateTable: dynamodb.Table;
+  public readonly marginBalanceTable: dynamodb.Table;
+  public readonly gyakuhibuActualTable: dynamodb.Table;
   public readonly apiKeySecret: secretsmanager.Secret;
   public readonly api: apigwv2.HttpApi;
   public readonly frontendBucket: s3.Bucket;
@@ -54,6 +58,49 @@ export class JQuantsStack extends cdk.Stack {
     this.watchlistTable = new dynamodb.Table(this, 'JQuantsWatchlistTable', {
       tableName: 'JQuantsWatchlist',
       partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // 優待マスタ本体(権利日以外)。書き込みはアプリ外(別途スクリプト等でDynamoDB
+    // へ直接投入)で行う前提。アプリのUIからは読み取り専用。
+    this.yutaiMasterTable = new dynamodb.Table(this, 'JQuantsYutaiMasterTable', {
+      tableName: 'JQuantsYutaiMaster',
+      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // 銘柄ごとの権利日。年複数回のケースに対応するため1行1権利日で
+    // 過去分・将来分を問わずアプリ外から個別投入する。
+    this.yutaiRightsDateTable = new dynamodb.Table(this, 'JQuantsYutaiRightsDateTable', {
+      tableName: 'JQuantsYutaiRightsDate',
+      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'rightsDate', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // 信用残(融資残・貸株残)の時系列。トレンドグラフ表示と貸借銘柄判定に使う
+    // (逆日歩の見積り計算そのものには使わない。最高料率は株価×単元株数で決まるため)。
+    this.marginBalanceTable = new dynamodb.Table(this, 'JQuantsMarginBalanceTable', {
+      tableName: 'JQuantsMarginBalance',
+      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'date', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // taisyaku.jp(日本証券金融公式サイト)から取得した、過去の権利日ごとの
+    // 実績逆日歩。直近3年分のみ存在しうる(それより古いデータはtaisyaku.jp非公開)。
+    this.gyakuhibuActualTable = new dynamodb.Table(this, 'JQuantsGyakuhibuActualTable', {
+      tableName: 'JQuantsGyakuhibuActual',
+      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'rightsDate', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,

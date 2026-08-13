@@ -150,6 +150,52 @@ test('protects the frontend with a CloudFront Function performing Basic auth', (
   });
 });
 
+test('creates the JQuantsYutaiMaster table with ticker key and RETAIN policy', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsYutaiMaster',
+    KeySchema: [{ AttributeName: 'ticker', KeyType: 'HASH' }],
+    BillingMode: 'PAY_PER_REQUEST',
+  });
+});
+
+test('creates the JQuantsYutaiRightsDate table with ticker/rightsDate key', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsYutaiRightsDate',
+    KeySchema: [
+      { AttributeName: 'ticker', KeyType: 'HASH' },
+      { AttributeName: 'rightsDate', KeyType: 'RANGE' },
+    ],
+  });
+});
+
+test('creates the JQuantsMarginBalance table with ticker/date key', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsMarginBalance',
+    KeySchema: [
+      { AttributeName: 'ticker', KeyType: 'HASH' },
+      { AttributeName: 'date', KeyType: 'RANGE' },
+    ],
+  });
+});
+
+test('creates the JQuantsGyakuhibuActual table with ticker/rightsDate key', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsGyakuhibuActual',
+    KeySchema: [
+      { AttributeName: 'ticker', KeyType: 'HASH' },
+      { AttributeName: 'rightsDate', KeyType: 'RANGE' },
+    ],
+  });
+});
+
 test('throws a clear error when APP_PASSWORD is not set', () => {
   const original = process.env.APP_PASSWORD;
   delete process.env.APP_PASSWORD;
