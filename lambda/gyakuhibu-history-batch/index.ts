@@ -53,12 +53,23 @@ async function getUnitShares(ticker: string): Promise<number | undefined> {
   return typeof result.Item?.unitShares === 'number' ? result.Item.unitShares : undefined;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// taisyaku.jpへの連続リクエストの間隔。公開されたレート制限は無いが、個人利用の
+// バッチとして無配慮に連打しないための最低限の間隔(数百ms〜数秒程度あれば十分)。
+const BETWEEN_REQUESTS_DELAY_MS = Number(process.env.TAISYAKU_REQUEST_INTERVAL_MS ?? '1000');
+
 export const handler = async (): Promise<void> => {
   const rows = await listPastRightsDates();
 
   for (const { ticker, rightsDate } of rows) {
     if (!isWithinPublishedRange(rightsDate)) continue;
 
+    // taisyaku.jpへの実リクエストを行った場合だけループ末尾で待機する
+    // (alreadyFetched/getUnitSharesでスキップした行まで待つのは無駄なため)。
+    let attemptedFetch = false;
     try {
       if (await alreadyFetched(ticker, rightsDate)) continue;
 
@@ -68,10 +79,20 @@ export const handler = async (): Promise<void> => {
         continue;
       }
 
+      attemptedFetch = true;
       const csv = await fetchTaisyakuCsv(ticker, rightsDate, rightsDate);
-      const point = parseTaisyakuCsv(csv, rightsDate, unitShares);
+      const point = parseTaisyakuCsv(csv, rightsDate, unitShares, ticker);
       if (!point) {
-        console.log(`${ticker}: no lending fee on ${rightsDate} (not a margin-shortage event)`);
+        // 品貸料が発生しなかった(または対象日がCSVに含まれていなかった)場合でも、
+        // 「確認済みで実績なし」の行を書いておかないとalreadyFetchedが常にfalseになり、
+        // 毎日この権利日を再スクレイピングし続けてしまう(Fix 2)。
+        console.log(`${ticker}: no lending fee on ${rightsDate} (not a margin-shortage event); recording as checked`);
+        await ddbDocClient.send(
+          new PutCommand({
+            TableName: GYAKUHIBU_ACTUAL_TABLE_NAME,
+            Item: { ticker, rightsDate, totalAmount: 0, days: 0, avgRate: 0, noGyakuhibu: true },
+          }),
+        );
         continue;
       }
 
@@ -84,6 +105,10 @@ export const handler = async (): Promise<void> => {
       console.log(`${ticker}: upserted actual gyakuhibu for ${rightsDate}`);
     } catch (error) {
       console.error(`${ticker}: failed to fetch/upsert actual gyakuhibu for ${rightsDate}`, error);
+    } finally {
+      // 権利日1件ごとにtaisyaku.jpへ最大3リクエスト飛ばすため、次の権利日に移る前に
+      // 一呼吸置く(実際にリクエストした場合のみ。成功・失敗いずれでも待つ)。
+      if (attemptedFetch) await sleep(BETWEEN_REQUESTS_DELAY_MS);
     }
   }
 };

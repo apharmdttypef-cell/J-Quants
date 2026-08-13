@@ -54,6 +54,24 @@ test('fetches and upserts actual gyakuhibu only for past rights dates not yet in
   });
 });
 
+test('writes a noGyakuhibu marker row (instead of nothing) when parseTaisyakuCsv finds no lending fee, so the date is not re-scraped forever', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '7203', rightsDate: '2026-03-30' }] }) // rights-date scan (past)
+    .mockResolvedValueOnce({ Item: undefined }) // not yet in gyakuhibu-actual
+    .mockResolvedValueOnce({ Item: { ticker: '7203', unitShares: 100 } }); // yutai master lookup
+  taisyakuClient.fetchTaisyakuCsv.mockResolvedValueOnce('csv-body');
+  taisyakuClient.parseTaisyakuCsv.mockReturnValueOnce(undefined); // no shortage occurred that day
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  const putCalls = mockSend.mock.calls.filter(([cmd]) => 'Item' in (cmd as Record<string, unknown>) && (cmd as { TableName?: string }).TableName === 'JQuantsGyakuhibuActual');
+  expect(putCalls).toHaveLength(1);
+  expect(putCalls[0][0]).toMatchObject({
+    Item: { ticker: '7203', rightsDate: '2026-03-30', noGyakuhibu: true },
+  });
+});
+
 test('skips rights dates older than 3 years', async () => {
   const fourYearsAgo = new Date();
   fourYearsAgo.setFullYear(fourYearsAgo.getFullYear() - 4);
