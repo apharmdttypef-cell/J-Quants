@@ -264,3 +264,21 @@ test('GET /yutai filters by keyword against company name and content', async () 
   const parsed = body(result) as { tickers: Array<{ ticker: string }> };
   expect(parsed.tickers.map((t) => t.ticker)).toEqual(['1234']);
 });
+
+test('GET /yutai returns rightsDate: null (not a missing key) when there is no upcoming rights date', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '9999', companyName: '□□コーチ', content: '割引券', value: 500, unitShares: 100 }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }); // rights-date query: no upcoming rights date
+  mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: [] }) }); // current-month banner calendar
+
+  const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
+
+  // JSON.stringify drops keys whose value is `undefined`, so this only passes if the
+  // implementation coerces a missing rights date to `null` before pushing the item.
+  const rawBody = (result as { body: string }).body;
+  expect(rawBody).toContain('"rightsDate":null');
+
+  const parsed = body(result) as { tickers: Array<Record<string, unknown>> };
+  expect(parsed.tickers[0]).toHaveProperty('rightsDate', null);
+  expect(parsed.tickers[0].riskStatus).toBe('na');
+});

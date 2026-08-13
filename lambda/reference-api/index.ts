@@ -338,7 +338,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
       companyName: row.companyName,
       content: row.content,
       value: row.value,
-      rightsDate,
+      rightsDate: rightsDate ?? null,
       riskStatus,
     });
   }
