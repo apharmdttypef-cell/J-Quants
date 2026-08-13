@@ -967,35 +967,58 @@ git commit -m "Record taisyaku.jp CSV request format from manual investigation"
 - Test: `test/j-quants.test.ts`
 
 **Interfaces:**
-- Consumes: Task 5で記録した実際のリクエスト形式(`docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md`)
+- Consumes: `docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md`(実ブラウザのHARキャプチャ2回分で確認済みの実際のリクエスト形式)
 - Produces:
   - `interface GyakuhibuActualPoint { rightsDate: string; totalAmount: number; days: number; avgRate: number }`
-  - `parseTaisyakuCsv(csvText: string, rightsDate: string, unitShares: number): GyakuhibuActualPoint | undefined`(取得したCSVを1権利日分の実績にまとめる。該当日に品貸料が発生していなければ`undefined`)
-  - `fetchTaisyakuCsv(ticker: string, from: string, to: string): Promise<string>`
+  - `extractCsrfToken(html: string): string`(詳細ページHTMLから`csrf_test_name`の値を取り出す。無ければ例外)
+  - `parseTaisyakuCsv(csvText: string, rightsDate: string, unitShares: number): GyakuhibuActualPoint | undefined`(該当日の品貸料率が空/`-`(実際の品薄が発生しなかった日)なら`undefined`)
+  - `fetchTaisyakuCsv(ticker: string, from: string, to: string): Promise<string>`(CSRFトークン取得→期間検索→CSV取得の3ステップを内部で行う)
 
-- [ ] **Step 1: CSVパースの失敗するテストを書く**
+**実装メモ(`docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md`より)**: taisyaku.jpはCSRFトークン+セッションCookieが必須で、単純な1回のGETでは取得できない。`fetchTaisyakuCsv`は (1) `GET /app/stock/detail/{ticker}-01` でセッションCookieとCSRFトークン(HTML内`<input type="hidden" name="csrf_test_name" value="...">`)を取得 → (2) `POST /app/stock/detail/{ticker}/search` に`csrf_test_name`・`orgMgrCd`・`mkYmdFrom`/`mkYmdTo`(`"YYYY / MM / DD"`形式)・`trjoKbn=01`(東証)等を送信して期間を指定 → (3) `GET /app/stock/detail/{ticker}/csv` を同じCookieでリクエスト、の順で行う。品貸料率・最高料率は実データで検証済みの通り**1株あたり・品貸日数分**の金額なので、`unitShares`を掛けるだけでよい(1,000株換算の割り戻しは不要)。
 
-`docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md` で確認した実際のCSV列名を使って書く。以下は列名の一例(実際の調査結果に合わせて置き換える):
+- [ ] **Step 1: CSRFトークン抽出・CSVパースの失敗するテストを書く**
+
+`test/taisyaku-client.test.ts`:
 
 ```typescript
-import { parseTaisyakuCsv } from '../lambda/gyakuhibu-history-batch/taisyaku-client';
+import { extractCsrfToken, parseTaisyakuCsv } from '../lambda/gyakuhibu-history-batch/taisyaku-client';
 
-test('parseTaisyakuCsv sums the lending fee across the days it applied, scaled to unitShares', () => {
-  // 実際のヘッダー行・列名はdocs/superpowers/notes/2026-08-13-taisyaku-csv-format.mdの調査結果に置き換える
-  const csv = ['日付,品貸料率(円)', '2026-08-25,0.5', '2026-08-26,0.8'].join('\n');
+test('extractCsrfToken reads the csrf_test_name hidden input value', () => {
+  const html = '<input type="hidden" name="csrf_test_name" value="abc123def456">';
+  expect(extractCsrfToken(html)).toBe('abc123def456');
+});
+
+test('extractCsrfToken throws when the token is missing', () => {
+  expect(() => extractCsrfToken('<html></html>')).toThrow();
+});
+
+// CSVは日付ごとに1行、taisyaku.jpの画面表示テーブルと同じ列名(申込日/品貸料率(品貸日数分/円)/品貸日数)を持つ想定。
+// 実際にダウンロードしたCSVの列名・行列の向きが異なると判明した場合は、このテストと
+// parseTaisyakuCsvの実装を実物に合わせて書き換えること(docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md 参照)。
+test('parseTaisyakuCsv scales the per-share lending fee to unitShares for the matching rights date', () => {
+  const csv = [
+    '申込日,品貸料率(品貸日数分/円),品貸日数',
+    '2026-08-25,6.00,1',
+    '2026-08-26,18.00,3',
+  ].join('\n');
 
   const result = parseTaisyakuCsv(csv, '2026-08-26', 100);
 
   expect(result).toEqual({
     rightsDate: '2026-08-26',
-    totalAmount: (0.5 + 0.8) * 100,
-    days: 2,
-    avgRate: (0.5 + 0.8) / 2,
+    totalAmount: 18.0 * 100,
+    days: 3,
+    avgRate: 18.0 / 3,
   });
 });
 
-test('parseTaisyakuCsv returns undefined when no lending fee rows exist', () => {
-  const csv = '日付,品貸料率(円)\n';
+test('parseTaisyakuCsv returns undefined when the matching date has no lending fee (a dash, meaning no shortage occurred)', () => {
+  const csv = ['申込日,品貸料率(品貸日数分/円),品貸日数', '2026-08-26,-,1'].join('\n');
+  expect(parseTaisyakuCsv(csv, '2026-08-26', 100)).toBeUndefined();
+});
+
+test('parseTaisyakuCsv returns undefined when the rights date is not in the CSV at all', () => {
+  const csv = ['申込日,品貸料率(品貸日数分/円),品貸日数', '2026-08-20,6.00,1'].join('\n');
   expect(parseTaisyakuCsv(csv, '2026-08-26', 100)).toBeUndefined();
 });
 ```
@@ -1005,9 +1028,9 @@ test('parseTaisyakuCsv returns undefined when no lending fee rows exist', () => 
 Run: `npx jest test/taisyaku-client.test.ts`
 Expected: FAIL(モジュールが存在しない)
 
-- [ ] **Step 3: 実装を書く**
+- [ ] **Step 3: `extractCsrfToken` と `parseTaisyakuCsv` を実装**
 
-`docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md` の調査結果に合わせて、実際のURL・パラメータ・CSV列名で書く。以下は構造のたたき台(列名部分は調査結果で置き換える):
+`lambda/gyakuhibu-history-batch/taisyaku-client.ts`(この時点では`fetchTaisyakuCsv`は未実装、Step 7で追加する):
 
 ```typescript
 export interface GyakuhibuActualPoint {
@@ -1017,47 +1040,176 @@ export interface GyakuhibuActualPoint {
   avgRate: number;
 }
 
-// docs/superpowers/notes/2026-08-13-taisyaku-csv-format.mdの調査結果に基づくURL/パラメータ。
-const TAISYAKU_BASE_URL = 'https://www.taisyaku.jp';
-
-export async function fetchTaisyakuCsv(ticker: string, from: string, to: string): Promise<string> {
-  // 実際のパス・パラメータ名は調査結果に置き換える
-  const params = new URLSearchParams({ from, to });
-  const response = await fetch(`${TAISYAKU_BASE_URL}/app/stock/${ticker}/csv?${params}`);
-  if (!response.ok) {
-    throw new Error(`taisyaku.jp error ${response.status}: ${await response.text()}`);
+export function extractCsrfToken(html: string): string {
+  const match = html.match(/<input[^>]*name="csrf_test_name"[^>]*value="([^"]+)"/);
+  if (!match) {
+    throw new Error('csrf_test_name not found in taisyaku.jp page HTML (page structure may have changed)');
   }
-  return response.text();
+  return match[1];
 }
 
-// CSVの日付・品貸料率列を、対象権利日に対応する品貸日数分だけ合計する。
-// taisyaku.jpの品貸料率は通常1,000株あたりの日割り金額で公表されるため、
-// unitShares(単元株数)に換算してから合計し、次回権利日の予測値(最大逆日歩)と
-// 単位を揃える。
+// CSVは「申込日」列で対象権利日の行を探し、「品貸料率(品貸日数分/円)」列がハイフン(実際の
+// 品薄が発生しなかった日)や空でなければ、その値と「品貸日数」列から実績を組み立てる。
+// taisyaku.jpの品貸料率・最高料率は実データで検証済みの通り1株あたり・品貸日数分の金額
+// なので、unitShares(単元株数)を掛けるだけでよい(1,000株換算は不要)。
 export function parseTaisyakuCsv(csvText: string, rightsDate: string, unitShares: number): GyakuhibuActualPoint | undefined {
-  const lines = csvText.trim().split('\n').slice(1); // ヘッダー行を除く
-  const rates = lines
-    .map((line) => line.split(','))
-    .filter((cols) => cols.length >= 2 && cols[1].trim() !== '')
-    .map(([date, rate]) => ({ date: date.trim(), rate: Number(rate.trim()) }))
-    .filter((row) => !Number.isNaN(row.rate) && row.rate > 0);
+  const lines = csvText.trim().split('\n');
+  const header = lines[0].split(',').map((h) => h.trim());
+  const dateIdx = header.findIndex((h) => h.includes('申込日'));
+  const rateIdx = header.findIndex((h) => h.includes('品貸料率'));
+  const daysIdx = header.findIndex((h) => h.includes('品貸日数'));
+  if (dateIdx === -1 || rateIdx === -1 || daysIdx === -1) {
+    throw new Error('Unexpected taisyaku.jp CSV header shape (expected 申込日/品貸料率/品貸日数 columns)');
+  }
 
-  if (rates.length === 0) return undefined;
+  for (const line of lines.slice(1)) {
+    const cols = line.split(',').map((c) => c.trim());
+    if (cols[dateIdx] !== rightsDate) continue;
 
-  const perThousandShares = rates.reduce((sum, r) => sum + r.rate, 0);
-  const totalAmount = (perThousandShares / 1000) * unitShares;
-  const avgRate = perThousandShares / rates.length;
+    const rateRaw = cols[rateIdx];
+    if (!rateRaw || rateRaw === '-') return undefined; // その日は実際の品薄(逆日歩)が発生しなかった
 
-  return { rightsDate, totalAmount, days: rates.length, avgRate };
+    const perShareRate = Number(rateRaw);
+    const days = Number(cols[daysIdx]);
+    if (Number.isNaN(perShareRate) || Number.isNaN(days) || days <= 0) return undefined;
+
+    return { rightsDate, totalAmount: perShareRate * unitShares, days, avgRate: perShareRate / days };
+  }
+
+  return undefined; // 対象の申込日がCSVに含まれていない
 }
 ```
 
 - [ ] **Step 4: テストが通ることを確認**
 
 Run: `npx jest test/taisyaku-client.test.ts`
-Expected: PASS(調査結果と実装の列名が食い違う場合はテスト・実装ともに実際の列名に合わせて修正する)
+Expected: PASS
 
-- [ ] **Step 5: バッチハンドラの失敗するテストを書く**
+- [ ] **Step 5: `fetchTaisyakuCsv`(CSRF取得→検索→CSV取得)の失敗するテストを書く**
+
+`test/taisyaku-client.test.ts` に追記:
+
+```typescript
+import { fetchTaisyakuCsv } from '../lambda/gyakuhibu-history-batch/taisyaku-client';
+
+describe('fetchTaisyakuCsv', () => {
+  const mockFetch = jest.fn();
+  beforeEach(() => {
+    mockFetch.mockReset();
+    (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
+  });
+
+  test('fetches the CSRF token from the detail page, POSTs the date-range search, then GETs the CSV with the same session cookie', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { getSetCookie: () => ['ci_session=abc123; Path=/'] },
+        text: async () => '<input type="hidden" name="csrf_test_name" value="tok-1">',
+      })
+      .mockResolvedValueOnce({ ok: true, headers: { getSetCookie: () => [] }, text: async () => '<html>search result</html>' })
+      .mockResolvedValueOnce({ ok: true, headers: { getSetCookie: () => [] }, text: async () => 'csv-body' });
+
+    const result = await fetchTaisyakuCsv('7203', '2026-08-05', '2026-08-14');
+
+    expect(result).toBe('csv-body');
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://www.taisyaku.jp/app/stock/detail/7203-01');
+
+    const [searchUrl, searchInit] = mockFetch.mock.calls[1];
+    expect(searchUrl).toBe('https://www.taisyaku.jp/app/stock/detail/7203/search');
+    expect(searchInit.method).toBe('POST');
+    expect(searchInit.headers.Cookie).toBe('ci_session=abc123');
+    const body = new URLSearchParams(searchInit.body as string);
+    expect(body.get('csrf_test_name')).toBe('tok-1');
+    expect(body.get('orgMgrCd')).toBe('7203');
+    expect(body.get('mkYmdFrom')).toBe('2026 / 08 / 05');
+    expect(body.get('mkYmdTo')).toBe('2026 / 08 / 14');
+    expect(body.get('trjoKbn')).toBe('01');
+
+    const [csvUrl, csvInit] = mockFetch.mock.calls[2];
+    expect(csvUrl).toBe('https://www.taisyaku.jp/app/stock/detail/7203/csv');
+    expect(csvInit.headers.Cookie).toBe('ci_session=abc123');
+  });
+
+  test('throws when the detail page request fails', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500, text: async () => 'server error' });
+    await expect(fetchTaisyakuCsv('7203', '2026-08-05', '2026-08-14')).rejects.toThrow('taisyaku.jp');
+  });
+});
+```
+
+- [ ] **Step 6: テストが失敗することを確認**
+
+Run: `npx jest test/taisyaku-client.test.ts`
+Expected: FAIL(`fetchTaisyakuCsv`が存在しない)
+
+- [ ] **Step 7: `fetchTaisyakuCsv` を実装**
+
+`lambda/gyakuhibu-history-batch/taisyaku-client.ts` に追記:
+
+```typescript
+const TAISYAKU_BASE_URL = 'https://www.taisyaku.jp';
+
+// "YYYY-MM-DD" → "YYYY / MM / DD"(taisyaku.jpのフォーム入力形式)
+function toSlashDate(isoDate: string): string {
+  return isoDate.replaceAll('-', ' / ');
+}
+
+function cookieHeaderFrom(setCookies: string[]): string {
+  return setCookies.map((c) => c.split(';')[0]).join('; ');
+}
+
+// 銘柄詳細ページ(GET)→期間検索(POST)→CSV取得(GET)の3ステップ。
+// taisyaku.jpはCSRFトークン+セッションCookie必須のため、無状態の1回のリクエストでは
+// 取得できない(docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md 参照)。
+export async function fetchTaisyakuCsv(ticker: string, from: string, to: string): Promise<string> {
+  const detailUrl = `${TAISYAKU_BASE_URL}/app/stock/detail/${ticker}-01`;
+  const pageResponse = await fetch(detailUrl);
+  if (!pageResponse.ok) {
+    throw new Error(`taisyaku.jp error ${pageResponse.status} fetching ${detailUrl}`);
+  }
+  const cookie = cookieHeaderFrom(pageResponse.headers.getSetCookie());
+  const csrfToken = extractCsrfToken(await pageResponse.text());
+
+  const searchUrl = `${TAISYAKU_BASE_URL}/app/stock/detail/${ticker}/search`;
+  const searchBody = new URLSearchParams({
+    csrf_test_name: csrfToken,
+    orgMgrCd: ticker,
+    orgMgrMei: '',
+    sort: '',
+    page: '',
+    fsort: '',
+    fpage: '',
+    mkYmdFrom: toSlashDate(from),
+    mkYmdTo: toSlashDate(to),
+    kjnYmdDays: '',
+    trjoKbn: '01',
+  });
+  const searchResponse = await fetch(searchUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
+    body: searchBody.toString(),
+  });
+  if (!searchResponse.ok) {
+    throw new Error(`taisyaku.jp error ${searchResponse.status} posting to ${searchUrl}`);
+  }
+  await searchResponse.text();
+
+  const csvUrl = `${TAISYAKU_BASE_URL}/app/stock/detail/${ticker}/csv`;
+  const csvResponse = await fetch(csvUrl, { headers: { Cookie: cookie } });
+  if (!csvResponse.ok) {
+    throw new Error(`taisyaku.jp error ${csvResponse.status} fetching ${csvUrl}`);
+  }
+  return csvResponse.text();
+}
+```
+
+- [ ] **Step 8: テストが通ることを確認**
+
+Run: `npx jest test/taisyaku-client.test.ts`
+Expected: PASS(全件)
+
+- [ ] **Step 9: バッチハンドラの失敗するテストを書く**
 
 `test/gyakuhibu-history-batch.test.ts`:
 
@@ -1130,12 +1282,12 @@ test('skips rights dates older than 3 years', async () => {
 });
 ```
 
-- [ ] **Step 6: テストが失敗することを確認**
+- [ ] **Step 10: テストが失敗することを確認**
 
 Run: `npx jest test/gyakuhibu-history-batch.test.ts`
 Expected: FAIL(モジュールが存在しない)
 
-- [ ] **Step 7: 実装を書く**
+- [ ] **Step 11: 実装を書く**
 
 `lambda/gyakuhibu-history-batch/index.ts`:
 
@@ -1231,12 +1383,12 @@ export const handler = async (): Promise<void> => {
 };
 ```
 
-- [ ] **Step 8: テストが通ることを確認**
+- [ ] **Step 12: テストが通ることを確認**
 
 Run: `npx jest test/gyakuhibu-history-batch.test.ts`
 Expected: PASS
 
-- [ ] **Step 9: CDKスタックにLambdaとスケジュールを追加**
+- [ ] **Step 13: CDKスタックにLambdaとスケジュールを追加**
 
 `lib/j-quants-stack.ts` の `marginBalanceBatchFn` 定義の直後に追記:
 
@@ -1265,7 +1417,7 @@ Expected: PASS
     });
 ```
 
-- [ ] **Step 10: スタックテストを追加して確認**
+- [ ] **Step 14: スタックテストを追加して確認**
 
 `test/j-quants.test.ts` に追記:
 
@@ -1292,7 +1444,7 @@ test('creates the gyakuhibu history batch Lambda wired to the rights-date/master
 Run: `npx jest test/j-quants.test.ts`
 Expected: PASS(全件)
 
-- [ ] **Step 11: コミット**
+- [ ] **Step 15: コミット**
 
 ```bash
 git add lambda/gyakuhibu-history-batch lib/j-quants-stack.ts test/taisyaku-client.test.ts test/gyakuhibu-history-batch.test.ts test/j-quants.test.ts
