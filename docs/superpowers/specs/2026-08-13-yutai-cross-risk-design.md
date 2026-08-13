@@ -42,7 +42,10 @@ J-Quants Standardプランへのアップグレードは月額課金が発生す
 EventBridge(毎日)
   → MarginBalanceBatchFunction(Lambda, 新規)
       - JQuantsYutaiMasterの全銘柄を取得
-      - JQuantsMarginBalanceが1件も無い銘柄 → 1〜2年分バックフィルモードで取得
+      - JQuantsMarginBalanceが1件も無い銘柄 → 過去5年分バックフィルモードで取得
+        (過去の権利日ごとの逆日歩見積り表示に使うため。実際に何年分取得できるかは
+         J-Quants mkt-margin-intの提供期間次第 → 実装時に確認し、届かない場合は
+         取得できる範囲のみとする)
       - 既存データがある銘柄 → 通常の日次差分取得
       - data-source経由で信用残(週次mkt-margin-int + 規制銘柄日次mkt-margin-alert相当)を取得
         (5req/分のレート制限想定で13秒間隔。本番切替後に有効)
@@ -54,11 +57,12 @@ EventBridge(毎日)
 
 優待マスタ(`JQuantsYutaiMaster`)へのレコード追加・更新はアプリの外(別途スクリプト等でDynamoDBへ直接投入)で行われる前提。`MarginBalanceBatchFunction`は自分でその追加を検知してバックフィルを自動的に始めるため、マスタへの書き込みタイミングとバッチの連携を意識する必要がない。
 
-## データモデル(DynamoDB、新規2テーブル)
+## データモデル(DynamoDB、新規3テーブル)
 
 | テーブル | キー | 属性 | 用途 |
 |---|---|---|---|
-| `JQuantsYutaiMaster` | PK `ticker` | `companyName`, `content`(優待内容), `value`(優待価値・円), `rightsDate`(権利日), `unitShares`(単元株数) | 優待マスタ。書き込みはアプリ外で行う(読み取り専用) |
+| `JQuantsYutaiMaster` | PK `ticker` | `companyName`, `content`(優待内容), `value`(優待価値・円), `unitShares`(単元株数) | 優待マスタ(権利日以外)。書き込みはアプリ外で行う(読み取り専用) |
+| `JQuantsYutaiRightsDate` | PK `ticker` / SK `rightsDate` | (追加属性なし) | 銘柄ごとの権利日。年1回・複数回など銘柄によって件数が異なるため、過去分・将来分を問わず1行1権利日でアプリ外から個別投入する。「次回の権利日」は`rightsDate >= 今日`の最小値として都度算出する(マスタに冗長に持たない) |
 | `JQuantsMarginBalance` | PK `ticker` / SK `date` | `financingBalance`(融資残), `lendingBalance`(貸株残), `source`(`weekly` \| `daily-alert`) | 信用残時系列。`daily-alert`が存在する日はそちらを優先して逆日歩計算に使う |
 
 既存3テーブル同様 `RemovalPolicy.RETAIN` + PITR、オンデマンド課金。
@@ -88,13 +92,19 @@ EventBridge(毎日)
 - 優待価値 > 最大逆日歩コスト: `安全`
 - 優待価値 ≤ 最大逆日歩コスト: `危険`
 
-この計算は純粋関数として切り出し、データソースがダミーか本番かに関わらず同一のロジックが動く。
+この計算は純粋関数として切り出し、データソースがダミーか本番かに関わらず同一のロジックが動く。同じ関数を過去の権利日に適用することで、下記の「権利日ごとの逆日歩見積り履歴」も算出する。
+
+### 権利日ごとの逆日歩見積り履歴(ツールチップ表示用)
+
+`JQuantsYutaiRightsDate`に登録された過去の権利日それぞれについて、その時点の`JQuantsMarginBalance`を使って同じ逆日歩計算式を適用し、見積り額を算出する。実際に発生した逆日歩の実績値ではない(J-Quantsにも他の一般公開APIにも実績データが存在しないため、直近の予測と同じ計算式を過去日付に当てはめた推定値である点に注意)。
+
+対象期間は`JQuantsMarginBalance`のバックフィル範囲(目標5年、実際の取得可能期間に依存)に一致する。年複数回権利日がある銘柄はその件数分すべて算出・表示する。
 
 ## Lambda(新規1本)
 
 | 関数 | トリガー | 役割 |
 |---|---|---|
-| `MarginBalanceBatchFunction` | EventBridge毎日 | `JQuantsYutaiMaster`の全銘柄について信用残を取得・upsert。`JQuantsMarginBalance`が1件も無い銘柄は1〜2年分バックフィルモード、既存データがある銘柄は通常の日次差分取得として扱う。銘柄数が増えるとバッチ時間が線形に伸びる制約あり(既存`BatchFetchFunction`同様13秒間隔想定) |
+| `MarginBalanceBatchFunction` | EventBridge毎日 | `JQuantsYutaiMaster`の全銘柄について信用残を取得・upsert。`JQuantsMarginBalance`が1件も無い銘柄は過去5年分バックフィルモード、既存データがある銘柄は通常の日次差分取得として扱う。銘柄数が増えるとバッチ時間が線形に伸びる制約あり(既存`BatchFetchFunction`同様13秒間隔想定) |
 
 新規登録・内容更新はアプリ外(DynamoDB直接投入)で行われるため、登録操作をトリガーに何かを非同期キックするAPIハンドラは不要。日次バッチが「バックフィル未実施の銘柄」を毎回自動検知することで代替する。
 
@@ -102,8 +112,8 @@ EventBridge(毎日)
 
 | メソッド/パス | 内容 |
 |---|---|
-| `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待マスタを条件で絞り込んだ一覧 + 各銘柄の最新信用残から算出したリスクバッジ(`safe` / `danger` / `対象外`) + `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
-| `GET /yutai/{ticker}` | 優待マスタ情報 + 最新信用残 + 逆日歩リスク計算結果(措置率・最大逆日歩額・日数) |
+| `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 各銘柄の「次回の権利日」(`JQuantsYutaiRightsDate`で`rightsDate >= 今日`の最小値)が指定範囲に入るものを絞り込んだ一覧 + 各銘柄の最新信用残から算出したリスクバッジ(`safe` / `danger` / `対象外`) + `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
+| `GET /yutai/{ticker}` | 優待マスタ情報 + 次回権利日の最新信用残 + 逆日歩リスク計算結果(措置率・最大逆日歩額・日数) + `rightsHistory`(過去の権利日ごとの逆日歩見積り履歴、`[{rightsDate, estimatedGyakuhibu, sochiRate, days}]`。年複数回ある銘柄は件数分すべて含む) |
 | `GET /yutai/{ticker}/margin-trend?range=1y` | 信用残(融資残・貸株残)の時系列。既存`?range=12w`パターンを踏襲し`1y`をデフォルト |
 
 書き込み系エンドポイント(POST/PUT/DELETE)は無い。読み取り専用。CORS・認証(`x-app-password`ヘッダー、Lambdaオーソライザー)は既存ルートと共通の設定をそのまま適用する。
@@ -113,6 +123,7 @@ EventBridge(毎日)
 - 新規 `/yutai`: 優待クロス スクリーニング一覧。検索条件フォーム(権利日範囲・キーワード・リスク判定)+コスト比較バッジ付き一覧。**読み取り専用**(登録・編集・削除の導線は無い)
   - 権利日範囲は開始日・終了日の日付入力2つで指定する(プリセットは設けない、個人アプリのためシンプルさを優先)。デフォルト値は**当月の1日〜末日**(画面を開いた時点の月)。当月の優待を確認する用途が主なため
 - 新規 `/yutai/:ticker`: 詳細画面。信用残トレンドグラフ+優待内容+既存`/tickers/:ticker`への相互リンク
+  - 「最大逆日歩」の数値にマウスホバーすると、`rightsHistory`を使ったツールチップが表示される。過去の権利日を新しい順に並べ、権利日ごとの逆日歩見積り額を一覧表示する(年複数回の銘柄はその件数分並ぶ)。データが1件も無い場合(バックフィル未完了・新規銘柄など)はツールチップ自体を出さない
 - グローバルナビに「優待クロス」リンクを追加し`/yutai`への入口とする
 - `JQuantsMarginBalance`がまだ無い銘柄(バックフィル未実施)は一覧・詳細とも「信用残データ取得中」の表示にする
 
@@ -121,11 +132,12 @@ EventBridge(毎日)
 - **貸借銘柄でない場合**(信用取引データが存在しない): リスクバッジを`対象外`とし、逆日歩計算自体をスキップする
 - **バックフィル失敗時**(`MarginBalanceBatchFunction`が新規銘柄を初めて処理する際): 途中まで保存されたデータはそのまま残し、翌日以降のバッチで自動的に再試行される(全体ロールバックはしない。バックフィル未完了かどうかは`JQuantsMarginBalance`の有無だけで判定するため、専用のリトライ管理は不要)
 - **J-Quants APIレート制限**(フェーズ2で有効化): 既存`BatchFetchFunction`と同じく13秒間隔待機で基本発生しない設計。万一発生した場合は当該銘柄をスキップしログに記録する(既存踏襲、新規の再試行機構は作らない)
+- **権利日時点の信用残データが無い場合**(バックフィル期間が5年に届かない、または権利日が信用取引開始前など): その権利日は`rightsHistory`から除外する(0円や欠損値として無理に表示しない)
 
 ## テスト方針
 
 - 既存同様Jestでスタック合成テスト(新規テーブル・Lambda・APIルートが定義通り生成されるか)
-- 逆日歩計算ロジック(措置率表参照・4倍ルール・日数算出)は純粋関数として切り出し、境界値を含むユニットテストを重点的に書く
+- 逆日歩計算ロジック(措置率表参照・4倍ルール・日数算出)は純粋関数として切り出し、境界値を含むユニットテストを重点的に書く。過去の権利日への適用(`rightsHistory`算出)も同じ純粋関数を使うため、複数権利日・データ欠損時の除外も含めてテストする
 - `MarginBalanceBatchFunction`はdata-sourceモジュールをモックしたLambda単体テスト(「バックフィル対象の自動検知」と「通常の日次差分取得」の両分岐を検証)。フェーズ1・フェーズ2いずれのdata-source実装も同じテストで検証できるようにする
 - フロントは既存同様、自動テストなし・手動確認(既存4画面もフロントの自動テストは無いため踏襲)
 
@@ -133,3 +145,5 @@ EventBridge(毎日)
 
 - 優待マスタへのデータ投入手段(別途スクリプト等でDynamoDB直接投入する想定のみ確定。収集方法自体・自動候補提示は本設計に含まない)
 - J-Quants Standardプランへの実際のアップグレード作業とdata-sourceのフェーズ2差し替え実装(別スコープ)
+- J-Quants `mkt-margin-int`が実際に何年分の履歴を提供するかの検証(実装時に確認。5年に満たない場合は取得できる範囲のみ扱う)
+- 過去の株式分割・優待内容変更の追跡(`unitShares`・`value`は現在の値を過去の見積りにもそのまま使う。分割等があった場合の`rightsHistory`の精度低下は許容する)
