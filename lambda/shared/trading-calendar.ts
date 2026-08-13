@@ -1,0 +1,53 @@
+// J-Quants取引カレンダー(/markets/calendar、Freeプランで利用可)。
+// HolDiv: 0=非営業日, 1=営業日, 2=東証半日立会日(受渡計算上は営業日扱い), 3=非営業日(祝日取引あり)
+export interface CalendarDay {
+  date: string;
+  holDiv: string;
+}
+
+interface RawCalendarDay {
+  Date: string;
+  HolDiv: string;
+}
+
+interface CalendarResponse {
+  data: RawCalendarDay[];
+}
+
+export function isTradingDay(day: CalendarDay): boolean {
+  return day.holDiv === '1' || day.holDiv === '2';
+}
+
+export async function fetchTradingCalendar(
+  apiBaseUrl: string,
+  apiKey: string,
+  from: string,
+  to: string,
+): Promise<CalendarDay[]> {
+  const params = new URLSearchParams({ from, to });
+  const response = await fetch(`${apiBaseUrl}/markets/calendar?${params}`, { headers: { 'x-api-key': apiKey } });
+  if (!response.ok) {
+    throw new Error(`J-Quants API error ${response.status}: ${await response.text()}`);
+  }
+  const body = (await response.json()) as CalendarResponse;
+  return body.data.map((d) => ({ date: d.Date, holDiv: d.HolDiv }));
+}
+
+// tradeDateのT+2営業日(受渡日)を返す。calendarにはtradeDateより後の日を
+// 十分な件数(最低2営業日分)含めておくこと。
+export function settlementDate(calendar: CalendarDay[], tradeDate: string): string {
+  const upcoming = calendar
+    .filter((d) => d.date > tradeDate && isTradingDay(d))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (upcoming.length < 2) {
+    throw new Error(`Not enough trading calendar data after ${tradeDate} to compute T+2 settlement`);
+  }
+  return upcoming[1].date;
+}
+
+export function calendarDaysBetween(from: string, to: string): number {
+  const a = new Date(`${from}T00:00:00Z`).getTime();
+  const b = new Date(`${to}T00:00:00Z`).getTime();
+  return Math.round((b - a) / (24 * 60 * 60 * 1000));
+}
