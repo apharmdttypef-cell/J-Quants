@@ -178,6 +178,27 @@ export class JQuantsStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(batchFetchFn)],
     });
 
+    const marginBalanceBatchFn = new nodejs.NodejsFunction(this, 'MarginBalanceBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'margin-balance-batch', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
+      },
+    });
+
+    this.yutaiMasterTable.grantReadData(marginBalanceBatchFn);
+    this.marginBalanceTable.grantReadWriteData(marginBalanceBatchFn);
+
+    new events.Rule(this, 'MarginBalanceBatchSchedule', {
+      schedule: events.Schedule.cron({ minute: '30', hour: '9' }),
+      targets: [new targets.LambdaFunction(marginBalanceBatchFn)],
+    });
+
     const referenceApiFn = new nodejs.NodejsFunction(this, 'ReferenceApiFunction', {
       entry: path.join(__dirname, '..', 'lambda', 'reference-api', 'index.ts'),
       handler: 'handler',

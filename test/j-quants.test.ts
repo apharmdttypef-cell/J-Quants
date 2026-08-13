@@ -197,6 +197,24 @@ test('creates the JQuantsGyakuhibuActual table with ticker/rightsDate key', () =
   });
 });
 
+test('creates the margin balance batch Lambda wired to the yutai and margin tables, on a daily schedule', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Environment: {
+      Variables: Match.objectLike({
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'cron(30 9 * * ? *)',
+    State: 'ENABLED',
+  });
+});
+
 test('throws a clear error when APP_PASSWORD is not set', () => {
   const original = process.env.APP_PASSWORD;
   delete process.env.APP_PASSWORD;
