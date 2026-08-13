@@ -319,9 +319,9 @@ test('GET /yutai/{ticker} returns 404 for a ticker not in the yutai master', asy
   expect((result as { statusCode: number }).statusCode).toBe(404);
 });
 
-test('GET /yutai/{ticker} returns rightsDate: null (not a missing key) and an all-null risk object when there is no upcoming rights date', async () => {
+test('GET /yutai/{ticker} returns rightsDate: null and companyName: null (not missing keys) and an all-null risk object when there is no upcoming rights date and no companyName on record', async () => {
   mockSend
-    .mockResolvedValueOnce({ Item: { ticker: '1234', companyName: '○○HD', content: 'QUOカード', value: 1000, unitShares: 100 } }) // yutai master get
+    .mockResolvedValueOnce({ Item: { ticker: '1234', content: 'QUOカード', value: 1000, unitShares: 100 } }) // yutai master get (no companyName)
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500, volume: 10000 }] }) // latest price
     .mockResolvedValueOnce({ Items: [] }) // financial summary: none yet
     .mockResolvedValueOnce({ Items: [] }) // next rights date: none upcoming
@@ -331,14 +331,17 @@ test('GET /yutai/{ticker} returns rightsDate: null (not a missing key) and an al
 
   expect((result as { statusCode: number }).statusCode).toBe(200);
   // JSON.stringify drops keys whose value is `undefined`, so this only passes if the
-  // implementation coerces a missing rights date to `null` before returning.
+  // implementation coerces a missing rights date / companyName to `null` before returning.
   const rawBody = (result as { body: string }).body;
   expect(rawBody).toContain('"rightsDate":null');
+  expect(rawBody).toContain('"companyName":null');
 
   const parsed = body(result) as {
     rightsDate: string | null;
+    companyName: string | null;
     risk: { maxGyakuhibu: number | null; maxRate: number | null; days: number | null; riskStatus: string };
   };
   expect(parsed.rightsDate).toBeNull();
+  expect(parsed.companyName).toBeNull();
   expect(parsed.risk).toEqual({ maxGyakuhibu: null, maxRate: null, days: null, riskStatus: 'na' });
 });

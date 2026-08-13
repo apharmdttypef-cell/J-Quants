@@ -446,7 +446,7 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
 
   return jsonResponse(200, {
     ticker: master.ticker,
-    companyName: master.companyName,
+    companyName: master.companyName ?? null,
     content: master.content,
     value: master.value,
     unitShares: master.unitShares,
