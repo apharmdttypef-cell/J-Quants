@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fetchYutaiList } from '../api/client';
 import type { YutaiRiskStatus } from '../api/types';
@@ -17,22 +17,39 @@ function monthRange(): { from: string; to: string } {
 
 const RISK_LABEL: Record<YutaiRiskStatus, string> = { safe: '安全', danger: '危険', na: '対象外' };
 
+// キーワード入力欄からのAPI呼び出し用デバウンス(ms)。無しだと1文字打つたびに
+// GET /yutai が発火し、Freeプランのレート制限(5req/分)に簡単に触れてしまう
+// (バックエンド側でカレンダー呼び出しをキャッシュしても、リクエスト数自体は減らない)。
+const KEYWORD_DEBOUNCE_MS = 400;
+
 export function YutaiListPage() {
   const defaultRange = monthRange();
   const [rightsDateFrom, setRightsDateFrom] = useState(defaultRange.from);
   const [rightsDateTo, setRightsDateTo] = useState(defaultRange.to);
   const [keyword, setKeyword] = useState('');
+  const [debouncedKeyword, setDebouncedKeyword] = useState('');
   const [riskStatus, setRiskStatus] = useState<'all' | YutaiRiskStatus>('all');
 
+  // このアプリの規模でuseDebounceのような専用ライブラリはOverkillなので、
+  // useAsync同様に小さな手作りのuseEffectで済ませる。
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedKeyword(keyword), KEYWORD_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [keyword]);
+
   const listState = useAsync(
-    () => fetchYutaiList({ rightsDateFrom, rightsDateTo, keyword: keyword || undefined, riskStatus }),
-    [rightsDateFrom, rightsDateTo, keyword, riskStatus],
+    () => fetchYutaiList({ rightsDateFrom, rightsDateTo, keyword: debouncedKeyword || undefined, riskStatus }),
+    [rightsDateFrom, rightsDateTo, debouncedKeyword, riskStatus],
   );
 
   return (
     <>
       <h1 className="page-title">優待クロス スクリーニング</h1>
       <p className="page-subtitle">権利日・優待価値と最大逆日歩の見積りを比較して絞り込みます。</p>
+
+      <div className="disclaimer-banner">
+        ⚠️ 現在、信用残・貸借判定はダミーデータです(J-Quants Standardプラン移行後に実データに切り替わります)
+      </div>
 
       {listState.data && (
         <div className="cutoff-banner">
