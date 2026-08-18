@@ -78,7 +78,7 @@ test('creates the J-Quants API key secret without an inline value', () => {
   });
 });
 
-test('creates the batch fetch Lambda wired to all three tables and a daily schedule', () => {
+test('creates the price batch Lambda wired to the price/watchlist/yutai tables (not financial) and a daily schedule', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -87,15 +87,37 @@ test('creates the batch fetch Lambda wired to all three tables and a daily sched
     Environment: {
       Variables: Match.objectLike({
         TABLE_NAME: Match.anyValue(),
-        FINANCIAL_TABLE_NAME: Match.anyValue(),
         WATCHLIST_TABLE_NAME: Match.anyValue(),
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         SECRET_ARN: Match.anyValue(),
+        FINANCIAL_TABLE_NAME: Match.absent(),
       }),
     },
   });
   template.hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'cron(0 9 * * ? *)',
+    State: 'ENABLED',
+  });
+});
+
+test('creates the financial summary batch Lambda wired to the financial/watchlist/yutai tables (not price) and a weekly schedule', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Environment: {
+      Variables: Match.objectLike({
+        FINANCIAL_TABLE_NAME: Match.anyValue(),
+        WATCHLIST_TABLE_NAME: Match.anyValue(),
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        SECRET_ARN: Match.anyValue(),
+        TABLE_NAME: Match.absent(),
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'cron(0 11 ? * MON *)',
     State: 'ENABLED',
   });
 });

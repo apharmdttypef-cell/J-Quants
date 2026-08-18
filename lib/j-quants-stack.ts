@@ -180,6 +180,8 @@ export class JQuantsStack extends cdk.Stack {
       entry: path.join(__dirname, '..', 'lambda', 'financial-summary-batch', 'index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      // 銘柄あたり決算サマリー1リクエストを13秒間隔(5req/分制限)で直列に行うため長めに確保。
+      // ウォッチリストが増える場合は要見直し。
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
       bundling: { externalModules: ['@aws-sdk/*'] },

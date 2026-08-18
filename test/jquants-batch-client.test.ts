@@ -16,7 +16,9 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   ScanCommand: jest.fn((input: unknown) => input),
 }));
 
-import { getApiKey, getTargetTickers, fetchWithRetry, formatDate, normalizeDate } from '../lambda/shared/jquants-batch-client';
+import { getTargetTickers, fetchWithRetry, formatDate, normalizeDate } from '../lambda/shared/jquants-batch-client';
+
+type BatchClientModule = typeof import('../lambda/shared/jquants-batch-client');
 
 beforeEach(() => {
   mockSecretsSend.mockReset();
@@ -25,18 +27,29 @@ beforeEach(() => {
   (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
 });
 
-// cachedApiKeyはモジュールスコープでテスト間を跨いで保持されるため、
-// 「失敗」ケースを先に置く(成功キャッシュが一度できると以降secretsSendが呼ばれなくなるため)。
+// cachedApiKeyはモジュールスコープの状態なので、テスト間で共有されると順序に依存してしまう。
+// jest.resetModules()でモジュールレジストリをリセットし、各テストごとにモジュールを
+// 再requireして新しいcachedApiKeyを持つインスタンスを使うことで、実行順序に依存しない構造にする。
 describe('getApiKey', () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  function freshGetApiKey(): BatchClientModule['getApiKey'] {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return (require('../lambda/shared/jquants-batch-client') as BatchClientModule).getApiKey;
+  }
+
   test('throws when the secret has no string value', async () => {
     mockSecretsSend.mockResolvedValueOnce({});
-    await expect(getApiKey('arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey')).rejects.toThrow(
+    await expect(freshGetApiKey()('arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey')).rejects.toThrow(
       'no string value',
     );
   });
 
   test('fetches the API key from Secrets Manager and caches it for subsequent calls', async () => {
     mockSecretsSend.mockResolvedValueOnce({ SecretString: 'test-api-key' });
+    const getApiKey = freshGetApiKey();
     const first = await getApiKey('arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey');
     const second = await getApiKey('arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey');
     expect(first).toBe('test-api-key');

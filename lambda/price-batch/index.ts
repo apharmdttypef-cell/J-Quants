@@ -12,6 +12,8 @@ const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '7');
 // 「Your subscription covers the following dates: ...」400エラーになるため、
 // "今日" を基準にせず配信済みの範囲まで遡る。日付境界のズレを避け+1日のバッファを持たせる。
 const DELIVERY_DELAY_DAYS = Number(process.env.DELIVERY_DELAY_DAYS ?? String(12 * 7 + 1));
+// Freeプランは5req/分。余裕を持たせて13秒間隔にする(60000ms / 5req = 12000ms が下限)。
+// この値はprice-batchとfinancial-summary-batchで同じにしておくこと(1つのAPIキーのレート制限を両者で共有しているため)。
 const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '13000');
 const MAX_RETRIES = 5;
 
