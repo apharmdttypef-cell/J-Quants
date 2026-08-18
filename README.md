@@ -70,7 +70,7 @@ EventBridge(毎日 JST19:00)
 
 - **過去2年分のデータを、12週間遅延で配信**する(直近12週間分だけが取得できない、が正しい)。
 - `/equities/bars/daily`に配信対象外の日付(=直近12週間以内)を含む`from`/`to`を指定すると、部分的に返るのではなく**HTTP 400**(`Your subscription covers the following dates: ...`)で全体が失敗する。
-- そのため`BatchFetchFunction`は`to`を"今日"ではなく"今日-12週間-1日(バッファ)"を基準に計算している(`lambda/batch-fetch/index.ts`の`DELIVERY_DELAY_DAYS`)。
+- そのため`PriceBatchFunction`は`to`を"今日"ではなく"今日-12週間-1日(バッファ)"を基準に計算している(`lambda/price-batch/index.ts`の`DELIVERY_DELAY_DAYS`)。
 - 同じ理由で`ReferenceApiFunction`の価格取得も"今日からN日前"という日付フィルタではなく、保存済みの最新N件をそのまま返す方式にしている(バッチが保存する日付は常に配信遅延分だけ過去になるため)。
 
 ### 優待クロス逆日歩リスク可視化(`/yutai`系)
@@ -110,8 +110,9 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 
 | 関数 | トリガー | 役割 |
 |---|---|---|
-| `BatchFetchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の四本値・財務サマリを取得しDynamoDBへ |
-| `MarginBalanceBatchFunction` | EventBridge(`cron(30 9 * * ? *)` = JST 18:30 毎日) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を取得し`JQuantsMarginBalance`へupsert。新規銘柄はバックフィルモード、既存銘柄は日次差分取得。現在は`data-source.ts`がダミーデータを生成(上記「優待クロス逆日歩リスク可視化」参照、フェーズ2で`mkt-margin-int`/`mkt-margin-alert`に差し替え予定) |
+| `PriceBatchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の四本値を取得し`JQuantsStockPrices`へupsert |
+| `FinancialSummaryBatchFunction` | EventBridge(`cron(0 11 ? * MON *)` = 毎週月曜 JST 20:00) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の決算サマリを取得し`JQuantsFinancialSummary`へupsert。四半期ごとの更新なので週次取得で十分 |
+| `MarginBalanceBatchFunction` | EventBridge(`cron(30 9 ? * MON *)` = 毎週月曜 JST 18:30) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を取得し`JQuantsMarginBalance`へupsert。本来週次更新のため週次取得で十分。現在は`data-source.ts`がダミーデータを生成(上記「優待クロス逆日歩リスク可視化」参照、フェーズ2で`mkt-margin-int`/`mkt-margin-alert`に差し替え予定) |
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiRightsDate`の過去の権利日のうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理 |
 | `AuthorizerFunction` | API GatewayのLambdaオーソライザー | `x-app-password` ヘッダーを `JQuantsAppPassword` と照合(結果は5分キャッシュ) |
