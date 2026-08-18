@@ -200,7 +200,7 @@ test('creates the JQuantsGyakuhibuActual table with ticker/rightsDate key', () =
   });
 });
 
-test('creates the margin balance batch Lambda wired to the yutai and margin tables, on a daily schedule', () => {
+test('creates the margin balance batch Lambda wired to the yutai and margin tables, on a weekly schedule', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -213,7 +213,7 @@ test('creates the margin balance batch Lambda wired to the yutai and margin tabl
     },
   });
   template.hasResourceProperties('AWS::Events::Rule', {
-    ScheduleExpression: 'cron(30 9 * * ? *)',
+    ScheduleExpression: 'cron(30 9 ? * MON *)',
     State: 'ENABLED',
   });
 });
