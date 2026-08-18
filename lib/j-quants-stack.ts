@@ -146,18 +146,46 @@ export class JQuantsStack extends cdk.Stack {
       resultsCacheTtl: cdk.Duration.minutes(5),
     });
 
-    const batchFetchFn = new nodejs.NodejsFunction(this, 'BatchFetchFunction', {
-      entry: path.join(__dirname, '..', 'lambda', 'batch-fetch', 'index.ts'),
+    const priceBatchFn = new nodejs.NodejsFunction(this, 'PriceBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'price-batch', 'index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
-      // 銘柄あたり四本値+財務サマリの2リクエストを13秒間隔(5req/分制限)で
-      // 直列に行うため長めに確保。ウォッチリストが増える場合は要見直し。
+      // 銘柄あたり四本値1リクエストを13秒間隔(5req/分制限)で直列に行うため長めに確保。
+      // ウォッチリストが増える場合は要見直し。
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
       // AWS SDK v3はNode.js 20系ランタイムに同梱されているためバンドルしない
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
+        WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        SECRET_ARN: this.apiKeySecret.secretArn,
+      },
+    });
+
+    this.stockPricesTable.grantWriteData(priceBatchFn);
+    this.watchlistTable.grantReadData(priceBatchFn);
+    this.yutaiMasterTable.grantReadData(priceBatchFn);
+    this.apiKeySecret.grantRead(priceBatchFn);
+
+    // J-Quants Freeプランは配信12週間遅延のため取得時刻はシビアでなくてよい。
+    // JST 18:00 = UTC 09:00 に毎日実行。
+    new events.Rule(this, 'PriceBatchSchedule', {
+      schedule: events.Schedule.cron({ minute: '0', hour: '9' }),
+      targets: [new targets.LambdaFunction(priceBatchFn)],
+    });
+
+    const financialSummaryBatchFn = new nodejs.NodejsFunction(this, 'FinancialSummaryBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'financial-summary-batch', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      // 銘柄あたり決算サマリー1リクエストを13秒間隔(5req/分制限)で直列に行うため長めに確保。
+      // ウォッチリストが増える場合は要見直し。
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
         FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
         WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
@@ -165,17 +193,17 @@ export class JQuantsStack extends cdk.Stack {
       },
     });
 
-    this.stockPricesTable.grantWriteData(batchFetchFn);
-    this.financialSummaryTable.grantWriteData(batchFetchFn);
-    this.watchlistTable.grantReadData(batchFetchFn);
-    this.yutaiMasterTable.grantReadData(batchFetchFn);
-    this.apiKeySecret.grantRead(batchFetchFn);
+    this.financialSummaryTable.grantWriteData(financialSummaryBatchFn);
+    this.watchlistTable.grantReadData(financialSummaryBatchFn);
+    this.yutaiMasterTable.grantReadData(financialSummaryBatchFn);
+    this.apiKeySecret.grantRead(financialSummaryBatchFn);
 
-    // J-Quants Freeプランは配信12週間遅延のため取得時刻はシビアでなくてよい。
-    // JST 18:00 = UTC 09:00 に毎日実行。
-    new events.Rule(this, 'BatchFetchSchedule', {
-      schedule: events.Schedule.cron({ minute: '0', hour: '9' }),
-      targets: [new targets.LambdaFunction(batchFetchFn)],
+    // 決算サマリは四半期ごとしか更新されないため週次で十分(株価と違い日付範囲を
+    // 持たないエンドポイントなので、頻度を上げても新しい情報は増えない)。
+    // JST 月曜20:00 = UTC 月曜11:00。
+    new events.Rule(this, 'FinancialSummaryBatchSchedule', {
+      schedule: events.Schedule.cron({ minute: '0', hour: '11', weekDay: 'MON' }),
+      targets: [new targets.LambdaFunction(financialSummaryBatchFn)],
     });
 
     const marginBalanceBatchFn = new nodejs.NodejsFunction(this, 'MarginBalanceBatchFunction', {
@@ -194,8 +222,11 @@ export class JQuantsStack extends cdk.Stack {
     this.yutaiMasterTable.grantReadData(marginBalanceBatchFn);
     this.marginBalanceTable.grantReadWriteData(marginBalanceBatchFn);
 
+    // 信用残は本来週次更新のデータ(日々公表銘柄の日次例外は別途対応、
+    // docs/superpowers/specs/2026-08-18-yutai-batch-freshness-split-design.mdのスコープ外)。
+    // JST 月曜18:30 = UTC 月曜09:30。
     new events.Rule(this, 'MarginBalanceBatchSchedule', {
-      schedule: events.Schedule.cron({ minute: '30', hour: '9' }),
+      schedule: events.Schedule.cron({ minute: '30', hour: '9', weekDay: 'MON' }),
       targets: [new targets.LambdaFunction(marginBalanceBatchFn)],
     });
 
