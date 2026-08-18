@@ -4,7 +4,13 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": [
-      "es2022"
+      "es2022",
+      "dom"
+    ],
+    "isolatedModules": true,
+    "types": [
+      "jest",
+      "node"
     ],
     "declaration": true,
     "strict": true,
