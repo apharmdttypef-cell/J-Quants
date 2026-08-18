@@ -18,6 +18,14 @@ export function extractCsrfToken(html: string): string {
 // taisyaku.jpの品貸料率・最高料率は実データで検証済みの通り1株あたり・品貸日数分の金額
 // なので、unitShares(単元株数)を掛けるだけでよい(1,000株換算は不要)。
 // tickerはログ用(省略可)。
+// taisyaku.jpの実CSVは全フィールドがダブルクォートで囲まれている(例: "2026-08-26","18.00","3")。
+// trim()だけではクォートが残り、Number()変換が常にNaNになって実績を取りこぼすため、
+// 前後の1個ずつのダブルクォートを取り除く(フィールド内部のクォートはそのまま)。
+function stripQuotes(field: string): string {
+  const trimmed = field.trim();
+  return trimmed.startsWith('"') && trimmed.endsWith('"') ? trimmed.slice(1, -1) : trimmed;
+}
+
 export function parseTaisyakuCsv(
   csvText: string,
   rightsDate: string,
@@ -25,7 +33,7 @@ export function parseTaisyakuCsv(
   ticker?: string,
 ): GyakuhibuActualPoint | undefined {
   const lines = csvText.trim().split('\n');
-  const header = lines[0].split(',').map((h) => h.trim());
+  const header = lines[0].split(',').map(stripQuotes);
   const dateIdx = header.findIndex((h) => h.includes('申込日'));
   const rateIdx = header.findIndex((h) => h.includes('品貸料率'));
   // 「品貸料率(品貸日数分/円)」列名自体に「品貸日数」が部分文字列として含まれるため、
@@ -43,7 +51,7 @@ export function parseTaisyakuCsv(
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue; // 末尾の空行などをスキップ
 
-    const cols = line.split(',').map((c) => c.trim());
+    const cols = line.split(',').map(stripQuotes);
     // 融資残高・貸株残高等の株数列はカンマ区切りの桁区切り("1,234,567")で入っている
     // ことがあり、素朴なsplit(',')だと列がずれる。フルRFC4180パーサまでは実装せず、
     // 列数が壊れていないかだけ確認して、ずれていれば読み違えを防ぐためスキップする。

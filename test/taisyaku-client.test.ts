@@ -53,6 +53,28 @@ test('parseTaisyakuCsv also matches a plain slash date (no spaces) against an IS
   expect(result).toEqual({ rightsDate: '2026-08-13', totalAmount: 600, days: 1, avgRate: 6 });
 });
 
+// Fix 6: taisyaku.jpが実際に返すCSVは全フィールドがダブルクォートで囲まれている
+// (例: "2026-08-26","18.00","3")。trim()だけではクォートが残ったままNumber()に渡ってしまい
+// (Number('"18.00"')はNaN)、実際に逆日歩が発生した行でも常にNaN判定→undefined(「実績なし」)
+// を返してしまうバグが実機検証で発覚した(日付一致判定は数字以外除去で偶然クォートの影響を
+// 受けなかったため、これまで気づけなかった)。
+test('parseTaisyakuCsv strips surrounding double quotes from CSV fields before parsing numbers', () => {
+  const csv = [
+    '"申込日","品貸料率(品貸日数分/円)","品貸日数"',
+    '"2026-08-25","6.00","1"',
+    '"2026-08-26","18.00","3"',
+  ].join('\n');
+
+  const result = parseTaisyakuCsv(csv, '2026-08-26', 100);
+
+  expect(result).toEqual({
+    rightsDate: '2026-08-26',
+    totalAmount: 18.0 * 100,
+    days: 3,
+    avgRate: 18.0 / 3,
+  });
+});
+
 // Fix 4-3: 融資残高等の株数列はカンマ区切りの桁区切り("1,234,567")で入ることがあり、
 // 素朴なsplit(',')だと列がずれる。列数がヘッダーと合わない行は読み違えを防ぐためスキップする。
 test('parseTaisyakuCsv skips a row whose column count does not match the header, logging a warning', () => {

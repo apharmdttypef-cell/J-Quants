@@ -41,7 +41,7 @@ EventBridge(毎日 JST19:00)
 | `JQuantsFinancialSummary` | PK `ticker` / SK `discDate` | 決算サマリ(売上・利益・EPS等) |
 | `JQuantsWatchlist` | PK `ticker` | 取得対象銘柄の正本。フロントの「ウォッチリスト管理」画面から追加/削除 |
 | `JQuantsYutaiMaster` | PK `ticker` | 優待マスタ本体(`companyName` / `content` / `value` / `unitShares`)。書き込みはアプリ外(手動スクリプト等でDynamoDBへ直接投入)で行う前提の**読み取り専用**テーブル |
-| `JQuantsYutaiRightsDate` | PK `ticker` / SK `rightsDate` | 銘柄ごとの権利日(1行1権利日、年複数回にも対応)。こちらもアプリ外から投入 |
+| `JQuantsYutaiRightsDate` | PK `ticker` / SK `rightsDate` | 銘柄ごとの**権利付き最終日**(1行1権利日、年複数回にも対応)。こちらもアプリ外から投入。**権利確定日(月末等の基準日)そのものではなく、そこから2営業日前(買付最終日T)を入れる**。逆日歩の計算・taisyaku.jp実績照合はいずれも`rightsDate`をTとしてT+2(受渡日=権利確定日)を自動算出する前提のため、月末日をそのまま入れると全て2営業日分ずれる |
 | `JQuantsMarginBalance` | PK `ticker` / SK `date` | 信用残時系列(`financingBalance`融資残・`lendingBalance`貸株残・`source`=`weekly`\|`daily-alert`) |
 | `JQuantsGyakuhibuActual` | PK `ticker` / SK `rightsDate` | taisyaku.jpから取得した権利日ごとの実績逆日歩(`totalAmount` / `days` / `avgRate`)。直近3年分のみ存在しうる |
 
@@ -79,7 +79,7 @@ EventBridge(毎日 JST19:00)
   投資単位 <= 50,000円: 100円
   投資単位 >  50,000円: 100円 + ceil((投資単位 - 50,000) / 10,000) × 20円
 最高料率(円、1株・1日あたり) = 品貸料の上限 ÷ 単元株数 を10銭単位で切り上げ(ただし1円以下なら1円)
-最大逆日歩(円) = 最高料率 × 単元株数 × 品貸日数(権利確定日〜受渡日の暦日数、取引カレンダーから自動算出)
+最大逆日歩(円) = 最高料率 × 単元株数 × 品貸日数(受渡日(権利付き最終日のT+2)〜その翌営業日の暦日数、取引カレンダーから自動算出)
 ```
 
 出典: [株式 最高料率早見表(1日・1株当り)](https://www.taisyaku.jp/media/about-hayamihyo.pdf)(日本証券金融公式PDF。実際の早見表の数値と一致することを確認済み)。旧要件定義にあった固定「×4倍ルール」は、品貸日数を実日数で計算することで自然に織り込まれるため採用していない(3連休を挟むと自動的に日数が増える)。
