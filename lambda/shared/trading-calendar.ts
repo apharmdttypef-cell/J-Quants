@@ -57,3 +57,111 @@ export function calendarDaysBetween(from: string, to: string): number {
   const b = new Date(`${to}T00:00:00Z`).getTime();
   return Math.round((b - a) / (24 * 60 * 60 * 1000));
 }
+
+// ---------------------------------------------------------------------------
+// フェーズ1暫定対応: J-QuantsのFreeプラン「12週間遅延」制約が/markets/calendarにも
+// 適用されることが実機で判明した(直近の営業日を要求すると400エラー)。この機能は
+// 常に「今日〜近い未来」の営業日を必要とするため、J-Quantsに頼らず日本の祝日を
+// ローカルで計算する。スタンダードプラン移行後、この制約が無くなっていないか
+// fetchTradingCalendar(上記のJ-Quants呼び出し版)で再確認すること。
+// ---------------------------------------------------------------------------
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const toDateStr = (year: number, month: number, day: number) => `${year}-${pad2(month)}-${pad2(day)}`;
+
+// year年month月のn番目のweekday(0=日,...,6=土)の日付(1〜31)を返す。
+function nthWeekdayOfMonth(year: number, month: number, weekday: number, n: number): number {
+  const first = new Date(Date.UTC(year, month - 1, 1));
+  const firstWeekday = first.getUTCDay();
+  const offset = (weekday - firstWeekday + 7) % 7;
+  return 1 + offset + (n - 1) * 7;
+}
+
+// 春分の日・秋分の日の近似計算式(2000〜2099年で概ね正確。官報の公式決定とは
+// 数年先でずれる可能性があるが、個人アプリの営業日目安としては十分)。
+function vernalEquinoxDay(year: number): number {
+  return Math.floor(20.8431 + 0.242194 * (year - 1980) - Math.floor((year - 1980) / 4));
+}
+function autumnalEquinoxDay(year: number): number {
+  return Math.floor(23.2488 + 0.242194 * (year - 1980) - Math.floor((year - 1980) / 4));
+}
+
+// その年の祝日(振替休日・国民の休日を含まない基本分)。
+function baseHolidaysForYear(year: number): Set<string> {
+  const dates = new Set<string>();
+  dates.add(toDateStr(year, 1, 1)); // 元日
+  dates.add(toDateStr(year, 1, nthWeekdayOfMonth(year, 1, 1, 2))); // 成人の日
+  dates.add(toDateStr(year, 2, 11)); // 建国記念の日
+  dates.add(toDateStr(year, 2, 23)); // 天皇誕生日(令和以降)
+  dates.add(toDateStr(year, 3, vernalEquinoxDay(year))); // 春分の日
+  dates.add(toDateStr(year, 4, 29)); // 昭和の日
+  dates.add(toDateStr(year, 5, 3)); // 憲法記念日
+  dates.add(toDateStr(year, 5, 4)); // みどりの日
+  dates.add(toDateStr(year, 5, 5)); // こどもの日
+  dates.add(toDateStr(year, 7, nthWeekdayOfMonth(year, 7, 1, 3))); // 海の日
+  dates.add(toDateStr(year, 8, 11)); // 山の日
+  dates.add(toDateStr(year, 9, nthWeekdayOfMonth(year, 9, 1, 3))); // 敬老の日
+  dates.add(toDateStr(year, 9, autumnalEquinoxDay(year))); // 秋分の日
+  dates.add(toDateStr(year, 10, nthWeekdayOfMonth(year, 10, 1, 2))); // スポーツの日
+  dates.add(toDateStr(year, 11, 3)); // 文化の日
+  dates.add(toDateStr(year, 11, 23)); // 勤労感謝の日
+  return dates;
+}
+
+const addDays = (dateStr: string, n: number): string => {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const dayOfWeek = (dateStr: string): number => new Date(`${dateStr}T00:00:00Z`).getUTCDay();
+
+const holidayCache = new Map<number, Set<string>>();
+
+// 振替休日(祝日が日曜のとき、後続の非祝日の平日を休日にする)・国民の休日
+// (祝日に挟まれた非祝日の平日を休日にする)を適用した、その年の全祝日集合。
+function allHolidaysForYear(year: number): Set<string> {
+  const cached = holidayCache.get(year);
+  if (cached) return cached;
+
+  const result = new Set(baseHolidaysForYear(year));
+
+  // 振替休日
+  for (const dateStr of [...result]) {
+    if (dayOfWeek(dateStr) !== 0) continue;
+    let next = addDays(dateStr, 1);
+    while (result.has(next)) next = addDays(next, 1);
+    result.add(next);
+  }
+
+  // 国民の休日: 前日・翌日が祝日で自身は非祝日・非日曜の平日
+  for (const dateStr of [...result]) {
+    const middle = addDays(dateStr, 1);
+    const afterMiddle = addDays(dateStr, 2);
+    if (!result.has(middle) && result.has(afterMiddle) && dayOfWeek(middle) !== 0) {
+      result.add(middle);
+    }
+  }
+
+  holidayCache.set(year, result);
+  return result;
+}
+
+export function isJpHoliday(dateStr: string): boolean {
+  const year = Number(dateStr.slice(0, 4));
+  return allHolidaysForYear(year).has(dateStr);
+}
+
+// fetchTradingCalendarの代替(J-Quantsを呼ばずローカルで完結)。土日・日本の祝日を
+// 非営業日(holDiv '0')、それ以外を営業日(holDiv '1')として、from〜to(両端含む)を返す。
+export function getLocalTradingCalendar(from: string, to: string): CalendarDay[] {
+  const days: CalendarDay[] = [];
+  let cursor = from;
+  while (cursor <= to) {
+    const dow = dayOfWeek(cursor);
+    const isWeekend = dow === 0 || dow === 6;
+    const holDiv = !isWeekend && !isJpHoliday(cursor) ? '1' : '0';
+    days.push({ date: cursor, holDiv });
+    cursor = addDays(cursor, 1);
+  }
+  return days;
+}

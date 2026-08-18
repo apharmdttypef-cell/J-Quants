@@ -1,4 +1,13 @@
-import { isTradingDay, settlementDate, businessDaysAfter, calendarDaysBetween, fetchTradingCalendar, type CalendarDay } from '../lambda/shared/trading-calendar';
+import {
+  isTradingDay,
+  settlementDate,
+  businessDaysAfter,
+  calendarDaysBetween,
+  fetchTradingCalendar,
+  getLocalTradingCalendar,
+  isJpHoliday,
+  type CalendarDay,
+} from '../lambda/shared/trading-calendar';
 
 const mockFetch = jest.fn();
 beforeEach(() => {
@@ -84,6 +93,68 @@ describe('品貸日数(days) formula reproduces real taisyaku.jp data points for
 
   test('2026-08-06 (Thu) -> 2 days', () => {
     expect(daysFor('2026-08-06')).toBe(2);
+  });
+});
+
+// J-QuantsのFreeプラン「12週間遅延」制約が/markets/calendarにも適用されることが実機で
+// 判明した(直近12週間分の営業日を要求すると400エラー)ため、暫定対応としてJ-Quantsに
+// 頼らないローカル祝日計算に切り替える(スタンダードプラン移行後、この制約が無くなって
+// いないか再度fetchTradingCalendarで確認すること)。
+describe('isJpHoliday: known 2026 holidays, verified against public calendars', () => {
+  test('元日(固定日) 2026-01-01', () => {
+    expect(isJpHoliday('2026-01-01')).toBe(true);
+  });
+
+  test('成人の日(1月第2月曜) 2026-01-12', () => {
+    expect(isJpHoliday('2026-01-12')).toBe(true);
+    expect(isJpHoliday('2026-01-05')).toBe(false); // 第1月曜は対象外
+  });
+
+  test('春分の日(近似計算) 2026-03-20', () => {
+    expect(isJpHoliday('2026-03-20')).toBe(true);
+  });
+
+  test('秋分の日(近似計算) 2026-09-23', () => {
+    expect(isJpHoliday('2026-09-23')).toBe(true);
+  });
+
+  test('振替休日: 憲法記念日(2026-05-03、日曜)の振替が2026-05-06(水)に発生', () => {
+    // 5/3(日,憲法記念日)→5/4(月,みどりの日で振替不可)→5/5(火,こどもの日で振替不可)→5/6(水,振替休日)
+    expect(isJpHoliday('2026-05-03')).toBe(true);
+    expect(isJpHoliday('2026-05-04')).toBe(true);
+    expect(isJpHoliday('2026-05-05')).toBe(true);
+    expect(isJpHoliday('2026-05-06')).toBe(true);
+    expect(isJpHoliday('2026-05-07')).toBe(false);
+  });
+
+  test('国民の休日: 敬老の日(2026-09-21)と秋分の日(2026-09-23)に挟まれた2026-09-22', () => {
+    expect(isJpHoliday('2026-09-21')).toBe(true);
+    expect(isJpHoliday('2026-09-22')).toBe(true);
+    expect(isJpHoliday('2026-09-23')).toBe(true);
+  });
+
+  test('通常の平日は祝日ではない', () => {
+    expect(isJpHoliday('2026-08-18')).toBe(false); // 火曜、山の日(8/11)の翌週
+  });
+});
+
+describe('getLocalTradingCalendar', () => {
+  test('marks weekends and holidays as non-trading (holDiv 0), ordinary weekdays as trading (holDiv 1)', () => {
+    const calendar = getLocalTradingCalendar('2026-08-08', '2026-08-12');
+    expect(calendar).toEqual([
+      { date: '2026-08-08', holDiv: '0' }, // 土
+      { date: '2026-08-09', holDiv: '0' }, // 日
+      { date: '2026-08-10', holDiv: '1' }, // 月
+      { date: '2026-08-11', holDiv: '0' }, // 火、山の日
+      { date: '2026-08-12', holDiv: '1' }, // 水
+    ]);
+  });
+
+  test('reproduces the same 品貸日数 formula results as the manually-constructed calendar fixture above', () => {
+    const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-20');
+    const settlement = settlementDate(calendar, '2026-08-13');
+    const followingTradingDay = businessDaysAfter(calendar, settlement, 1);
+    expect(calendarDaysBetween(settlement, followingTradingDay)).toBe(1);
   });
 });
 

@@ -4,7 +4,7 @@ import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, QueryCom
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { calcMaxGyakuhibu, calcMaxRate } from '../shared/gyakuhibu-calc';
 import {
-  fetchTradingCalendar,
+  getLocalTradingCalendar,
   isTradingDay,
   settlementDate,
   businessDaysAfter,
@@ -295,17 +295,15 @@ const NA_RISK: RiskCalcResult = { riskStatus: 'na', maxGyakuhibu: null, maxRate:
 // 同じ from/to のカレンダーはリクエスト内で使い回す(権利日が月末近くに集中するため、
 // 一覧全体でJ-Quantsへの呼び出しを数回程度に抑えられる)。呼び出し元ごとに新しい
 // Mapを渡すこと(listYutaiはリクエスト全体で1つ、getYutaiDetailは単発なので使い捨てでよい)。
-async function fetchTradingCalendarCached(
-  apiBaseUrl: string,
-  apiKey: string,
+function fetchTradingCalendarCached(
   from: string,
   to: string,
-  calendarCache: Map<string, Promise<CalendarDay[]>>,
-): Promise<CalendarDay[]> {
+  calendarCache: Map<string, CalendarDay[]>,
+): CalendarDay[] {
   const cacheKey = `${from}|${to}`;
   let cached = calendarCache.get(cacheKey);
   if (!cached) {
-    cached = fetchTradingCalendar(apiBaseUrl, apiKey, from, to);
+    cached = getLocalTradingCalendar(from, to);
     calendarCache.set(cacheKey, cached);
   }
   return cached;
@@ -316,9 +314,7 @@ async function fetchTradingCalendarCached(
 async function calcRisk(
   row: { ticker: string; value: number; unitShares: number },
   rightsDate: string | undefined,
-  apiBaseUrl: string,
-  apiKey: string,
-  calendarCache: Map<string, Promise<CalendarDay[]>>,
+  calendarCache: Map<string, CalendarDay[]>,
 ): Promise<RiskCalcResult> {
   if (!rightsDate) return NA_RISK;
   if (!(await hasMarginBalance(row.ticker))) return NA_RISK;
@@ -328,9 +324,7 @@ async function calcRisk(
 
   const calendarTo = new Date(rightsDate);
   calendarTo.setDate(calendarTo.getDate() + 14);
-  const calendar = await fetchTradingCalendarCached(
-    apiBaseUrl,
-    apiKey,
+  const calendar = fetchTradingCalendarCached(
     rightsDate,
     calendarTo.toISOString().slice(0, 10),
     calendarCache,
@@ -362,12 +356,11 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
   const keyword = query.keyword?.toLowerCase();
   const riskStatusFilter = query.riskStatus && query.riskStatus !== 'all' ? query.riskStatus : undefined;
 
-  const apiKey = await getApiKey();
   const rows = await scanYutaiMaster();
   // リクエスト全体で使い回すカレンダーキャッシュ(Fix 1): 権利日が月末近くに集中するため、
-  // これが無いと銘柄ごとに毎回J-Quantsを叩き、Freeプランのレート制限(5req/分)と
-  // Lambdaの10秒タイムアウトに簡単に引っかかる。
-  const calendarCache = new Map<string, Promise<CalendarDay[]>>();
+  // これが無いと銘柄ごとに毎回計算し直すことになる(getLocalTradingCalendarはローカル
+  // 計算なので実害は小さいが、キャッシュ自体は引き続き無駄がなく安全)。
+  const calendarCache = new Map<string, CalendarDay[]>();
 
   const items = [];
   for (const row of rows) {
@@ -384,7 +377,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
     // 500にしない(Fix 1): 失敗したその銘柄だけ'na'にフォールバックする。
     let riskStatus: RiskStatus;
     try {
-      riskStatus = (await calcRisk(row, rightsDate, API_BASE_URL, apiKey, calendarCache)).riskStatus;
+      riskStatus = (await calcRisk(row, rightsDate, calendarCache)).riskStatus;
     } catch (error) {
       console.error(`calcRisk failed for ${row.ticker}, falling back to riskStatus 'na'`, error);
       riskStatus = 'na';
@@ -404,7 +397,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
   const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
-  const monthCalendar = await fetchTradingCalendar(API_BASE_URL, apiKey, monthStart, monthEnd);
+  const monthCalendar = getLocalTradingCalendar(monthStart, monthEnd);
 
   return jsonResponse(200, {
     tickers: items,
@@ -484,16 +477,12 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
   const per = price && eps && eps > 0 ? price.close / eps : null;
 
   const rightsDate = await nextRightsDate(ticker);
-  const apiKey = await getApiKey();
 
-  // このリクエスト限りの使い捨てキャッシュ(1銘柄・1回のカレンダー取得しか起きないため
-  // listYutaiほどの効果はないが、calcRiskの引数を共通化するために渡す)。
-  const calendarCache = new Map<string, Promise<CalendarDay[]>>();
+  // このリクエスト限りの使い捨てキャッシュ(calcRiskの引数を共通化するために渡す)。
+  const calendarCache = new Map<string, CalendarDay[]>();
   const risk = await calcRisk(
     { ticker: master.ticker, value: master.value, unitShares: master.unitShares },
     rightsDate,
-    API_BASE_URL,
-    apiKey,
     calendarCache,
   );
 
