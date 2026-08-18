@@ -7,15 +7,25 @@ CDK(TypeScript)でインフラを定義し、フロントはVite + React + TypeS
 
 ```
 EventBridge(毎日 JST18:00)
-  → BatchFetchFunction(Lambda)
+  → PriceBatchFunction(Lambda)
       - JQuantsWatchlist ∪ JQuantsYutaiMasterテーブルを読んで対象銘柄を取得
-      - J-Quants API(x-api-keyヘッダー認証)から四本値・財務サマリを取得
+      - J-Quants API(x-api-keyヘッダー認証)から四本値を取得
         (5req/分のレート制限を守るため呼び出しごとに13秒待機)
-      → JQuantsStockPrices / JQuantsFinancialSummary に upsert
+      - 株価は日次更新が適切
+      → JQuantsStockPrices に upsert
 
-EventBridge(毎日 JST18:30)
+EventBridge(毎週月曜 JST20:00)
+  → FinancialSummaryBatchFunction(Lambda)
+      - JQuantsWatchlist ∪ JQuantsYutaiMasterテーブルを読んで対象銘柄を取得
+      - J-Quants API(x-api-keyヘッダー認証)から決算サマリを取得
+        (5req/分のレート制限を守るため呼び出しごとに13秒待機)
+      - 決算サマリは四半期ごとにしか更新されないため週次で十分
+      → JQuantsFinancialSummary に upsert
+
+EventBridge(毎週月曜 JST18:30)
   → MarginBalanceBatchFunction(Lambda)
       - JQuantsYutaiMasterの全銘柄の信用残を取得(現在はダミーデータ、下記参照)
+      - 信用残は本来週次更新のため週次で十分
       → JQuantsMarginBalance に upsert
 
 EventBridge(毎日 JST19:00)
