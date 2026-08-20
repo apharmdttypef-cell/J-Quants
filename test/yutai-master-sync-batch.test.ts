@@ -1,0 +1,93 @@
+const mockSend = jest.fn();
+const mockFetchAllListings = jest.fn();
+
+jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn() }));
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
+  PutCommand: jest.fn((input: unknown) => input),
+}));
+jest.mock('../lambda/shared/kabuyutai-client', () => ({
+  fetchAllListings: (...args: unknown[]) => mockFetchAllListings(...args),
+}));
+
+process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { handler } = require('../lambda/yutai-master-sync-batch/index') as { handler: () => Promise<void> };
+
+beforeEach(() => {
+  mockSend.mockReset();
+  mockFetchAllListings.mockReset();
+});
+
+test('upserts each listed entry with unitShares fixed at 100', async () => {
+  mockFetchAllListings.mockResolvedValueOnce([
+    { ticker: '2157', companyName: 'コシダカホールディングス', content: '割引券（2,000円相当～）', rightsMonths: [2, 8], value: 2000 },
+  ]);
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  expect(mockSend).toHaveBeenCalledTimes(1);
+  expect(mockSend.mock.calls[0][0]).toMatchObject({
+    TableName: 'JQuantsYutaiMaster',
+    Item: {
+      ticker: '2157',
+      companyName: 'コシダカホールディングス',
+      content: '割引券（2,000円相当～）',
+      value: 2000,
+      unitShares: 100,
+      rightsMonths: [2, 8],
+    },
+  });
+});
+
+test('skips an entry with no extractable value, logging a warning', async () => {
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    mockFetchAllListings.mockResolvedValueOnce([
+      { ticker: '1111', companyName: 'テスト企業', content: '特典あり', rightsMonths: [3], value: undefined },
+    ]);
+
+    await handler();
+
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1111'));
+  } finally {
+    warnSpy.mockRestore();
+  }
+});
+
+test('skips an entry with no rightsMonths, logging a warning', async () => {
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    mockFetchAllListings.mockResolvedValueOnce([
+      { ticker: '2222', companyName: 'テスト企業2', content: 'QUOカード（500円相当～）', rightsMonths: [], value: 500 },
+    ]);
+
+    await handler();
+
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('2222'));
+  } finally {
+    warnSpy.mockRestore();
+  }
+});
+
+test('continues past a single upsert failure and processes the remaining entries', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    mockFetchAllListings.mockResolvedValueOnce([
+      { ticker: '3333', companyName: 'A社', content: 'QUOカード（500円相当～）', rightsMonths: [3], value: 500 },
+      { ticker: '4444', companyName: 'B社', content: '商品券（1,000円相当～）', rightsMonths: [9], value: 1000 },
+    ]);
+    mockSend.mockRejectedValueOnce(new Error('DynamoDB error')).mockResolvedValueOnce({});
+
+    await handler();
+
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('3333'), expect.any(Error));
+  } finally {
+    errorSpy.mockRestore();
+  }
+});
