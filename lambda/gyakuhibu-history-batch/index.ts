@@ -28,6 +28,7 @@ interface RightsDateCandidate {
 
 async function scanYutaiMaster(): Promise<MasterRow[]> {
   const rows: MasterRow[] = [];
+  let skippedCount = 0;
   let exclusiveStartKey: Record<string, unknown> | undefined;
 
   do {
@@ -37,10 +38,16 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
     for (const item of result.Items ?? []) {
       if (typeof item.ticker === 'string' && typeof item.unitShares === 'number' && Array.isArray(item.rightsMonths)) {
         rows.push({ ticker: item.ticker, unitShares: item.unitShares, rightsMonths: item.rightsMonths });
+      } else {
+        skippedCount++;
       }
     }
     exclusiveStartKey = result.LastEvaluatedKey;
   } while (exclusiveStartKey);
+
+  if (skippedCount > 0) {
+    console.warn(`scanYutaiMaster: skipped ${skippedCount} rows with missing/malformed unitShares or rightsMonths`);
+  }
 
   return rows;
 }

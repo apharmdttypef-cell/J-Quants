@@ -151,6 +151,49 @@ describe('fetchAllListings', () => {
     expect(mockFetch).toHaveBeenCalledTimes(12);
     expect(entries).toEqual([]);
   });
+
+  test('logs and continues past a single month that fails to fetch', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // MONTHS配列の順序(january, february, march, ...)通りに1回ずつ応答を積む。
+      // marchだけfetch自体がrejectし、他の11ヶ月は空ページ(0件)を返す。
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, text: async () => '' }) // january
+        .mockResolvedValueOnce({ ok: true, text: async () => '' }) // february
+        .mockRejectedValueOnce(new Error('network error')) // march: fails
+        .mockResolvedValue({ ok: true, text: async () => '' }); // april〜december
+
+      const entries = await fetchAllListings();
+
+      expect(mockFetch).toHaveBeenCalledTimes(12);
+      expect(entries).toEqual([]);
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('march'), expect.any(Error));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  test('returns the successfully-scraped entries from the other 11 months when one month fails', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const aprilHtml =
+        '<!-- ▼ランキング_ブロック --><div class="table_tr"><p><a href="x" class="kigyoumei">4月企業</a>（1234）</p><p>【優待内容】QUOカード（500円相当～）</p><p>【権利確定月】<span class="tousi_price">4月</span></p></div><!-- ▲ランキング_ブロック -->';
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, text: async () => '' }) // january
+        .mockResolvedValueOnce({ ok: true, text: async () => '' }) // february
+        .mockRejectedValueOnce(new Error('network error')) // march: fails
+        .mockResolvedValueOnce({ ok: true, text: async () => aprilHtml }) // april: succeeds with an entry
+        .mockResolvedValue({ ok: true, text: async () => '' }); // may〜december
+
+      const entries = await fetchAllListings();
+
+      // marchが例外を投げても、他の月(ここではapril)の結果は失われずに返る。
+      expect(entries.map((e) => e.ticker)).toEqual(['1234']);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 });
 
 describe('findTicker', () => {

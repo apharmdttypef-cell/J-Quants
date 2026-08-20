@@ -118,10 +118,19 @@ export async function fetchMonthListings(month: string): Promise<KabuyutaiEntry[
   return entries;
 }
 
+// 1ヶ月分の取得が失敗しても他の11ヶ月分の結果を失わないよう、月ごとにtry/catchして
+// ログの上で継続する(本プロジェクトの他バッチと同じ「銘柄/項目ごとにcatchしてログし継続」
+// という方針をここでも踏襲する)。呼び出し元(yutai-master-sync-batch)はfetchAllListings()の
+// 完了を待ってからDynamoDBへの書き込みを開始するため、ここで全体を落とすと成功した月の
+// 分まで丸ごと失われてしまう。
 export async function fetchAllListings(): Promise<KabuyutaiEntry[]> {
   const all: KabuyutaiEntry[] = [];
   for (const month of MONTHS) {
-    all.push(...(await fetchMonthListings(month)));
+    try {
+      all.push(...(await fetchMonthListings(month)));
+    } catch (error) {
+      console.error(`fetchAllListings: failed to fetch listings for month "${month}"; skipping`, error);
+    }
     await sleep(REQUEST_INTERVAL_MS);
   }
   return all;

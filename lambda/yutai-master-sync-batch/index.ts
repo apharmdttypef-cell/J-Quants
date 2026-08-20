@@ -13,6 +13,7 @@ export const handler = async (): Promise<void> => {
   const entries = await fetchAllListings();
   let upserted = 0;
   let skipped = 0;
+  let failed = 0;
 
   // 年複数回権利確定の銘柄は月ごとのページに重複掲載される(rightsMonths自体に全ての月が
   // 入っているため、同一ticker・同一内容のentryが複数回来る)。複数回upsertされても
@@ -45,9 +46,10 @@ export const handler = async (): Promise<void> => {
       );
       upserted++;
     } catch (error) {
+      failed++;
       console.error(`${entry.ticker}: failed to upsert yutai master`, error);
     }
   }
 
-  console.log(`yutai-master-sync-batch: upserted ${upserted}, skipped ${skipped} (of ${entries.length} listed)`);
+  console.log(`yutai-master-sync-batch: upserted ${upserted}, skipped ${skipped}, failed ${failed} (of ${entries.length} listed)`);
 };
