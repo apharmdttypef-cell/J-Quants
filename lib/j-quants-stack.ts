@@ -19,7 +19,6 @@ export class JQuantsStack extends cdk.Stack {
   public readonly financialSummaryTable: dynamodb.Table;
   public readonly watchlistTable: dynamodb.Table;
   public readonly yutaiMasterTable: dynamodb.Table;
-  public readonly yutaiRightsDateTable: dynamodb.Table;
   public readonly marginBalanceTable: dynamodb.Table;
   public readonly gyakuhibuActualTable: dynamodb.Table;
   public readonly apiKeySecret: secretsmanager.Secret;
@@ -68,17 +67,6 @@ export class JQuantsStack extends cdk.Stack {
     this.yutaiMasterTable = new dynamodb.Table(this, 'JQuantsYutaiMasterTable', {
       tableName: 'JQuantsYutaiMaster',
       partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    // 銘柄ごとの権利日。年複数回のケースに対応するため1行1権利日で
-    // 過去分・将来分を問わずアプリ外から個別投入する。
-    this.yutaiRightsDateTable = new dynamodb.Table(this, 'JQuantsYutaiRightsDateTable', {
-      tableName: 'JQuantsYutaiRightsDate',
-      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'rightsDate', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
@@ -238,19 +226,55 @@ export class JQuantsStack extends cdk.Stack {
       memorySize: 256,
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
-        YUTAI_RIGHTS_DATE_TABLE_NAME: this.yutaiRightsDateTable.tableName,
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
       },
     });
 
-    this.yutaiRightsDateTable.grantReadData(gyakuhibuHistoryBatchFn);
     this.yutaiMasterTable.grantReadData(gyakuhibuHistoryBatchFn);
     this.gyakuhibuActualTable.grantReadWriteData(gyakuhibuHistoryBatchFn);
 
     new events.Rule(this, 'GyakuhibuHistoryBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '0', hour: '10' }),
       targets: [new targets.LambdaFunction(gyakuhibuHistoryBatchFn)],
+    });
+
+    const yutaiMasterSyncBatchFn = new nodejs.NodejsFunction(this, 'YutaiMasterSyncBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'yutai-master-sync-batch', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      // kabuyutai.comの月別一覧ページ(12ヶ月×数ページ)を礼儀正しい間隔で走査するため長め。
+      // EventBridgeスケジュールは持たず、初回構築時・取りこぼし確認時に手動invokeする運用。
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+      },
+    });
+
+    this.yutaiMasterTable.grantWriteData(yutaiMasterSyncBatchFn);
+
+    const yutaiTdnetWatchBatchFn = new nodejs.NodejsFunction(this, 'YutaiTdnetWatchBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'yutai-tdnet-watch-batch', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+      },
+    });
+
+    this.yutaiMasterTable.grantWriteData(yutaiTdnetWatchBatchFn);
+
+    // TDnetの直近開示から株主優待関連の新設・変更・廃止を検知する。既存の週次バッチ
+    // (FinancialSummaryBatchSchedule: 月11:00 UTC、MarginBalanceBatchSchedule: 月9:30 UTC)
+    // と重ならない時間帯。JST 月曜21:00 = UTC 月曜12:00。
+    new events.Rule(this, 'YutaiTdnetWatchBatchSchedule', {
+      schedule: events.Schedule.cron({ minute: '0', hour: '12', weekDay: 'MON' }),
+      targets: [new targets.LambdaFunction(yutaiTdnetWatchBatchFn)],
     });
 
     const referenceApiFn = new nodejs.NodejsFunction(this, 'ReferenceApiFunction', {
@@ -266,7 +290,6 @@ export class JQuantsStack extends cdk.Stack {
         WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
         SECRET_ARN: this.apiKeySecret.secretArn,
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
-        YUTAI_RIGHTS_DATE_TABLE_NAME: this.yutaiRightsDateTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
       },
@@ -277,7 +300,6 @@ export class JQuantsStack extends cdk.Stack {
     this.watchlistTable.grantReadWriteData(referenceApiFn);
     this.apiKeySecret.grantRead(referenceApiFn);
     this.yutaiMasterTable.grantReadData(referenceApiFn);
-    this.yutaiRightsDateTable.grantReadData(referenceApiFn);
     this.marginBalanceTable.grantReadData(referenceApiFn);
     this.gyakuhibuActualTable.grantReadData(referenceApiFn);
 

@@ -186,18 +186,6 @@ test('creates the JQuantsYutaiMaster table with ticker key and RETAIN policy', (
   });
 });
 
-test('creates the JQuantsYutaiRightsDate table with ticker/rightsDate key', () => {
-  const template = synth();
-
-  template.hasResourceProperties('AWS::DynamoDB::Table', {
-    TableName: 'JQuantsYutaiRightsDate',
-    KeySchema: [
-      { AttributeName: 'ticker', KeyType: 'HASH' },
-      { AttributeName: 'rightsDate', KeyType: 'RANGE' },
-    ],
-  });
-});
-
 test('creates the JQuantsMarginBalance table with ticker/date key', () => {
   const template = synth();
 
@@ -247,7 +235,6 @@ test('creates the gyakuhibu history batch Lambda wired to the rights-date/master
     Handler: 'index.handler',
     Environment: {
       Variables: Match.objectLike({
-        YUTAI_RIGHTS_DATE_TABLE_NAME: Match.anyValue(),
         GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
       }),
     },
@@ -267,4 +254,40 @@ test('throws a clear error when APP_PASSWORD is not set', () => {
   } finally {
     process.env.APP_PASSWORD = original;
   }
+});
+
+test('does not create a JQuantsYutaiRightsDate table (removed in favor of computed rights dates)', () => {
+  const template = synth();
+
+  const resources = template.findResources('AWS::DynamoDB::Table');
+  const tableNames = Object.values(resources).map((r) => (r as { Properties: { TableName: string } }).Properties.TableName);
+  expect(tableNames).not.toContain('JQuantsYutaiRightsDate');
+});
+
+test('creates the yutai-master-sync-batch Lambda with write access to the yutai master table and no schedule', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Environment: {
+      Variables: Match.objectLike({ YUTAI_MASTER_TABLE_NAME: Match.anyValue() }),
+    },
+  });
+
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  // yutai-master-sync-batch自体のスケジュールは存在しない。他バッチの4つのスケジュール
+  // (price/financial-summary/margin-balance/gyakuhibu-history)+tdnet-watchの5つのみ。
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(5);
+});
+
+test('creates the yutai-tdnet-watch-batch Lambda on a weekly Monday schedule', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'cron(0 12 ? * MON *)',
+    State: 'ENABLED',
+  });
 });
