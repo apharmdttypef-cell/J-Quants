@@ -74,7 +74,7 @@ kabuyutai.comの月別一覧ページ(`https://www.kabuyutai.com/yutai/<month>.h
 
 `kabuyutai-client.ts`を共用する(個別銘柄の再取得は一覧ページの該当月ページを再走査する形になる想定。銘柄コード直接検索が使えるなら実装時にそちらへ切り替える)。
 
-TDnetサイト自体のスクレイピング手順(URL構造・日付ごとのブラウズ方式か検索方式か・Bot対策の有無)も実装時に実機検証する。
+実データ調査済み(`docs/superpowers/notes/2026-08-20-tdnet-list-page-format.md`): kabuyutai.com同様Bot対策・CSRF無しの素のGETで200が返る。`https://www.release.tdnet.info/inbs/I_list_00{page}_{YYYYMMDD}.html`という日付・ページ番号ベースのURLを直接構築でき、JS/dropdown操作は不要。開示1件が1行(`<tr>`)で、`kjTime`/`kjCode`/`kjName`/`kjTitle`という共通クラス名を持つセルに機械的に分解できる。ただし証券コードが5桁(例: `24670`)で出現し、`JQuantsYutaiMaster`の4桁tickerとの変換ルールは実装時に複数実例で検証する。優待関連キーワードの実際の表記ゆれ(「株主優待制度の新設/一部変更/廃止に関するお知らせ」等)も、実例が取得できていないため実装時に確認する。
 
 ## データモデル変更
 
