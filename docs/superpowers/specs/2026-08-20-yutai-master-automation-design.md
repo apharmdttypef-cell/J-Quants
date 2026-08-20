@@ -57,13 +57,13 @@ lambda/
 
 kabuyutai.comの月別一覧ページ(`https://www.kabuyutai.com/yutai/<month>.html`、ページネーションあり)をパースし、掲載銘柄ごとに`{ ticker, content, rightsMonths }`を返す関数を提供する。`value`は`content`から正規表現(`/(\d[\d,]*)円相当/`相当)で抽出するヘルパーも含む。個別詳細ページ用のスクレイパーは実装しない(一覧ページのみで完結する設計のため)。
 
-taisyaku.jpの実装時と同様、実際のHTTPレベルの挙動(ヘッダー・ページネーションの実際の遷移方法・Bot対策の有無)は未検証のため、実装時に実機で確認しながら仕上げる。あわせて、kabuyutai.comに銘柄コードでの直接検索機能があるかどうかも実装時に確認する(あれば`yutai-tdnet-watch-batch`が該当銘柄1件だけを引き直す際に一覧ページ全体を再走査せずに済む)。
+実データ調査済み(`docs/superpowers/notes/2026-08-20-kabuyutai-list-page-format.md`): Bot対策・CSRF・セッションCookie無しの素のGETで200が返る。1ページ20銘柄、`<!-- ▼ランキング_ブロック -->`〜`<!-- ▲ランキング_ブロック -->`のHTMLコメントで銘柄ごとのブロックに分割してから各項目を正規表現抽出する(ページ全体への直接regexは、ブロック外の同名クラスに誤マッチする恐れがあるため避ける)。ページネーションは月ごとに件数が異なり(実測: 8月は7ページ)、`pagination`ブロックの次ページリンクが無くなるまで順に辿る方式で実装する。あわせて、kabuyutai.comに銘柄コードでの直接検索機能(`/tool/`ページ)があるかどうかも実装時に確認する(あれば`yutai-tdnet-watch-batch`が該当銘柄1件だけを引き直す際に該当月の一覧ページ全体を再走査せずに済む)。
 
 ### `lambda/yutai-master-sync-batch/index.ts`(新規)
 
 **EventBridgeスケジュールを持たない**。デプロイはするが、初回構築時と、取りこぼしに気づいた際の手動再実行(`aws lambda invoke`)のみを想定する。
 
-処理内容: 月別一覧ページ(12ヶ月×ページネーション、合計約24ページ)をすべて走査 → 掲載銘柄ごとに`kabuyutai-client.ts`で`{ ticker, content, rightsMonths }`を抽出 → `value`を`content`から抽出(失敗時はログ警告してスキップ)→ J-Quants `/listed/info`で`companyName`を取得 → `unitShares: 100`固定 → `JQuantsYutaiMaster`へupsert。
+処理内容: 月別一覧ページ(12ヶ月分、各月ページネーションを次ページリンクが無くなるまで辿る。月ごとの件数は不定で、実測では8月だけで7ページ=最大140銘柄程度)をすべて走査 → 掲載銘柄ごとに`kabuyutai-client.ts`で`{ ticker, content, rightsMonths }`を抽出 → `value`を`content`から抽出(失敗時はログ警告してスキップ)→ J-Quants `/listed/info`で`companyName`を取得 → `unitShares: 100`固定 → `JQuantsYutaiMaster`へupsert。
 
 ### `lambda/yutai-tdnet-watch-batch/index.ts`(新規)
 
