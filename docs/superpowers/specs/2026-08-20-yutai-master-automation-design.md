@@ -32,7 +32,7 @@ J-Quants APIには「優待を実施しているか」「優待内容」「権�
 | 優待内容(`content`) | 同上(一覧ページの要約テキスト) | 個別詳細ページ(`/kobetu/xxx.html`)は使わない。要約テキストで足りると判断(下記参照) |
 | 権利確定月(`rightsMonths`) | 同上 | 「2月・8月」のような表記をそのまま配列化。各社独自の制度でJ-Quantsの決算期とは必ずしも一致しないため、この情報源に依存せざるを得ない |
 | 優待価値(`value`) | 同上、`content`内の正規表現抽出 | 優待内容のテキストに「(XXX円相当〜)」という形式で最低単元の価値が埋め込まれている(実データで確認済み、例: コシダカHD「優待利用割引券(2,000円相当〜)」)。`/(\d[\d,]*)\s*円相当/`相当のパターンで抽出する想定(実装時に実データのバリエーションを見て調整)。マッチしない場合はログに警告を出し、その銘柄は投入をスキップする |
-| 企業名(`companyName`) | J-Quants `/listed/info` | スクレイピング対象外。既存のウォッチリスト追加フローと同じ取得方法に統一し、表記のブレを避ける |
+| 企業名(`companyName`) | kabuyutai.com 月別一覧ページ(`kigyoumei`) | 当初はJ-Quants `/listed/info`からの取得を検討したが、`yutai-master-sync-batch`は1回の実行で完結させたい一方、1,000銘柄をJ-Quants `/equities/master`へ1件ずつ問い合わせるとFreeプランのレート制限(13秒間隔)で約3.6時間かかりLambdaの15分上限に収まらないため断念。一覧ページ取得時に同時に得られる企業名をそのまま使う(表記がJ-Quants側と多少ブレる可能性は許容する) |
 | 単元株数(`unitShares`) | 一律`100`固定 | 2018年10月1日付で東証上場の内国株は単元株数100株に統一済みで、有価証券上場規程第427条の2により100株以外への変更が認められていない(規則上の裏付けあり)。スクレイピング不要 |
 
 ### 検討したが採用しなかった情報源
@@ -55,7 +55,7 @@ lambda/
 
 ### `lambda/shared/kabuyutai-client.ts`(新規)
 
-kabuyutai.comの月別一覧ページ(`https://www.kabuyutai.com/yutai/<month>.html`、ページネーションあり)をパースし、掲載銘柄ごとに`{ ticker, content, rightsMonths }`を返す関数を提供する。`value`は`content`から正規表現(`/(\d[\d,]*)円相当/`相当)で抽出するヘルパーも含む。個別詳細ページ用のスクレイパーは実装しない(一覧ページのみで完結する設計のため)。
+kabuyutai.comの月別一覧ページ(`https://www.kabuyutai.com/yutai/<month>.html`、ページネーションあり)をパースし、掲載銘柄ごとに`{ ticker, companyName, content, rightsMonths }`を返す関数を提供する。`value`は`content`から正規表現(`/(\d[\d,]*)円相当/`相当)で抽出するヘルパーも含む。個別詳細ページ用のスクレイパーは実装しない(一覧ページのみで完結する設計のため)。
 
 実データ調査済み(`docs/superpowers/notes/2026-08-20-kabuyutai-list-page-format.md`): Bot対策・CSRF・セッションCookie無しの素のGETで200が返る。1ページ20銘柄、`<!-- ▼ランキング_ブロック -->`〜`<!-- ▲ランキング_ブロック -->`のHTMLコメントで銘柄ごとのブロックに分割してから各項目を正規表現抽出する(ページ全体への直接regexは、ブロック外の同名クラスに誤マッチする恐れがあるため避ける)。ページネーションは月ごとに件数が異なり(実測: 8月は7ページ)、`pagination`ブロックの次ページリンクが無くなるまで順に辿る方式で実装する。あわせて、kabuyutai.comに銘柄コードでの直接検索機能(`/tool/`ページ)があるかどうかも実装時に確認する(あれば`yutai-tdnet-watch-batch`が該当銘柄1件だけを引き直す際に該当月の一覧ページ全体を再走査せずに済む)。
 
@@ -63,7 +63,7 @@ kabuyutai.comの月別一覧ページ(`https://www.kabuyutai.com/yutai/<month>.h
 
 **EventBridgeスケジュールを持たない**。デプロイはするが、初回構築時と、取りこぼしに気づいた際の手動再実行(`aws lambda invoke`)のみを想定する。
 
-処理内容: 月別一覧ページ(12ヶ月分、各月ページネーションを次ページリンクが無くなるまで辿る。月ごとの件数は不定で、実測では8月だけで7ページ=最大140銘柄程度)をすべて走査 → 掲載銘柄ごとに`kabuyutai-client.ts`で`{ ticker, content, rightsMonths }`を抽出 → `value`を`content`から抽出(失敗時はログ警告してスキップ)→ J-Quants `/listed/info`で`companyName`を取得 → `unitShares: 100`固定 → `JQuantsYutaiMaster`へupsert。
+処理内容: 月別一覧ページ(12ヶ月分、各月ページネーションを次ページリンクが無くなるまで辿る。月ごとの件数は不定で、実測では8月だけで7ページ=最大140銘柄程度)をすべて走査 → 掲載銘柄ごとに`kabuyutai-client.ts`で`{ ticker, companyName, content, rightsMonths }`を抽出 → `value`を`content`から抽出(失敗時はログ警告してスキップ)→ `unitShares: 100`固定 → `JQuantsYutaiMaster`へupsert。J-Quantsへの問い合わせは行わない(1銘柄ごとの企業名照会がレート制限で1回の実行に収まらないため)。
 
 ### `lambda/yutai-tdnet-watch-batch/index.ts`(新規)
 
