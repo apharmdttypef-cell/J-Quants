@@ -165,3 +165,16 @@ export function getLocalTradingCalendar(from: string, to: string): CalendarDay[]
   }
   return days;
 }
+
+// year年month月の最終営業日から2営業日前(権利付き最終日T)を返す。calendarにその月の
+// 営業日が1件も含まれない場合はundefined。優待マスタのrightsMonths(権利確定月)から
+// 実際の権利付き最終日を都度計算するために使う(JQuantsYutaiRightsDateテーブル廃止に伴う)。
+export function rightsDateForMonth(calendar: CalendarDay[], year: number, month: number): string | undefined {
+  const prefix = `${year}-${String(month).padStart(2, '0')}`;
+  const tradingDays = calendar.filter(isTradingDay).map((d) => d.date).sort();
+  const monthTradingDays = tradingDays.filter((d) => d.startsWith(prefix));
+  const record = monthTradingDays[monthTradingDays.length - 1];
+  if (!record) return undefined;
+  const idx = tradingDays.indexOf(record);
+  return idx >= 2 ? tradingDays[idx - 2] : undefined;
+}

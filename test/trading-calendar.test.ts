@@ -6,6 +6,7 @@ import {
   fetchTradingCalendar,
   getLocalTradingCalendar,
   isJpHoliday,
+  rightsDateForMonth,
   type CalendarDay,
 } from '../lambda/shared/trading-calendar';
 
@@ -171,4 +172,21 @@ test('fetchTradingCalendar calls /markets/calendar with from/to and returns the 
     { headers: { 'x-api-key': 'test-api-key' } },
   );
   expect(result).toEqual([{ date: '2026-08-14', holDiv: '1' }]);
+});
+
+describe('rightsDateForMonth', () => {
+  test('2026-08 (月末最終営業日8/31・月曜) -> 2026-08-27(T、2営業日前)', () => {
+    const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-31');
+    expect(rightsDateForMonth(calendar, 2026, 8)).toBe('2026-08-27');
+  });
+
+  test('2026-02 (月末最終営業日2/27・金曜) -> 2026-02-25(T、2営業日前)', () => {
+    const calendar = getLocalTradingCalendar('2026-02-01', '2026-02-28');
+    expect(rightsDateForMonth(calendar, 2026, 2)).toBe('2026-02-25');
+  });
+
+  test('該当月に営業日が1件も無いカレンダーではundefinedを返す', () => {
+    const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-31');
+    expect(rightsDateForMonth(calendar, 2026, 9)).toBeUndefined();
+  });
 });
