@@ -30,8 +30,22 @@ EventBridge(毎週月曜 JST18:30)
 
 EventBridge(毎日 JST19:00)
   → GyakuhibuHistoryBatchFunction(Lambda)
-      - JQuantsYutaiRightsDateの未取得の権利日についてtaisyaku.jpから実績逆日歩を取得
+      - JQuantsYutaiMasterの`rightsMonths`(権利確定月)から過去の権利日を計算し(`rightsDateForMonth`)、
+        JQuantsGyakuhibuActual未取得のものについてtaisyaku.jpから実績逆日歩を取得(1回の実行につき最大200件、
+        `MAX_GYAKUHIBU_FETCHES_PER_RUN`)
       → JQuantsGyakuhibuActual に upsert
+
+(手動invokeのみ、EventBridgeスケジュールなし)
+  → YutaiMasterSyncBatchFunction(Lambda)
+      - kabuyutai.comの月別優待銘柄一覧ページ(1〜12月)を全ページ取得し、優待実施銘柄を一括抽出
+      - 単元株数は2018年10月の東証売買単位統一以降一律100株固定のため取得不要
+      → JQuantsYutaiMaster に upsert(初回・追加銘柄の一括バックフィル用)
+
+EventBridge(毎週月曜 JST21:00)
+  → YutaiTdnetWatchBatchFunction(Lambda)
+      - TDnet(適時開示情報閲覧サービス)の直近7日分の開示一覧から「株主優待」を含む開示を検知
+      - 該当銘柄をkabuyutai.comで再取得(新設・変更・廃止を反映)
+      → JQuantsYutaiMaster に upsert
 
 ブラウザ
   → CloudFront(Basic認証: CloudFront Function)
@@ -50,12 +64,11 @@ EventBridge(毎日 JST19:00)
 | `JQuantsStockPrices` | PK `ticker` / SK `date` | 四本値・出来高 |
 | `JQuantsFinancialSummary` | PK `ticker` / SK `discDate` | 決算サマリ(売上・利益・EPS等) |
 | `JQuantsWatchlist` | PK `ticker` | 取得対象銘柄の正本。フロントの「ウォッチリスト管理」画面から追加/削除 |
-| `JQuantsYutaiMaster` | PK `ticker` | 優待マスタ本体(`companyName` / `content` / `value` / `unitShares`)。書き込みはアプリ外(手動スクリプト等でDynamoDBへ直接投入)で行う前提の**読み取り専用**テーブル |
-| `JQuantsYutaiRightsDate` | PK `ticker` / SK `rightsDate` | 銘柄ごとの**権利付き最終日**(1行1権利日、年複数回にも対応)。こちらもアプリ外から投入。**権利確定日(月末等の基準日)そのものではなく、そこから2営業日前(買付最終日T)を入れる**。逆日歩の計算・taisyaku.jp実績照合はいずれも`rightsDate`をTとしてT+2(受渡日=権利確定日)を自動算出する前提のため、月末日をそのまま入れると全て2営業日分ずれる |
+| `JQuantsYutaiMaster` | PK `ticker` | 優待マスタ本体(`companyName` / `content` / `value` / `unitShares` / `rightsMonths`〔権利確定月の配列、例`[3, 9]`〕)。`YutaiMasterSyncBatchFunction`(初回・手動)がkabuyutai.comから一括バックフィルし、`YutaiTdnetWatchBatchFunction`(週次)がTDnet開示をトリガーに継続更新する。**自動投入テーブル**(旧: アプリ外から手動投入する読み取り専用テーブルだったが自動化済み) |
 | `JQuantsMarginBalance` | PK `ticker` / SK `date` | 信用残時系列(`financingBalance`融資残・`lendingBalance`貸株残・`source`=`weekly`\|`daily-alert`) |
 | `JQuantsGyakuhibuActual` | PK `ticker` / SK `rightsDate` | taisyaku.jpから取得した権利日ごとの実績逆日歩(`totalAmount` / `days` / `avgRate`)。直近3年分のみ存在しうる |
 
-`cdk destroy` してもこの7テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
+`cdk destroy` してもこの6テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
 
 ### シークレット
 
@@ -80,7 +93,7 @@ EventBridge(毎日 JST19:00)
 
 **フェーズ分け(ダミーAPI→本番API)**: 逆日歩見積りの計算には信用残(融資残・貸株残)データが必要だが、これを取得するJ-Quants `mkt-margin-int` / `mkt-margin-alert` はStandardプラン(有料)専用。画面・遷移の動作確認が終わるまで課金を遅らせるため、現状(フェーズ1)は`lambda/margin-balance-batch/data-source.ts`が信用残を**ticker+日付から決定的な擬似乱数で生成したダミーデータ**で返している(同じ入力には常に同じ値を返すため、日々のトレンドグラフが実行のたびにジャンプすることはない)。したがって**現在デプロイされている`/yutai`画面の信用残トレンド・貸借銘柄判定はすべてダミー値**であり、実際の逆日歩リスクの参考にはならない。フェーズ2でStandardプランへアップグレードした際は、このモジュールの中身だけをJ-Quants呼び出しに差し替える設計になっており、DynamoDBスキーマ・API・逆日歩計算ロジック・フロントは変更不要。なお取引カレンダー(権利日→受渡日の日数算出)と実績逆日歩(taisyaku.jp)はJ-QuantsのFreeプラン/無料サイトでそれぞれ取得できるため、フェーズ1から本番のデータを使っている。
 
-優待マスタ(`JQuantsYutaiMaster` / `JQuantsYutaiRightsDate`)への新規銘柄追加・内容更新は本アプリのUIでは行わない。別途手動スクリプト等でDynamoDBへ直接投入する前提で、アプリ側は常にマスタが最新状態であることを仮定した検索・計算・表示のみを担う。
+優待マスタ(`JQuantsYutaiMaster`)への新規銘柄追加・内容更新は本アプリのUIでは行わない代わりに、自動バッチが担う。初回・大量追加時は`YutaiMasterSyncBatchFunction`(手動invoke)がkabuyutai.com(`lambda/shared/kabuyutai-client.ts`)の月別優待銘柄一覧ページを1〜12月すべて取得して一括投入する。単元株数は2018年10月の東証売買単位統一(有価証券上場規程第427条の2)以降、内国株は原則100株固定のためスクレイピングせず一律100を設定している。会社名もJ-Quants `/equities/master`ではなくkabuyutai.comの掲載名をそのまま使う(数千銘柄規模で1件ずつJ-Quantsに問い合わせるとレート制限に抵触するため。詳細な検討は`docs/superpowers/specs/2026-08-20-yutai-master-automation-design.md`)。継続的な変更検知は`YutaiTdnetWatchBatchFunction`(週次)がTDnet(適時開示情報閲覧サービス、無料公開サイト)の直近開示から「株主優待」関連のキーワードを含む開示を検知し、該当銘柄をkabuyutai.comで再取得して新設・変更・廃止を反映する。旧`JQuantsYutaiRightsDate`(権利日を1行ずつ手動投入するテーブル)は廃止され、代わりに`JQuantsYutaiMaster`が持つ`rightsMonths`(権利確定月の配列)から、実際の権利付き最終日を`lambda/shared/trading-calendar.ts`の`rightsDateForMonth`で都度計算する方式に変わった。アプリ側は常にマスタが最新状態であることを仮定した検索・計算・表示のみを担う点は変わらない。
 
 **最大逆日歩(見積り)の計算式**(`lambda/shared/gyakuhibu-calc.ts`): 逆日歩(品貸料率)は日々の品貸入札で決まる変動相場で、貸株超過株数から一意に決まる固定表は存在しない。一方、入札の上限である**最高料率**は「貸借値段(株価)×売買単位」から一意に決まる公開ルールなので、この上限値を「最大逆日歩」として見積もる。
 
@@ -116,7 +129,9 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `PriceBatchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の四本値を取得し`JQuantsStockPrices`へupsert |
 | `FinancialSummaryBatchFunction` | EventBridge(`cron(0 11 ? * MON *)` = 毎週月曜 JST 20:00) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の決算サマリを取得し`JQuantsFinancialSummary`へupsert。四半期ごとの更新なので週次取得で十分 |
 | `MarginBalanceBatchFunction` | EventBridge(`cron(30 9 ? * MON *)` = 毎週月曜 JST 18:30) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を取得し`JQuantsMarginBalance`へupsert。本来週次更新のため週次取得で十分。現在は`data-source.ts`がダミーデータを生成(上記「優待クロス逆日歩リスク可視化」参照、フェーズ2で`mkt-margin-int`/`mkt-margin-alert`に差し替え予定) |
-| `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiRightsDate`の過去の権利日のうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert |
+| `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
+| `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
+| `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理 |
 | `AuthorizerFunction` | API GatewayのLambdaオーソライザー | `x-app-password` ヘッダーを `JQuantsAppPassword` と照合(結果は5分キャッシュ) |
 
