@@ -9,6 +9,7 @@ import {
   settlementDate,
   businessDaysAfter,
   calendarDaysBetween,
+  rightsDateForMonth,
   type CalendarDay,
 } from '../shared/trading-calendar';
 
@@ -17,7 +18,6 @@ const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
 const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
-const YUTAI_RIGHTS_DATE_TABLE_NAME = process.env.YUTAI_RIGHTS_DATE_TABLE_NAME!;
 const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
@@ -216,6 +216,7 @@ interface YutaiMasterRow {
   content: string;
   value: number;
   unitShares: number;
+  rightsMonths: number[];
 }
 
 async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
@@ -233,26 +234,13 @@ async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
         content: item.content,
         value: item.value,
         unitShares: item.unitShares,
+        rightsMonths: item.rightsMonths ?? [],
       });
     }
     exclusiveStartKey = result.LastEvaluatedKey;
   } while (exclusiveStartKey);
 
   return rows;
-}
-
-async function nextRightsDate(ticker: string): Promise<string | undefined> {
-  const today = new Date().toISOString().slice(0, 10);
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: YUTAI_RIGHTS_DATE_TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker AND rightsDate >= :today',
-      ExpressionAttributeValues: { ':ticker': ticker, ':today': today },
-      ScanIndexForward: true,
-      Limit: 1,
-    }),
-  );
-  return result.Items?.[0]?.rightsDate;
 }
 
 async function hasMarginBalance(ticker: string): Promise<boolean> {
@@ -307,6 +295,26 @@ function fetchTradingCalendarCached(
     calendarCache.set(cacheKey, cached);
   }
   return cached;
+}
+
+// rightsMonthsの各月について、今年・来年の最終営業日から2営業日前(権利付き最終日T)を
+// 計算し、今日以降で最も近いものを返す(旧JQuantsYutaiRightsDateテーブルの代替)。
+function nextRightsDate(rightsMonths: number[], calendarCache: Map<string, CalendarDay[]>): string | undefined {
+  if (rightsMonths.length === 0) return undefined;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const year = Number(today.slice(0, 4));
+  const calendar = fetchTradingCalendarCached(`${year}-01-01`, `${year + 1}-12-31`, calendarCache);
+
+  const candidates: string[] = [];
+  for (const y of [year, year + 1]) {
+    for (const month of rightsMonths) {
+      const rightsDate = rightsDateForMonth(calendar, y, month);
+      if (rightsDate) candidates.push(rightsDate);
+    }
+  }
+
+  return candidates.filter((d) => d >= today).sort()[0];
 }
 
 // listYutai・getYutaiDetail共通のリスク計算。ガード(権利日無し/信用残無し/価格無し)は
@@ -369,7 +377,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
       if (!haystack.includes(keyword)) continue;
     }
 
-    const rightsDate = await nextRightsDate(row.ticker);
+    const rightsDate = nextRightsDate(row.rightsMonths, calendarCache);
     if (rightsDateFrom && (!rightsDate || rightsDate < rightsDateFrom)) continue;
     if (rightsDateTo && (!rightsDate || rightsDate > rightsDateTo)) continue;
 
@@ -414,6 +422,7 @@ async function getYutaiMaster(ticker: string): Promise<YutaiMasterRow | undefine
     content: result.Item.content,
     value: result.Item.value,
     unitShares: result.Item.unitShares,
+    rightsMonths: result.Item.rightsMonths ?? [],
   };
 }
 
@@ -476,10 +485,10 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
   const eps = summary?.eps ? Number(summary.eps) : undefined;
   const per = price && eps && eps > 0 ? price.close / eps : null;
 
-  const rightsDate = await nextRightsDate(ticker);
-
   // このリクエスト限りの使い捨てキャッシュ(calcRiskの引数を共通化するために渡す)。
   const calendarCache = new Map<string, CalendarDay[]>();
+  const rightsDate = nextRightsDate(master.rightsMonths, calendarCache);
+
   const risk = await calcRisk(
     { ticker: master.ticker, value: master.value, unitShares: master.unitShares },
     rightsDate,
