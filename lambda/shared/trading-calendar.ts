@@ -178,3 +178,23 @@ export function rightsDateForMonth(calendar: CalendarDay[], year: number, month:
   const idx = tradingDays.indexOf(record);
   return idx >= 2 ? tradingDays[idx - 2] : undefined;
 }
+
+// rightsMonthsの各月について、今年・来年の最終営業日から2営業日前(権利付き最終日T)を
+// 計算し、今日以降で最も近いものを返す(JQuantsYutaiRightsDateテーブル廃止に伴う代替)。
+export function nextRightsDate(rightsMonths: number[]): string | undefined {
+  if (rightsMonths.length === 0) return undefined;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const year = Number(today.slice(0, 4));
+  const calendar = getLocalTradingCalendar(`${year}-01-01`, `${year + 1}-12-31`);
+
+  const candidates: string[] = [];
+  for (const y of [year, year + 1]) {
+    for (const month of rightsMonths) {
+      const rightsDate = rightsDateForMonth(calendar, y, month);
+      if (rightsDate) candidates.push(rightsDate);
+    }
+  }
+
+  return candidates.filter((d) => d >= today).sort()[0];
+}

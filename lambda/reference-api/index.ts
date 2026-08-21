@@ -10,6 +10,7 @@ import {
   businessDaysAfter,
   calendarDaysBetween,
   rightsDateForMonth,
+  nextRightsDate,
   type CalendarDay,
 } from '../shared/trading-calendar';
 
@@ -297,26 +298,6 @@ function fetchTradingCalendarCached(
   return cached;
 }
 
-// rightsMonthsの各月について、今年・来年の最終営業日から2営業日前(権利付き最終日T)を
-// 計算し、今日以降で最も近いものを返す(旧JQuantsYutaiRightsDateテーブルの代替)。
-function nextRightsDate(rightsMonths: number[], calendarCache: Map<string, CalendarDay[]>): string | undefined {
-  if (rightsMonths.length === 0) return undefined;
-
-  const today = new Date().toISOString().slice(0, 10);
-  const year = Number(today.slice(0, 4));
-  const calendar = fetchTradingCalendarCached(`${year}-01-01`, `${year + 1}-12-31`, calendarCache);
-
-  const candidates: string[] = [];
-  for (const y of [year, year + 1]) {
-    for (const month of rightsMonths) {
-      const rightsDate = rightsDateForMonth(calendar, y, month);
-      if (rightsDate) candidates.push(rightsDate);
-    }
-  }
-
-  return candidates.filter((d) => d >= today).sort()[0];
-}
-
 // listYutai・getYutaiDetail共通のリスク計算。ガード(権利日無し/信用残無し/価格無し)は
 // すべて'na'(4フィールドともnull/na)を返す。
 async function calcRisk(
@@ -377,7 +358,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
       if (!haystack.includes(keyword)) continue;
     }
 
-    const rightsDate = nextRightsDate(row.rightsMonths, calendarCache);
+    const rightsDate = nextRightsDate(row.rightsMonths);
     if (rightsDateFrom && (!rightsDate || rightsDate < rightsDateFrom)) continue;
     if (rightsDateTo && (!rightsDate || rightsDate > rightsDateTo)) continue;
 
@@ -487,7 +468,7 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
 
   // このリクエスト限りの使い捨てキャッシュ(calcRiskの引数を共通化するために渡す)。
   const calendarCache = new Map<string, CalendarDay[]>();
-  const rightsDate = nextRightsDate(master.rightsMonths, calendarCache);
+  const rightsDate = nextRightsDate(master.rightsMonths);
 
   const risk = await calcRisk(
     { ticker: master.ticker, value: master.value, unitShares: master.unitShares },

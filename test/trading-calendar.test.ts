@@ -7,6 +7,7 @@ import {
   getLocalTradingCalendar,
   isJpHoliday,
   rightsDateForMonth,
+  nextRightsDate,
   type CalendarDay,
 } from '../lambda/shared/trading-calendar';
 
@@ -188,5 +189,23 @@ describe('rightsDateForMonth', () => {
   test('該当月に営業日が1件も無いカレンダーではundefinedを返す', () => {
     const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-31');
     expect(rightsDateForMonth(calendar, 2026, 9)).toBeUndefined();
+  });
+});
+
+describe('nextRightsDate', () => {
+  test('returns undefined when rightsMonths is empty', () => {
+    expect(nextRightsDate([])).toBeUndefined();
+  });
+
+  test('returns a date matching the YYYY-MM-DD format for a non-empty rightsMonths', () => {
+    const result = nextRightsDate([8]);
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('the returned date is always today or later', () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const result = nextRightsDate([1, 4, 7, 10]);
+    expect(result).toBeDefined();
+    expect(result! >= today).toBe(true);
   });
 });
