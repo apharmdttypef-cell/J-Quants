@@ -2,17 +2,7 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { calcMaxGyakuhibu, calcMaxRate } from '../shared/gyakuhibu-calc';
-import {
-  getLocalTradingCalendar,
-  isTradingDay,
-  settlementDate,
-  businessDaysAfter,
-  calendarDaysBetween,
-  rightsDateForMonth,
-  nextRightsDate,
-  type CalendarDay,
-} from '../shared/trading-calendar';
+import { getLocalTradingCalendar, isTradingDay, nextRightsDate } from '../shared/trading-calendar';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
@@ -211,6 +201,8 @@ async function getSummary(ticker: string): Promise<APIGatewayProxyResultV2> {
   });
 }
 
+type RiskStatus = 'safe' | 'danger' | 'na';
+
 interface YutaiMasterRow {
   ticker: string;
   companyName?: string;
@@ -218,6 +210,10 @@ interface YutaiMasterRow {
   value: number;
   unitShares: number;
   rightsMonths: number[];
+  riskStatus: RiskStatus;
+  maxGyakuhibu: number | null;
+  maxRate: number | null;
+  days: number | null;
 }
 
 async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
@@ -236,99 +232,16 @@ async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
         value: item.value,
         unitShares: item.unitShares,
         rightsMonths: item.rightsMonths ?? [],
+        riskStatus: item.riskStatus ?? 'na',
+        maxGyakuhibu: item.maxGyakuhibu ?? null,
+        maxRate: item.maxRate ?? null,
+        days: item.days ?? null,
       });
     }
     exclusiveStartKey = result.LastEvaluatedKey;
   } while (exclusiveStartKey);
 
   return rows;
-}
-
-async function hasMarginBalance(ticker: string): Promise<boolean> {
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: MARGIN_BALANCE_TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker',
-      ExpressionAttributeValues: { ':ticker': ticker },
-      Limit: 1,
-    }),
-  );
-  return (result.Items ?? []).length > 0;
-}
-
-async function latestClose(ticker: string): Promise<number | undefined> {
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker',
-      ExpressionAttributeValues: { ':ticker': ticker },
-      ScanIndexForward: false,
-      Limit: 1,
-    }),
-  );
-  const close = result.Items?.[0]?.close;
-  return typeof close === 'number' ? close : undefined;
-}
-
-type RiskStatus = 'safe' | 'danger' | 'na';
-
-interface RiskCalcResult {
-  riskStatus: RiskStatus;
-  maxGyakuhibu: number | null;
-  maxRate: number | null;
-  days: number | null;
-}
-
-const NA_RISK: RiskCalcResult = { riskStatus: 'na', maxGyakuhibu: null, maxRate: null, days: null };
-
-// 同じ from/to のカレンダーはリクエスト内で使い回す(権利日が月末近くに集中するため、
-// 一覧全体でJ-Quantsへの呼び出しを数回程度に抑えられる)。呼び出し元ごとに新しい
-// Mapを渡すこと(listYutaiはリクエスト全体で1つ、getYutaiDetailは単発なので使い捨てでよい)。
-function fetchTradingCalendarCached(
-  from: string,
-  to: string,
-  calendarCache: Map<string, CalendarDay[]>,
-): CalendarDay[] {
-  const cacheKey = `${from}|${to}`;
-  let cached = calendarCache.get(cacheKey);
-  if (!cached) {
-    cached = getLocalTradingCalendar(from, to);
-    calendarCache.set(cacheKey, cached);
-  }
-  return cached;
-}
-
-// listYutai・getYutaiDetail共通のリスク計算。ガード(権利日無し/信用残無し/価格無し)は
-// すべて'na'(4フィールドともnull/na)を返す。
-async function calcRisk(
-  row: { ticker: string; value: number; unitShares: number },
-  rightsDate: string | undefined,
-  calendarCache: Map<string, CalendarDay[]>,
-): Promise<RiskCalcResult> {
-  if (!rightsDate) return NA_RISK;
-  if (!(await hasMarginBalance(row.ticker))) return NA_RISK;
-
-  const closePrice = await latestClose(row.ticker);
-  if (closePrice === undefined) return NA_RISK;
-
-  const calendarTo = new Date(rightsDate);
-  calendarTo.setDate(calendarTo.getDate() + 14);
-  const calendar = fetchTradingCalendarCached(
-    rightsDate,
-    calendarTo.toISOString().slice(0, 10),
-    calendarCache,
-  );
-  // 品貸日数(days)は「権利確定日〜受渡日」の暦日数ではなく、日証金の用語集の定義通り
-  // 「受渡日(T+2)〜その翌営業日」の暦日数(taisyaku.jpの実データで検証済み。
-  // docs/superpowers/specs/2026-08-13-yutai-cross-risk-design.md 参照)。
-  const settlement = settlementDate(calendar, rightsDate);
-  const followingTradingDay = businessDaysAfter(calendar, settlement, 1);
-  const days = calendarDaysBetween(settlement, followingTradingDay);
-
-  const maxRate = calcMaxRate(closePrice, row.unitShares);
-  const maxGyakuhibu = calcMaxGyakuhibu(closePrice, row.unitShares, days);
-  const riskStatus: RiskStatus = row.value > maxGyakuhibu ? 'safe' : 'danger';
-  return { riskStatus, maxGyakuhibu, maxRate, days };
 }
 
 // 当月末の最終営業日から2営業日前(受渡T+2)を「権利付き最終日」の目安として返す。
@@ -346,10 +259,6 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
   const riskStatusFilter = query.riskStatus && query.riskStatus !== 'all' ? query.riskStatus : undefined;
 
   const rows = await scanYutaiMaster();
-  // リクエスト全体で使い回すカレンダーキャッシュ(Fix 1): 権利日が月末近くに集中するため、
-  // これが無いと銘柄ごとに毎回計算し直すことになる(getLocalTradingCalendarはローカル
-  // 計算なので実害は小さいが、キャッシュ自体は引き続き無駄がなく安全)。
-  const calendarCache = new Map<string, CalendarDay[]>();
 
   const items = [];
   for (const row of rows) {
@@ -362,16 +271,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
     if (rightsDateFrom && (!rightsDate || rightsDate < rightsDateFrom)) continue;
     if (rightsDateTo && (!rightsDate || rightsDate > rightsDateTo)) continue;
 
-    // 1銘柄のリスク計算失敗(J-Quants側の429/タイムアウト等)でリスト全体を
-    // 500にしない(Fix 1): 失敗したその銘柄だけ'na'にフォールバックする。
-    let riskStatus: RiskStatus;
-    try {
-      riskStatus = (await calcRisk(row, rightsDate, calendarCache)).riskStatus;
-    } catch (error) {
-      console.error(`calcRisk failed for ${row.ticker}, falling back to riskStatus 'na'`, error);
-      riskStatus = 'na';
-    }
-    if (riskStatusFilter && riskStatus !== riskStatusFilter) continue;
+    if (riskStatusFilter && row.riskStatus !== riskStatusFilter) continue;
 
     items.push({
       ticker: row.ticker,
@@ -379,7 +279,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
       content: row.content,
       value: row.value,
       rightsDate: rightsDate ?? null,
-      riskStatus,
+      riskStatus: row.riskStatus,
     });
   }
 
@@ -404,6 +304,10 @@ async function getYutaiMaster(ticker: string): Promise<YutaiMasterRow | undefine
     value: result.Item.value,
     unitShares: result.Item.unitShares,
     rightsMonths: result.Item.rightsMonths ?? [],
+    riskStatus: result.Item.riskStatus ?? 'na',
+    maxGyakuhibu: result.Item.maxGyakuhibu ?? null,
+    maxRate: result.Item.maxRate ?? null,
+    days: result.Item.days ?? null,
   };
 }
 
@@ -466,16 +370,7 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
   const eps = summary?.eps ? Number(summary.eps) : undefined;
   const per = price && eps && eps > 0 ? price.close / eps : null;
 
-  // このリクエスト限りの使い捨てキャッシュ(calcRiskの引数を共通化するために渡す)。
-  const calendarCache = new Map<string, CalendarDay[]>();
   const rightsDate = nextRightsDate(master.rightsMonths);
-
-  const risk = await calcRisk(
-    { ticker: master.ticker, value: master.value, unitShares: master.unitShares },
-    rightsDate,
-    calendarCache,
-  );
-
   const history = await gyakuhibuHistory(ticker);
 
   return jsonResponse(200, {
@@ -494,7 +389,12 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
       netProfit: summary?.netProfit ?? null,
       eps: summary?.eps ?? null,
     },
-    risk,
+    risk: {
+      riskStatus: master.riskStatus,
+      maxGyakuhibu: master.maxGyakuhibu,
+      maxRate: master.maxRate,
+      days: master.days,
+    },
     rightsHistory: history,
   });
 }
