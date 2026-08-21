@@ -1,11 +1,4 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import {
-  getLocalTradingCalendar,
-  rightsDateForMonth,
-  settlementDate,
-  businessDaysAfter,
-  calendarDaysBetween,
-} from '../lambda/shared/trading-calendar';
 
 const mockSend = jest.fn();
 const mockSecretsSend = jest.fn();
@@ -283,6 +276,17 @@ test('GET /yutai returns rightsDate: null and riskStatus: na (not a missing key)
   const parsed = body(result) as { tickers: Array<Record<string, unknown>> };
   expect(parsed.tickers[0]).toHaveProperty('rightsDate', null);
   expect(parsed.tickers[0].riskStatus).toBe('na');
+});
+
+test('GET /yutai falls back to riskStatus na for a row the precompute batch has not touched yet', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [{ ticker: '8888', companyName: '新規上場HD', content: '未計算', value: 500, unitShares: 100, rightsMonths: [8] }],
+  }); // no riskStatus/maxGyakuhibu/maxRate/days keys at all
+
+  const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
+
+  const parsed = body(result) as { tickers: Array<{ ticker: string; riskStatus: string }> };
+  expect(parsed.tickers[0]).toMatchObject({ ticker: '8888', riskStatus: 'na' });
 });
 
 test('GET /yutai/{ticker} returns basic info, precomputed risk, and rights history', async () => {

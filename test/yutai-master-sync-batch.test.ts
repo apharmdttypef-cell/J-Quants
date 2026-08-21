@@ -4,7 +4,7 @@ const mockFetchAllListings = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn() }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
-  PutCommand: jest.fn((input: unknown) => input),
+  UpdateCommand: jest.fn((input: unknown) => input),
 }));
 jest.mock('../lambda/shared/kabuyutai-client', () => ({
   fetchAllListings: (...args: unknown[]) => mockFetchAllListings(...args),
@@ -31,13 +31,13 @@ test('upserts each listed entry with unitShares fixed at 100', async () => {
   expect(mockSend).toHaveBeenCalledTimes(1);
   expect(mockSend.mock.calls[0][0]).toMatchObject({
     TableName: 'JQuantsYutaiMaster',
-    Item: {
-      ticker: '2157',
-      companyName: 'コシダカホールディングス',
-      content: '割引券（2,000円相当～）',
-      value: 2000,
-      unitShares: 100,
-      rightsMonths: [2, 8],
+    Key: { ticker: '2157' },
+    ExpressionAttributeValues: {
+      ':companyName': 'コシダカホールディングス',
+      ':content': '割引券（2,000円相当～）',
+      ':value': 2000,
+      ':unitShares': 100,
+      ':rightsMonths': [2, 8],
     },
   });
 });

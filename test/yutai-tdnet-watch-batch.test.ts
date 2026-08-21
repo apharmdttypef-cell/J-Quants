@@ -5,7 +5,7 @@ const mockFetch = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn() }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
-  PutCommand: jest.fn((input: unknown) => input),
+  UpdateCommand: jest.fn((input: unknown) => input),
   DeleteCommand: jest.fn((input: unknown) => input),
 }));
 jest.mock('../lambda/shared/kabuyutai-client', () => ({
@@ -66,7 +66,8 @@ test('matches a yutai-related disclosure, looks it up via a single fetchAllListi
   expect(mockSend).toHaveBeenCalledTimes(1);
   expect(mockSend.mock.calls[0][0]).toMatchObject({
     TableName: 'JQuantsYutaiMaster',
-    Item: { ticker: '2157', value: 3000, unitShares: 100, rightsMonths: [2, 8] },
+    Key: { ticker: '2157' },
+    ExpressionAttributeValues: { ':value': 3000, ':unitShares': 100, ':rightsMonths': [2, 8] },
   });
 });
 
@@ -202,7 +203,7 @@ describe('pagination within a single day', () => {
     expect(String(mockFetch.mock.calls[1][0])).toContain('I_list_002_');
 
     // ページ2にしか出現しない銘柄(2002)も、ちゃんとマッチしてupsertまで到達している。
-    const upsertedTickers = mockSend.mock.calls.map((call) => (call[0] as { Item?: { ticker?: string } }).Item?.ticker);
+    const upsertedTickers = mockSend.mock.calls.map((call) => (call[0] as { Key?: { ticker?: string } }).Key?.ticker);
     expect(upsertedTickers).toContain('2002');
   });
 });

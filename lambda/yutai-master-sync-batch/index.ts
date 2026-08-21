@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { fetchAllListings } from '../shared/kabuyutai-client';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
@@ -32,15 +32,18 @@ export const handler = async (): Promise<void> => {
 
     try {
       await ddbDocClient.send(
-        new PutCommand({
+        new UpdateCommand({
           TableName: YUTAI_MASTER_TABLE_NAME,
-          Item: {
-            ticker: entry.ticker,
-            companyName: entry.companyName,
-            content: entry.content,
-            value: entry.value,
-            unitShares: UNIT_SHARES,
-            rightsMonths: entry.rightsMonths,
+          Key: { ticker: entry.ticker },
+          UpdateExpression:
+            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, rightsMonths = :rightsMonths',
+          ExpressionAttributeNames: { '#content': 'content', '#value': 'value' },
+          ExpressionAttributeValues: {
+            ':companyName': entry.companyName,
+            ':content': entry.content,
+            ':value': entry.value,
+            ':unitShares': UNIT_SHARES,
+            ':rightsMonths': entry.rightsMonths,
           },
         }),
       );
