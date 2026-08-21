@@ -295,18 +295,64 @@ test('creates the yutai-tdnet-watch-batch Lambda on a weekly Monday schedule', (
 test('creates the yutai-risk-precompute-batch Lambda with read/write access to the yutai master table and a daily schedule after price-batch', () => {
   const template = synth();
 
+  // Verify the Lambda function exists with exact environment variables (not a superset like ReferenceApiFunction).
+  // Use Match.exact() to ensure only these three env vars are present, distinguishing it from ReferenceApiFunction
+  // which has many more env vars (FINANCIAL_TABLE_NAME, WATCHLIST_TABLE_NAME, SECRET_ARN, GYAKUHIBU_ACTUAL_TABLE_NAME).
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
+    Timeout: 840, // 14 minutes in seconds
     Environment: {
-      Variables: Match.objectLike({
+      Variables: Match.exact({
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
         TABLE_NAME: Match.anyValue(),
       }),
     },
   });
+
+  // Verify the EventBridge schedule rule exists with the correct timing (09:20 UTC, 20 min after price batch at 09:00 UTC).
   template.hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'cron(20 9 * * ? *)',
     State: 'ENABLED',
   });
+
+  // Verify IAM policies exist that grant DynamoDB permissions for the tables accessed by this Lambda.
+  // The grantReadWriteData() and grantReadData() methods create AWS::IAM::Policy resources with the necessary permissions.
+  const policies = template.findResources('AWS::IAM::Policy');
+  const policyEntries = Object.entries(policies);
+
+  // Find policies that grant read/write access to the yutai master table (PutItem, UpdateItem, etc.)
+  // and read access to margin balance and stock prices tables (GetItem, Query, etc.)
+  const hasYutaiWriteAccess = policyEntries.some(([name, p]) => {
+    // Policy names that include "YutaiRiskPrecompute" are specifically for this Lambda
+    if (!name.includes('YutaiRiskPrecompute')) return false;
+
+    const statements = (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } }).Properties?.PolicyDocument?.Statement || [];
+    return statements.some((stmt) => {
+      const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+      const hasWriteActions = actions.some(
+        (action) => action && (action.includes('PutItem') || action.includes('UpdateItem') || action.includes('DeleteItem')),
+      );
+      const hasYutaiMasterResource = JSON.stringify(stmt.Resource || '').includes('YutaiMaster');
+      return hasWriteActions && hasYutaiMasterResource;
+    });
+  });
+  expect(hasYutaiWriteAccess).toBe(true);
+
+  const hasMarginStockReadAccess = policyEntries.some(([name, p]) => {
+    // Policy names that include "YutaiRiskPrecompute" are specifically for this Lambda
+    if (!name.includes('YutaiRiskPrecompute')) return false;
+
+    const statements = (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } }).Properties?.PolicyDocument?.Statement || [];
+    return statements.some((stmt) => {
+      const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+      const hasReadActions = actions.some(
+        (action) => action && (action.includes('GetItem') || action.includes('Query') || action.includes('Scan') || action.includes('BatchGetItem')),
+      );
+      const resourceStr = JSON.stringify(stmt.Resource || '');
+      const hasMarginOrStockResource = resourceStr.includes('MarginBalance') || resourceStr.includes('StockPrices');
+      return hasReadActions && hasMarginOrStockResource;
+    });
+  });
+  expect(hasMarginStockReadAccess).toBe(true);
 });
