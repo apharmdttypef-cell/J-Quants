@@ -279,8 +279,8 @@ test('creates the yutai-master-sync-batch Lambda with write access to the yutai 
     (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
   );
   // yutai-master-sync-batch自体のスケジュールは存在しない。他バッチの4つのスケジュール
-  // (price/financial-summary/margin-balance/gyakuhibu-history)+tdnet-watchの5つのみ。
-  expect(scheduleExpressions.filter(Boolean)).toHaveLength(5);
+  // (price/financial-summary/margin-balance/gyakuhibu-history)+tdnet-watch+yutai-risk-precomputeの6つのみ。
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
 });
 
 test('creates the yutai-tdnet-watch-batch Lambda on a weekly Monday schedule', () => {
@@ -288,6 +288,25 @@ test('creates the yutai-tdnet-watch-batch Lambda on a weekly Monday schedule', (
 
   template.hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'cron(0 12 ? * MON *)',
+    State: 'ENABLED',
+  });
+});
+
+test('creates the yutai-risk-precompute-batch Lambda with read/write access to the yutai master table and a daily schedule after price-batch', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Environment: {
+      Variables: Match.objectLike({
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
+        TABLE_NAME: Match.anyValue(),
+      }),
+    },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'cron(20 9 * * ? *)',
     State: 'ENABLED',
   });
 });

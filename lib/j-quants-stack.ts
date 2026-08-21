@@ -277,6 +277,31 @@ export class JQuantsStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(yutaiTdnetWatchBatchFn)],
     });
 
+    const yutaiRiskPrecomputeBatchFn = new nodejs.NodejsFunction(this, 'YutaiRiskPrecomputeBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'yutai-risk-precompute-batch', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
+        TABLE_NAME: this.stockPricesTable.tableName,
+      },
+    });
+
+    this.yutaiMasterTable.grantReadWriteData(yutaiRiskPrecomputeBatchFn);
+    this.marginBalanceTable.grantReadData(yutaiRiskPrecomputeBatchFn);
+    this.stockPricesTable.grantReadData(yutaiRiskPrecomputeBatchFn);
+
+    // GET /yutai一覧のリスク判定を事前計算し、reference-apiでの逐次クエリ(銘柄数に比例して
+    // 増える)を無くす。PriceBatchFunction(daily 09:00 UTC)の後に実行する。JST 18:20 = UTC 09:20。
+    new events.Rule(this, 'YutaiRiskPrecomputeBatchSchedule', {
+      schedule: events.Schedule.cron({ minute: '20', hour: '9' }),
+      targets: [new targets.LambdaFunction(yutaiRiskPrecomputeBatchFn)],
+    });
+
     const referenceApiFn = new nodejs.NodejsFunction(this, 'ReferenceApiFunction', {
       entry: path.join(__dirname, '..', 'lambda', 'reference-api', 'index.ts'),
       handler: 'handler',
