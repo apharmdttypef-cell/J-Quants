@@ -70,3 +70,34 @@ test('fetches only the recent diff for a ticker that already has margin balance 
   const spanDays = (new Date(to).getTime() - new Date(from).getTime()) / (24 * 60 * 60 * 1000);
   expect(spanDays).toBeLessThan(30); // 通常の日次差分取得(短い範囲)
 });
+
+test('defers new backfills beyond the per-run cap, but still applies diff updates to already-covered tickers', async () => {
+  const backfillTickers = Array.from({ length: 151 }, (_, i) => `T${String(i).padStart(4, '0')}`);
+  const diffTicker = '7203';
+  const allTickers = [...backfillTickers, diffTicker];
+
+  mockSend.mockImplementation((cmd: Record<string, unknown>) => {
+    if (cmd.TableName === 'JQuantsYutaiMaster') {
+      return Promise.resolve({ Items: allTickers.map((ticker) => ({ ticker })) });
+    }
+    if ('KeyConditionExpression' in cmd) {
+      const values = cmd.ExpressionAttributeValues as Record<string, string>;
+      const hasData = values[':ticker'] === diffTicker;
+      return Promise.resolve({ Items: hasData ? [{ date: '2026-08-01' }] : [] });
+    }
+    return Promise.resolve({}); // PutCommand
+  });
+  dataSource.fetchWeeklyBalances.mockResolvedValue([]);
+  dataSource.fetchDailyAlertBalances.mockResolvedValue([]);
+
+  await handler();
+
+  // 151件が新規バックフィル対象だが上限150に達した時点で151件目は次回に持ち越し。
+  // 既存データがあるdiffTickerは上限と無関係に毎回処理される。
+  expect(dataSource.fetchWeeklyBalances).toHaveBeenCalledTimes(151);
+  const processedTickers = dataSource.fetchWeeklyBalances.mock.calls.map(([ticker]) => ticker);
+  expect(processedTickers).toContain(backfillTickers[0]);
+  expect(processedTickers).toContain(backfillTickers[149]);
+  expect(processedTickers).not.toContain(backfillTickers[150]);
+  expect(processedTickers).toContain(diffTicker);
+});
