@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
+import * as HoverCard from '@radix-ui/react-hover-card';
 import { fetchYutaiDetail, fetchYutaiMarginTrend } from '../api/client';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen, formatPrice, formatVolume } from '../lib/format';
@@ -8,7 +8,6 @@ import { useAsync } from '../lib/useAsync';
 
 export function YutaiDetailPage() {
   const { ticker } = useParams<{ ticker: string }>();
-  const [tooltipStyle, setTooltipStyle] = useState<{ top: number; left: number } | undefined>();
 
   const detailState = useAsync(async () => {
     if (!ticker) throw new Error('ticker is missing');
@@ -19,14 +18,6 @@ export function YutaiDetailPage() {
     if (!ticker) throw new Error('ticker is missing');
     return fetchYutaiMarginTrend(ticker);
   }, [ticker]);
-
-  const triggerRef = useRef<HTMLDivElement>(null);
-
-  function showTooltip() {
-    const rect = triggerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    setTooltipStyle({ top: rect.bottom + 8, left: Math.min(rect.left, window.innerWidth - 340) });
-  }
 
   if (detailState.loading) return <StatusNote kind="loading" message="読み込み中…" />;
   if (detailState.error) return <StatusNote kind="error" message={`取得に失敗しました: ${detailState.error.message}`} />;
@@ -93,14 +84,40 @@ export function YutaiDetailPage() {
       <div className="card">
         <div className="summary-item__label">最大逆日歩(概算・次回権利日の予測)</div>
         {data.risk.maxGyakuhibu !== null ? (
-          <div
-            ref={triggerRef}
-            className="gyakuhibu-hover summary-item__value"
-            onMouseEnter={showTooltip}
-            onMouseLeave={() => setTooltipStyle(undefined)}
-          >
-            {formatFinancialYen(String(data.risk.maxGyakuhibu))}
-          </div>
+          <HoverCard.Root openDelay={0}>
+            <HoverCard.Trigger asChild>
+              <div className="gyakuhibu-hover summary-item__value">
+                {formatFinancialYen(String(data.risk.maxGyakuhibu))}
+              </div>
+            </HoverCard.Trigger>
+            <HoverCard.Portal>
+              <HoverCard.Content className="gyakuhibu-tooltip" side="bottom" sideOffset={8}>
+                <div className="summary-item__label" style={{ marginBottom: '0.5rem' }}>
+                  過去の権利日の実績逆日歩(taisyaku.jp確報ベース、直近3年分)
+                </div>
+                {data.rightsHistory.length === 0 ? (
+                  <p style={{ color: 'var(--text-muted)' }}>データがありません</p>
+                ) : (
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>権利日</th>
+                        <th>実績逆日歩</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.rightsHistory.map((h) => (
+                        <tr key={h.rightsDate}>
+                          <td>{h.rightsDate}</td>
+                          <td className="num">{formatFinancialYen(String(h.totalAmount))}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </HoverCard.Content>
+            </HoverCard.Portal>
+          </HoverCard.Root>
         ) : (
           <div className="summary-item__value">—</div>
         )}
@@ -109,34 +126,6 @@ export function YutaiDetailPage() {
           {data.risk.days !== null ? `${data.risk.days}日分` : ''}
         </p>
         <span className={`risk-badge risk-badge--${data.risk.riskStatus}`}>{riskLabel}</span>
-
-        {tooltipStyle && (
-          <div className="gyakuhibu-tooltip" style={{ top: tooltipStyle.top, left: tooltipStyle.left }}>
-            <div className="summary-item__label" style={{ marginBottom: '0.5rem' }}>
-              過去の権利日の実績逆日歩(taisyaku.jp確報ベース、直近3年分)
-            </div>
-            {data.rightsHistory.length === 0 ? (
-              <p style={{ color: 'var(--text-muted)' }}>データがありません</p>
-            ) : (
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>権利日</th>
-                    <th>実績逆日歩</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.rightsHistory.map((h) => (
-                    <tr key={h.rightsDate}>
-                      <td>{h.rightsDate}</td>
-                      <td className="num">{formatFinancialYen(String(h.totalAmount))}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
       </div>
 
       <div className="section-heading">信用残トレンド(過去1年)</div>
