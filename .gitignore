@@ -9,3 +9,6 @@ cdk.out
 
 # superpowers brainstorming visual companion mockups
 .superpowers/
+
+# git worktrees for isolated implementation sessions
+.claude/worktrees/
