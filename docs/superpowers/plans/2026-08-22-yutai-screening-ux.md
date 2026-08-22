@@ -33,8 +33,10 @@
 
 ```bash
 cd frontend
-npm install @tanstack/react-table@^9.1.2
+npm install @tanstack/react-table@^8.21.3
 ```
+
+注: `@tanstack/react-table`のnpm `latest`タグは9.x系だが、v9は`useReactTable`/`getCoreRowModel`/`getSortedRowModel`を`useTable`+`features`オプションの新APIに置き換えるフルリライトで、旧APIは`useLegacyTable`という非推奨の互換レイヤーでしか使えない。本書のコード(Step 2)は安定版であるv8系のAPI(`useReactTable`/`getCoreRowModel`/`getSortedRowModel`)を前提にしているため、`^8.21.3`(2026-08-22時点のv8系最新)を明示的にインストールする。
 
 - [ ] **Step 2: `frontend/src/pages/YutaiListPage.tsx`を以下の内容に全面置き換え**
 
