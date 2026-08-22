@@ -86,7 +86,7 @@ export function YutaiDetailPage() {
         {data.risk.maxGyakuhibu !== null ? (
           <HoverCard.Root openDelay={0}>
             <HoverCard.Trigger asChild>
-              <div className="gyakuhibu-hover summary-item__value">
+              <div tabIndex={0} className="gyakuhibu-hover summary-item__value">
                 {formatFinancialYen(String(data.risk.maxGyakuhibu))}
               </div>
             </HoverCard.Trigger>

@@ -41,11 +41,13 @@ const columns: ColumnDef<YutaiListItem>[] = [
   {
     accessorKey: 'value',
     header: '優待価値',
+    sortDescFirst: false,
     cell: ({ row }) => formatFinancialYen(String(row.original.value)),
   },
   {
     accessorKey: 'rightsDate',
     header: '権利日',
+    sortDescFirst: false,
     sortingFn: (rowA, rowB) => {
       const a = rowA.original.rightsDate;
       const b = rowB.original.rightsDate;
