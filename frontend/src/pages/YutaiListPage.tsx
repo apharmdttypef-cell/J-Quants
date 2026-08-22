@@ -179,7 +179,13 @@ export function YutaiListPage() {
                   {row.getVisibleCells().map((cell) => (
                     <td
                       key={cell.id}
-                      className={cell.column.id === 'value' || cell.column.id === 'rightsDate' ? 'num' : undefined}
+                      className={
+                        cell.column.id === 'value' || cell.column.id === 'rightsDate'
+                          ? 'num'
+                          : cell.column.id === 'content'
+                            ? 'cell-wrap'
+                            : undefined
+                      }
                       style={cell.column.id === 'company' || cell.column.id === 'content' ? { textAlign: 'left' } : undefined}
                     >
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}

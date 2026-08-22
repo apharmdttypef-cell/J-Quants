@@ -254,6 +254,12 @@ a {
   letter-spacing: 0.03em;
 }
 
+.data-table td.cell-wrap {
+  white-space: normal;
+  max-width: 24rem;
+  word-break: break-word;
+}
+
 .data-table tbody tr:hover {
   background: var(--surface-alt);
 }
