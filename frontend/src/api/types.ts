@@ -40,6 +40,7 @@ export interface YutaiListItem {
   value: number;
   rightsDate: string | null;
   riskStatus: YutaiRiskStatus;
+  maxGyakuhibu: number | null;
 }
 
 export interface YutaiListResponse {

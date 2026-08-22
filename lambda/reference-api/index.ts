@@ -280,6 +280,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
       value: row.value,
       rightsDate: rightsDate ?? null,
       riskStatus: row.riskStatus,
+      maxGyakuhibu: row.maxGyakuhibu,
     });
   }
 

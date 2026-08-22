@@ -45,6 +45,20 @@ const columns: ColumnDef<YutaiListItem>[] = [
     cell: ({ row }) => formatFinancialYen(String(row.original.value)),
   },
   {
+    accessorKey: 'maxGyakuhibu',
+    header: '最大逆日歩',
+    sortDescFirst: false,
+    sortingFn: (rowA, rowB) => {
+      const a = rowA.original.maxGyakuhibu;
+      const b = rowB.original.maxGyakuhibu;
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return a - b;
+    },
+    cell: ({ row }) => (row.original.maxGyakuhibu !== null ? formatFinancialYen(String(row.original.maxGyakuhibu)) : '—'),
+  },
+  {
     accessorKey: 'rightsDate',
     header: '権利日',
     sortDescFirst: false,
@@ -180,7 +194,7 @@ export function YutaiListPage() {
                     <td
                       key={cell.id}
                       className={
-                        cell.column.id === 'value' || cell.column.id === 'rightsDate'
+                        cell.column.id === 'value' || cell.column.id === 'maxGyakuhibu' || cell.column.id === 'rightsDate'
                           ? 'num'
                           : cell.column.id === 'content'
                             ? 'cell-wrap'

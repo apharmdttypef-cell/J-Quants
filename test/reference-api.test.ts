@@ -239,8 +239,11 @@ test('GET /yutai returns each ticker with its next rights date and its precomput
   const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
 
   expect((result as { statusCode: number }).statusCode).toBe(200);
-  const parsed = body(result) as { tickers: Array<{ ticker: string; riskStatus: string }>; currentMonthLastTradableDate: string };
-  expect(parsed.tickers[0]).toMatchObject({ ticker: '1234', riskStatus: 'safe' });
+  const parsed = body(result) as {
+    tickers: Array<{ ticker: string; riskStatus: string; maxGyakuhibu: number | null }>;
+    currentMonthLastTradableDate: string;
+  };
+  expect(parsed.tickers[0]).toMatchObject({ ticker: '1234', riskStatus: 'safe', maxGyakuhibu: 200 });
   expect(parsed.currentMonthLastTradableDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   // calcRiskが無くなったため、リクエスト全体でDynamoDBへのアクセスはyutai masterの
   // スキャン1回だけになる(N銘柄でも呼び出し回数が増えないことの確認、スケール対応の核心)。
