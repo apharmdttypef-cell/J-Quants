@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable } from '@tanstack/react-table';
+import type { ColumnDef } from '@tanstack/react-table';
 import { fetchYutaiList } from '../api/client';
-import type { YutaiRiskStatus } from '../api/types';
+import type { YutaiListItem, YutaiRiskStatus } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
@@ -16,6 +18,53 @@ function monthRange(): { from: string; to: string } {
 }
 
 const RISK_LABEL: Record<YutaiRiskStatus, string> = { safe: '安全', danger: '危険', na: '対象外' };
+// リスクは危険→安全→対象外の順に並ぶ方が意味があるため、文字列の並び順ではなく
+// このランクでソートする。
+const RISK_SORT_RANK: Record<YutaiRiskStatus, number> = { danger: 0, safe: 1, na: 2 };
+
+const columns: ColumnDef<YutaiListItem>[] = [
+  {
+    id: 'company',
+    header: '銘柄',
+    accessorFn: (row) => row.companyName ?? row.ticker,
+    cell: ({ row }) => (
+      <Link to={`/yutai/${row.original.ticker}`}>
+        {row.original.companyName ?? row.original.ticker}{' '}
+        <span className="ticker-card__code">{row.original.ticker}</span>
+      </Link>
+    ),
+  },
+  {
+    accessorKey: 'content',
+    header: '優待内容',
+  },
+  {
+    accessorKey: 'value',
+    header: '優待価値',
+    cell: ({ row }) => formatFinancialYen(String(row.original.value)),
+  },
+  {
+    accessorKey: 'rightsDate',
+    header: '権利日',
+    sortingFn: (rowA, rowB) => {
+      const a = rowA.original.rightsDate;
+      const b = rowB.original.rightsDate;
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return a.localeCompare(b);
+    },
+    cell: ({ row }) => row.original.rightsDate ?? '—',
+  },
+  {
+    accessorKey: 'riskStatus',
+    header: 'リスク',
+    sortingFn: (rowA, rowB) => RISK_SORT_RANK[rowA.original.riskStatus] - RISK_SORT_RANK[rowB.original.riskStatus],
+    cell: ({ row }) => (
+      <span className={`risk-badge risk-badge--${row.original.riskStatus}`}>{RISK_LABEL[row.original.riskStatus]}</span>
+    ),
+  },
+];
 
 // キーワード入力欄からのAPI呼び出し用デバウンス(ms)。無しだと1文字打つたびに
 // GET /yutai が発火し、Freeプランのレート制限(5req/分)に簡単に触れてしまう
@@ -41,6 +90,13 @@ export function YutaiListPage() {
     () => fetchYutaiList({ rightsDateFrom, rightsDateTo, keyword: debouncedKeyword || undefined, riskStatus }),
     [rightsDateFrom, rightsDateTo, debouncedKeyword, riskStatus],
   );
+
+  const table = useReactTable({
+    data: listState.data?.tickers ?? [],
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
 
   return (
     <>
@@ -100,28 +156,33 @@ export function YutaiListPage() {
         <div className="table-scroll">
           <table className="data-table">
             <thead>
-              <tr>
-                <th>銘柄</th>
-                <th>優待内容</th>
-                <th>優待価値</th>
-                <th>権利日</th>
-                <th>リスク</th>
-              </tr>
+              {table.getHeaderGroups().map((headerGroup) => (
+                <tr key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => (
+                    <th
+                      key={header.id}
+                      onClick={header.column.getToggleSortingHandler()}
+                      style={{ cursor: header.column.getCanSort() ? 'pointer' : undefined }}
+                    >
+                      {flexRender(header.column.columnDef.header, header.getContext())}
+                      {{ asc: ' 🔼', desc: ' 🔽' }[header.column.getIsSorted() as string] ?? ''}
+                    </th>
+                  ))}
+                </tr>
+              ))}
             </thead>
             <tbody>
-              {listState.data.tickers.map((item) => (
-                <tr key={item.ticker}>
-                  <td style={{ textAlign: 'left' }}>
-                    <Link to={`/yutai/${item.ticker}`}>
-                      {item.companyName ?? item.ticker} <span className="ticker-card__code">{item.ticker}</span>
-                    </Link>
-                  </td>
-                  <td style={{ textAlign: 'left' }}>{item.content}</td>
-                  <td className="num">{formatFinancialYen(String(item.value))}</td>
-                  <td className="num">{item.rightsDate ?? '—'}</td>
-                  <td>
-                    <span className={`risk-badge risk-badge--${item.riskStatus}`}>{RISK_LABEL[item.riskStatus]}</span>
-                  </td>
+              {table.getRowModel().rows.map((row) => (
+                <tr key={row.id}>
+                  {row.getVisibleCells().map((cell) => (
+                    <td
+                      key={cell.id}
+                      className={cell.column.id === 'value' || cell.column.id === 'rightsDate' ? 'num' : undefined}
+                      style={cell.column.id === 'company' || cell.column.id === 'content' ? { textAlign: 'left' } : undefined}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>
