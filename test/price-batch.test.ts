@@ -107,6 +107,45 @@ test('prefers the common-stock record (5th digit 0) when a ticker has multiple s
   }
 });
 
+test('prefers the common-stock record even when it appears first (the ordering J-Quants actually returns)', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['1301']);
+  mockGetApiKey.mockResolvedValueOnce('test-api-key');
+  mockFetchWithRetry.mockResolvedValue({
+    json: async () => ({
+      data: [
+        { Code: '13010', Date: '2026-08-01', O: 100, H: 110, L: 95, C: 105, Vo: 1000 }, // 普通株式(先に出現、実際のJ-Quantsの並び順)
+        { Code: '13011', Date: '2026-08-01', O: 999, H: 999, L: 999, C: 999, Vo: 999 }, // 優先株式
+      ],
+    }),
+  });
+
+  await handler();
+
+  const putCalls = mockDdbSend.mock.calls.filter(([cmd]) => 'Item' in (cmd as Record<string, unknown>));
+  expect(putCalls).toHaveLength(3);
+  for (const [cmd] of putCalls) {
+    expect(cmd).toMatchObject({ Item: { ticker: '1301', close: 105 } }); // 普通株式側の値のまま
+  }
+});
+
+test('matches a 5-digit watchlist ticker by exact Code, not the truncated 4-digit prefix', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['72030']);
+  mockGetApiKey.mockResolvedValueOnce('test-api-key');
+  mockFetchWithRetry.mockResolvedValue({
+    json: async () => ({
+      data: [{ Code: '72030', Date: '2026-08-01', O: 100, H: 110, L: 95, C: 105, Vo: 1000 }],
+    }),
+  });
+
+  await handler();
+
+  const putCalls = mockDdbSend.mock.calls.filter(([cmd]) => 'Item' in (cmd as Record<string, unknown>));
+  expect(putCalls).toHaveLength(3);
+  for (const [cmd] of putCalls) {
+    expect(cmd).toMatchObject({ TableName: 'JQuantsStockPrices', Item: { ticker: '72030', date: '2026-08-01' } });
+  }
+});
+
 test('follows pagination_key when a single date response is paginated', async () => {
   mockGetTargetTickers.mockResolvedValueOnce(['7203']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');

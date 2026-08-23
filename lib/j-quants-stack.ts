@@ -138,8 +138,10 @@ export class JQuantsStack extends cdk.Stack {
       entry: path.join(__dirname, '..', 'lambda', 'price-batch', 'index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
-      // 銘柄あたり四本値1リクエストを13秒間隔(5req/分制限)で直列に行うため長めに確保。
-      // ウォッチリストが増える場合は要見直し。
+      // 日付ごとに東証全銘柄分を1リクエストで取得する方式(LOOKBACK_DAYS+1回)に切り替え済み。
+      // 13秒間隔(5req/分制限)は日付単位のリクエストにのみかかるため、対象銘柄数が増えても
+      // API呼び出し回数は変わらない。ただし対象銘柄が増えるとDynamoDBへのupsert件数が
+      // 増えるため、その分の余裕は引き続き必要(ウォッチリストが大幅に増える場合は要見直し)。
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
       // AWS SDK v3はNode.js 20系ランタイムに同梱されているためバンドルしない

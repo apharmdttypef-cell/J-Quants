@@ -59,22 +59,30 @@ async function fetchAllBarsForDate(date: string, apiKey: string): Promise<DailyB
   return bars;
 }
 
-// 一括取得したレスポンスのCodeは5桁(例: '13010')。アプリ内のtickerは4桁(例: '1301')なので
-// 先頭4桁を取って突き合わせる(yutai-tdnet-watch-batchのtoTicker()と同じ変換)。
+// 一括取得したレスポンスのCodeは5桁(例: '13010')。アプリ内のtickerは通常4桁(例: '1301')だが、
+// ウォッチリストでは優先株式等を指定するために5桁のticker(例: '72030')もありうる
+// (reference-api/index.tsのTICKER_CODE_PATTERN=/^\d{4,5}$/参照)。そのため5桁の完全一致と
+// 4桁prefixの一致の両方をチェックする(yutai-tdnet-watch-batchのtoTicker()と同じ変換)。
 // 普通株式・優先株式等が両方上場している銘柄では同じ4桁prefixに複数のCodeが存在しうる。
 // 従来はcodeに4桁を渡すとAPI側が自動的に普通株式のみ返していたが、一括取得ではこの自動選択が
-// 効かないため、5桁目が'0'(普通株式)のレコードを優先することで同じ結果になるようにする。
+// 効かないため、4桁prefixで突き合わせる場合は5桁目が'0'(普通株式)のレコードを優先することで
+// 同じ結果になるようにする。
 function resolveTargetBars(bars: DailyBar[], targetTickers: Set<string>): Map<string, DailyBar> {
   const resolved = new Map<string, DailyBar>();
 
   for (const bar of bars) {
-    const ticker = bar.Code.slice(0, 4);
-    if (!targetTickers.has(ticker)) continue;
-
     const isCommonStock = bar.Code[4] === '0';
-    const existing = resolved.get(ticker);
-    if (!existing || isCommonStock) {
-      resolved.set(ticker, bar);
+
+    if (targetTickers.has(bar.Code)) {
+      resolved.set(bar.Code, bar);
+    }
+
+    const prefix = bar.Code.slice(0, 4);
+    if (targetTickers.has(prefix)) {
+      const existing = resolved.get(prefix);
+      if (!existing || isCommonStock) {
+        resolved.set(prefix, bar);
+      }
     }
   }
 
