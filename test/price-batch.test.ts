@@ -1,4 +1,4 @@
-﻿const mockDdbSend = jest.fn();
+const mockDdbSend = jest.fn();
 const mockGetApiKey = jest.fn();
 const mockGetTargetTickers = jest.fn();
 const mockFetchWithRetry = jest.fn();
@@ -124,4 +124,29 @@ test('follows pagination_key when a single date response is paginated', async ()
   // 1日目が2ページ(pagination_key追跡)+残り2日分=合計4回
   expect(mockFetchWithRetry).toHaveBeenCalledTimes(4);
   expect(mockFetchWithRetry.mock.calls[1][0]).toContain('pagination_key=page2');
+});
+
+test('queries by date only regardless of how many target tickers exist', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['7203', '1301']);
+  mockGetApiKey.mockResolvedValueOnce('test-api-key');
+  mockFetchWithRetry.mockResolvedValue({
+    json: async () => ({
+      data: [
+        { Code: '72030', Date: '2026-08-01', O: 100, H: 110, L: 95, C: 105, Vo: 1000 },
+        { Code: '13010', Date: '2026-08-01', O: 200, H: 210, L: 195, C: 205, Vo: 2000 },
+      ],
+    }),
+  });
+
+  await handler();
+
+  // LOOKBACK_DAYS=2 → 3日分(from〜to inclusive)。複数銘柄を指定しても
+  // 1日ごとに1回のfetchWithRetryだけ呼ばれる(tickers.length × 3 ではない)
+  expect(mockFetchWithRetry).toHaveBeenCalledTimes(3);
+
+  const putCalls = mockDdbSend.mock.calls.filter(([cmd]) => 'Item' in (cmd as Record<string, unknown>));
+  // 2銘柄 × 3日分
+  expect(putCalls).toHaveLength(6);
+  const tickers = new Set(putCalls.map(([cmd]) => (cmd as { Item: { ticker: string } }).Item.ticker));
+  expect(tickers).toEqual(new Set(['7203', '1301']));
 });
