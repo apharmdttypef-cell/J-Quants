@@ -1,4 +1,4 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+﻿import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { getApiKey, getTargetTickers, fetchWithRetry, normalizeDate, formatDate } from '../shared/jquants-batch-client';
 
@@ -34,12 +34,15 @@ interface DailyBarsResponse {
   pagination_key?: string;
 }
 
-async function fetchDailyBars(ticker: string, apiKey: string, from: string, to: string): Promise<DailyBar[]> {
+// codeを付けずdateのみ指定すると、その日の全上場銘柄分のデータが1回のリクエストで返る
+// (実機検証済み: 2026-05-26〜28で東証全銘柄4,446〜4,453件がpaginationなしで1レスポンスに
+// 収まった)。pagination_keyのページング処理は取引日によって件数が変動する可能性に備えて残す。
+async function fetchAllBarsForDate(date: string, apiKey: string): Promise<DailyBar[]> {
   const bars: DailyBar[] = [];
   let paginationKey: string | undefined;
 
   do {
-    const params = new URLSearchParams({ code: ticker, from, to });
+    const params = new URLSearchParams({ date });
     if (paginationKey) params.set('pagination_key', paginationKey);
 
     const response = await fetchWithRetry(
@@ -56,26 +59,44 @@ async function fetchDailyBars(ticker: string, apiKey: string, from: string, to: 
   return bars;
 }
 
-async function upsertBars(ticker: string, bars: DailyBar[]): Promise<void> {
-  const updatedAt = new Date().toISOString();
+// 一括取得したレスポンスのCodeは5桁(例: '13010')。アプリ内のtickerは4桁(例: '1301')なので
+// 先頭4桁を取って突き合わせる(yutai-tdnet-watch-batchのtoTicker()と同じ変換)。
+// 普通株式・優先株式等が両方上場している銘柄では同じ4桁prefixに複数のCodeが存在しうる。
+// 従来はcodeに4桁を渡すとAPI側が自動的に普通株式のみ返していたが、一括取得ではこの自動選択が
+// 効かないため、5桁目が'0'(普通株式)のレコードを優先することで同じ結果になるようにする。
+function resolveTargetBars(bars: DailyBar[], targetTickers: Set<string>): Map<string, DailyBar> {
+  const resolved = new Map<string, DailyBar>();
 
   for (const bar of bars) {
-    await ddbDocClient.send(
-      new PutCommand({
-        TableName: TABLE_NAME,
-        Item: {
-          ticker,
-          date: normalizeDate(bar.Date),
-          open: bar.O,
-          high: bar.H,
-          low: bar.L,
-          close: bar.C,
-          volume: bar.Vo,
-          updated_at: updatedAt,
-        },
-      }),
-    );
+    const ticker = bar.Code.slice(0, 4);
+    if (!targetTickers.has(ticker)) continue;
+
+    const isCommonStock = bar.Code[4] === '0';
+    const existing = resolved.get(ticker);
+    if (!existing || isCommonStock) {
+      resolved.set(ticker, bar);
+    }
   }
+
+  return resolved;
+}
+
+async function upsertBar(ticker: string, bar: DailyBar): Promise<void> {
+  await ddbDocClient.send(
+    new PutCommand({
+      TableName: TABLE_NAME,
+      Item: {
+        ticker,
+        date: normalizeDate(bar.Date),
+        open: bar.O,
+        high: bar.H,
+        low: bar.L,
+        close: bar.C,
+        volume: bar.Vo,
+        updated_at: new Date().toISOString(),
+      },
+    }),
+  );
 }
 
 export const handler = async (): Promise<void> => {
@@ -84,18 +105,25 @@ export const handler = async (): Promise<void> => {
     console.warn('No target tickers (watchlist and yutai master are both empty); nothing to fetch');
     return;
   }
+  const targetTickers = new Set(tickers);
 
   const apiKey = await getApiKey(SECRET_ARN);
-  const to = formatDate(new Date(Date.now() - DELIVERY_DELAY_DAYS * 24 * 60 * 60 * 1000));
-  const from = formatDate(new Date(Date.now() - (DELIVERY_DELAY_DAYS + LOOKBACK_DAYS) * 24 * 60 * 60 * 1000));
 
-  for (const ticker of tickers) {
+  const dates: string[] = [];
+  for (let offset = DELIVERY_DELAY_DAYS + LOOKBACK_DAYS; offset >= DELIVERY_DELAY_DAYS; offset--) {
+    dates.push(formatDate(new Date(Date.now() - offset * 24 * 60 * 60 * 1000)));
+  }
+
+  for (const date of dates) {
     try {
-      const bars = await fetchDailyBars(ticker, apiKey, from, to);
-      await upsertBars(ticker, bars);
-      console.log(`${ticker}: upserted ${bars.length} bars`);
+      const bars = await fetchAllBarsForDate(date, apiKey);
+      const matched = resolveTargetBars(bars, targetTickers);
+      for (const [ticker, bar] of matched) {
+        await upsertBar(ticker, bar);
+      }
+      console.log(`${date}: matched ${matched.size} of ${targetTickers.size} target tickers (${bars.length} bars in market snapshot)`);
     } catch (error) {
-      console.error(`${ticker}: failed to fetch/upsert daily bars`, error);
+      console.error(`${date}: failed to fetch/upsert daily bars`, error);
     }
   }
 };

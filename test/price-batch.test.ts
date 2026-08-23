@@ -1,4 +1,4 @@
-const mockDdbSend = jest.fn();
+﻿const mockDdbSend = jest.fn();
 const mockGetApiKey = jest.fn();
 const mockGetTargetTickers = jest.fn();
 const mockFetchWithRetry = jest.fn();
@@ -24,6 +24,10 @@ process.env.TABLE_NAME = 'JQuantsStockPrices';
 process.env.WATCHLIST_TABLE_NAME = 'JQuantsWatchlist';
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
+// 3日分(offset+2〜offsetの3日)のループになるようにし、日付ごとに1回fetchWithRetryが
+// 呼ばれることをテストで確認しやすくする。
+process.env.LOOKBACK_DAYS = '2';
+process.env.DELIVERY_DELAY_DAYS = '10';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/price-batch/index') as { handler: () => Promise<void> };
@@ -44,33 +48,80 @@ test('does nothing when there are no target tickers', async () => {
   expect(mockFetchWithRetry).not.toHaveBeenCalled();
 });
 
-test('fetches daily bars for each target ticker and upserts them', async () => {
+test('queries once per day in the lookback window, by date only (no code parameter)', async () => {
   mockGetTargetTickers.mockResolvedValueOnce(['7203']);
-  mockGetApiKey.mockResolvedValueOnce('test-api-key');
-  mockFetchWithRetry.mockResolvedValueOnce({
-    json: async () => ({ data: [{ Code: '7203', Date: '2026-08-01', O: 100, H: 110, L: 95, C: 105, Vo: 1000 }] }),
-  });
-
-  await handler();
-
-  expect(mockFetchWithRetry).toHaveBeenCalledTimes(1);
-  expect(mockFetchWithRetry.mock.calls[0][0]).toContain('/equities/bars/daily');
-  expect(mockFetchWithRetry.mock.calls[0][0]).toContain('code=7203');
-
-  const putCalls = mockDdbSend.mock.calls.filter(([cmd]) => 'Item' in (cmd as Record<string, unknown>));
-  expect(putCalls).toHaveLength(1);
-  expect(putCalls[0][0]).toMatchObject({ TableName: 'JQuantsStockPrices', Item: { ticker: '7203', date: '2026-08-01' } });
-});
-
-test('fetches for multiple target tickers independently', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203', '9999']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry.mockResolvedValue({ json: async () => ({ data: [] }) });
 
   await handler();
 
-  expect(mockFetchWithRetry).toHaveBeenCalledTimes(2);
-  const urls = mockFetchWithRetry.mock.calls.map(([url]) => url as string);
-  expect(urls.some((u) => u.includes('code=7203'))).toBe(true);
-  expect(urls.some((u) => u.includes('code=9999'))).toBe(true);
+  // LOOKBACK_DAYS=2 → 3日分(from〜to inclusive)
+  expect(mockFetchWithRetry).toHaveBeenCalledTimes(3);
+  for (const [url] of mockFetchWithRetry.mock.calls) {
+    expect(url as string).toContain('/equities/bars/daily');
+    expect(url as string).toMatch(/date=\d{8}/);
+    expect(url as string).not.toContain('code=');
+  }
+});
+
+test('upserts only bars for tickers in the target set, ignoring the rest of the market snapshot', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockGetApiKey.mockResolvedValueOnce('test-api-key');
+  mockFetchWithRetry.mockResolvedValue({
+    json: async () => ({
+      data: [
+        { Code: '72030', Date: '2026-08-01', O: 100, H: 110, L: 95, C: 105, Vo: 1000 },
+        { Code: '99990', Date: '2026-08-01', O: 1, H: 2, L: 1, C: 2, Vo: 5 },
+      ],
+    }),
+  });
+
+  await handler();
+
+  const putCalls = mockDdbSend.mock.calls.filter(([cmd]) => 'Item' in (cmd as Record<string, unknown>));
+  // 3日分ループする環境設定のため、一致した1件が日ごとに書き込まれ3件になる
+  expect(putCalls).toHaveLength(3);
+  for (const [cmd] of putCalls) {
+    expect(cmd).toMatchObject({ TableName: 'JQuantsStockPrices', Item: { ticker: '7203', date: '2026-08-01' } });
+  }
+});
+
+test('prefers the common-stock record (5th digit 0) when a ticker has multiple share classes listed', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['1301']);
+  mockGetApiKey.mockResolvedValueOnce('test-api-key');
+  mockFetchWithRetry.mockResolvedValue({
+    json: async () => ({
+      data: [
+        { Code: '13011', Date: '2026-08-01', O: 999, H: 999, L: 999, C: 999, Vo: 999 }, // 優先株式(先に出現)
+        { Code: '13010', Date: '2026-08-01', O: 100, H: 110, L: 95, C: 105, Vo: 1000 }, // 普通株式
+      ],
+    }),
+  });
+
+  await handler();
+
+  const putCalls = mockDdbSend.mock.calls.filter(([cmd]) => 'Item' in (cmd as Record<string, unknown>));
+  expect(putCalls).toHaveLength(3);
+  for (const [cmd] of putCalls) {
+    expect(cmd).toMatchObject({ Item: { ticker: '1301', close: 105 } }); // 普通株式側の値
+  }
+});
+
+test('follows pagination_key when a single date response is paginated', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockGetApiKey.mockResolvedValueOnce('test-api-key');
+  mockFetchWithRetry
+    .mockResolvedValueOnce({
+      json: async () => ({
+        data: [{ Code: '72030', Date: '2026-08-01', O: 100, H: 110, L: 95, C: 105, Vo: 1000 }],
+        pagination_key: 'page2',
+      }),
+    })
+    .mockResolvedValue({ json: async () => ({ data: [] }) });
+
+  await handler();
+
+  // 1日目が2ページ(pagination_key追跡)+残り2日分=合計4回
+  expect(mockFetchWithRetry).toHaveBeenCalledTimes(4);
+  expect(mockFetchWithRetry.mock.calls[1][0]).toContain('pagination_key=page2');
 });
