@@ -1,6 +1,5 @@
-import { getApiKey, fetchWithRetry, normalizeDate } from '../shared/jquants-batch-client';
+import { fetchWithRetry, normalizeDate } from '../shared/jquants-batch-client';
 
-const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 // mkt-margin-int/mkt-margin-alertはStandardプラン専用のエンドポイントのため、
 // Freeプラン向けの13秒デフォルトは不要。Standardプランの120req/分を想定した値。
@@ -8,6 +7,7 @@ const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '500');
 const MAX_RETRIES = 5;
 
 export interface MarginBalancePoint {
+  code: string;
   date: string;
   financingBalance: number;
   lendingBalance: number;
@@ -22,7 +22,7 @@ interface MarginIntRecord {
 }
 
 interface MarginIntResponse {
-  data: MarginIntRecord[];
+  data?: MarginIntRecord[];
   pagination_key?: string;
 }
 
@@ -34,90 +34,77 @@ interface MarginAlertRecord {
 }
 
 interface MarginAlertResponse {
-  data: MarginAlertRecord[];
+  data?: MarginAlertRecord[];
   pagination_key?: string;
 }
 
-async function fetchMarginIntPage(params: Record<string, string>, apiKey: string): Promise<MarginIntRecord[]> {
-  const records: MarginIntRecord[] = [];
+// 信用取引週末残高(/markets/margin-interest)。codeを付けずdateのみ指定すると、その日の
+// 全上場銘柄分のデータが1回のリクエストで返る(price-batchのfetchAllBarsForDateと同じ
+// パターン)。逆日歩は制度信用固有の仕組みのため、一般信用込みの合計(ShrtVol/LongVol)では
+// なく制度信用のみ(ShrtStdVol/LongStdVol)を使う。2026-09-28に日次配信へ仕様変更予定だが、
+// 株数系フィールド名は新旧で同じなので、この変更を跨いでもコード変更は不要な想定。
+export async function fetchAllWeeklyBalancesForDate(date: string, apiKey: string): Promise<MarginBalancePoint[]> {
+  const points: MarginBalancePoint[] = [];
   let paginationKey: string | undefined;
 
   do {
-    const search = new URLSearchParams(params);
-    if (paginationKey) search.set('pagination_key', paginationKey);
+    const params = new URLSearchParams({ date });
+    if (paginationKey) params.set('pagination_key', paginationKey);
 
     const response = await fetchWithRetry(
-      `${API_BASE_URL}/markets/margin-interest?${search}`,
+      `${API_BASE_URL}/markets/margin-interest?${params}`,
       apiKey,
       REQUEST_INTERVAL_MS,
       MAX_RETRIES,
     );
     const body = (await response.json()) as MarginIntResponse;
-    records.push(...(body.data ?? []));
+    for (const record of body.data ?? []) {
+      points.push({
+        code: record.Code,
+        date: normalizeDate(record.Date),
+        financingBalance: record.LongStdVol,
+        lendingBalance: record.ShrtStdVol,
+        source: 'weekly',
+      });
+    }
     paginationKey = body.pagination_key;
   } while (paginationKey);
 
-  return records;
+  return points;
 }
 
-async function fetchMarginAlertPage(params: Record<string, string>, apiKey: string): Promise<MarginAlertRecord[]> {
-  const records: MarginAlertRecord[] = [];
+// 日々公表信用取引残高(/markets/margin-alert)。「日々公表銘柄」に指定された銘柄のみが
+// 対象で、mkt-margin-intとは別の独立したデータソース。codeを付けずdateのみ指定すると、
+// その日に公表された全銘柄分が1回のリクエストで返る。dateパラメータは公表日ベースだが、
+// レスポンスのAppDate(申込日、残高が示す基準日)をMarginBalancePoint.dateとして使い、
+// fetchAllWeeklyBalancesForDateのDateと意味を揃える。常にtodayの1日分のみ呼ばれる想定
+// (履歴バックフィルはしない)。
+export async function fetchAllDailyAlertBalancesForDate(date: string, apiKey: string): Promise<MarginBalancePoint[]> {
+  const points: MarginBalancePoint[] = [];
   let paginationKey: string | undefined;
 
   do {
-    const search = new URLSearchParams(params);
-    if (paginationKey) search.set('pagination_key', paginationKey);
+    const params = new URLSearchParams({ date });
+    if (paginationKey) params.set('pagination_key', paginationKey);
 
     const response = await fetchWithRetry(
-      `${API_BASE_URL}/markets/margin-alert?${search}`,
+      `${API_BASE_URL}/markets/margin-alert?${params}`,
       apiKey,
       REQUEST_INTERVAL_MS,
       MAX_RETRIES,
     );
     const body = (await response.json()) as MarginAlertResponse;
-    records.push(...(body.data ?? []));
-    paginationKey = body.pagination_key;
-  } while (paginationKey);
-
-  return records;
-}
-
-// 信用取引週末残高(/markets/margin-interest)から制度信用分のみを取得する。逆日歩は
-// 制度信用固有の仕組みのため、一般信用込みの合計(ShrtVol/LongVol)ではなく制度信用のみ
-// (ShrtStdVol/LongStdVol)を使う。2026-09-28に日次配信へ仕様変更予定だが、株数系
-// フィールド名は新旧で同じなので、この変更を跨いでもコード変更は不要な想定。
-export async function fetchWeeklyBalances(ticker: string, from: string, to: string): Promise<MarginBalancePoint[]> {
-  const apiKey = await getApiKey(SECRET_ARN);
-  const records = await fetchMarginIntPage({ code: ticker, from, to }, apiKey);
-
-  return records.map((record) => ({
-    date: normalizeDate(record.Date),
-    financingBalance: record.LongStdVol,
-    lendingBalance: record.ShrtStdVol,
-    source: 'weekly' as const,
-  }));
-}
-
-// 日々公表信用取引残高(/markets/margin-alert)。「日々公表銘柄」に指定された銘柄のみが
-// 対象で、mkt-margin-intとは別のデータソース。対象外の銘柄・日付は空配列が返る
-// (エラーにはならない)。dateパラメータは公表日ベースだが、レスポンスのAppDate(申込日、
-// 残高が示す基準日)をMarginBalancePoint.dateとして使い、fetchWeeklyBalancesのDateと
-// 意味を揃える。
-export async function fetchDailyAlertBalances(tickers: string[], date: string): Promise<MarginBalancePoint[]> {
-  const apiKey = await getApiKey(SECRET_ARN);
-  const points: MarginBalancePoint[] = [];
-
-  for (const ticker of tickers) {
-    const records = await fetchMarginAlertPage({ code: ticker, date }, apiKey);
-    for (const record of records) {
+    for (const record of body.data ?? []) {
       points.push({
+        code: record.Code,
         date: normalizeDate(record.AppDate),
         financingBalance: record.LongStdOut,
         lendingBalance: record.ShrtStdOut,
-        source: 'daily-alert' as const,
+        source: 'daily-alert',
       });
     }
-  }
+    paginationKey = body.pagination_key;
+  } while (paginationKey);
 
   return points;
 }

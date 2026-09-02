@@ -1,21 +1,23 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { fetchWeeklyBalances, fetchDailyAlertBalances, type MarginBalancePoint } from './data-source';
+import { DynamoDBDocumentClient, BatchWriteCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { getApiKey } from '../shared/jquants-batch-client';
+import { fetchAllWeeklyBalancesForDate, fetchAllDailyAlertBalancesForDate, type MarginBalancePoint } from './data-source';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
-const BACKFILL_DAYS = Number(process.env.BACKFILL_DAYS ?? String(2 * 365));
-const DIFF_LOOKBACK_DAYS = Number(process.env.DIFF_LOOKBACK_DAYS ?? '14');
-// 新規銘柄1件のバックフィルは2年分(週次約104件+日次1件)の逐次書き込みを伴うため、
-// YutaiMasterへの一括追加(初期投入、手動再同期等)の直後は対象銘柄が一気に膨らみ、
-// 14分のタイムアウト内に完走できなくなる。新規バックフィルの件数だけ実行あたりに
-// 上限を設け、残りは次回実行に持ち越す(diff更新は軽いので上限の対象外)。
-const MAX_BACKFILL_TICKERS_PER_RUN = Number(process.env.MAX_BACKFILL_TICKERS_PER_RUN ?? '150');
+const SECRET_ARN = process.env.SECRET_ARN!;
+// 週次データを何日分遡って取得するか。デフォルト2年分。price-batchのLOOKBACK_DAYSとは
+// 無関係の別Lambda環境変数(このLambda専用)。
+const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? String(2 * 365));
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 function formatDate(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function getYutaiTickers(): Promise<string[]> {
@@ -35,35 +37,74 @@ async function getYutaiTickers(): Promise<string[]> {
   return tickers;
 }
 
-// 銘柄に信用残データが1件も無ければバックフィル対象とみなす。
-// 優待マスタへの新規追加はアプリ外で行われるため、このバッチが毎回自動検知する。
-async function hasExistingBalance(ticker: string): Promise<boolean> {
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: MARGIN_BALANCE_TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker',
-      ExpressionAttributeValues: { ':ticker': ticker },
-      Limit: 1,
-    }),
-  );
-  return (result.Items ?? []).length > 0;
+// 一括取得したレスポンスのcodeは5桁(例: '72030')。アプリ内のtickerは通常4桁(例: '7203')だが、
+// 優先株式等を指定する5桁のticker(例: '72030')もありうる。そのため5桁の完全一致と4桁prefix
+// の一致の両方をチェックする(price-batchのresolveTargetBarsと同じ変換)。同じ4桁prefixに
+// 複数のcodeが存在する場合(普通株式・優先株式等)は5桁目が'0'(普通株式)のレコードを優先する。
+function resolveTargetPoints(points: MarginBalancePoint[], targetTickers: Set<string>): Map<string, MarginBalancePoint> {
+  const resolved = new Map<string, MarginBalancePoint>();
+
+  for (const point of points) {
+    const isCommonStock = point.code[4] === '0';
+
+    if (targetTickers.has(point.code)) {
+      resolved.set(point.code, point);
+    }
+
+    const prefix = point.code.slice(0, 4);
+    if (targetTickers.has(prefix)) {
+      const existing = resolved.get(prefix);
+      if (!existing || isCommonStock) {
+        resolved.set(prefix, point);
+      }
+    }
+  }
+
+  return resolved;
 }
 
-async function upsertPoints(ticker: string, points: MarginBalancePoint[]): Promise<void> {
-  for (const point of points) {
-    await ddbDocClient.send(
-      new PutCommand({
-        TableName: MARGIN_BALANCE_TABLE_NAME,
-        Item: {
-          ticker,
-          date: point.date,
-          financingBalance: point.financingBalance,
-          lendingBalance: point.lendingBalance,
-          source: point.source,
-        },
-      }),
-    );
+function toItems(matched: Map<string, MarginBalancePoint>): Record<string, unknown>[] {
+  return [...matched.entries()].map(([ticker, point]) => ({
+    ticker,
+    date: point.date,
+    financingBalance: point.financingBalance,
+    lendingBalance: point.lendingBalance,
+    source: point.source,
+  }));
+}
+
+// DynamoDBのBatchWriteItemは25件までしか受け付け、スロットリング時はUnprocessedItemsに
+// 未処理分を積んで200番台で返す(エラーにはならない)。ここでリトライしないと、書き込みが
+// エラーなく黙って欠落する(信用残高テーブルの一括パージ作業で実際に踏んだ不具合と同じ)。
+async function batchUpsert(tableName: string, items: Record<string, unknown>[]): Promise<void> {
+  for (let i = 0; i < items.length; i += 25) {
+    let pending: { PutRequest: { Item: Record<string, unknown> } }[] = items
+      .slice(i, i + 25)
+      .map((Item) => ({ PutRequest: { Item } }));
+    let attempt = 0;
+
+    while (pending.length > 0) {
+      const result = await ddbDocClient.send(new BatchWriteCommand({ RequestItems: { [tableName]: pending } }));
+      const unprocessed = (result.UnprocessedItems?.[tableName] ?? []) as typeof pending;
+      if (unprocessed.length === 0) break;
+
+      attempt += 1;
+      if (attempt > 10) {
+        throw new Error(`batchUpsert: too many retries, ${unprocessed.length} items still unprocessed`);
+      }
+      await sleep(Math.min(2000, 100 * 2 ** attempt));
+      pending = unprocessed;
+    }
   }
+}
+
+function listFridays(lookbackDays: number): string[] {
+  const fridays: string[] = [];
+  for (let offset = 0; offset <= lookbackDays; offset++) {
+    const d = new Date(Date.now() - offset * 24 * 60 * 60 * 1000);
+    if (d.getUTCDay() === 5) fridays.push(formatDate(d));
+  }
+  return fridays;
 }
 
 export const handler = async (): Promise<void> => {
@@ -72,41 +113,37 @@ export const handler = async (): Promise<void> => {
     console.warn('Yutai master is empty; nothing to fetch');
     return;
   }
+  const targetTickers = new Set(tickers);
 
+  const apiKey = await getApiKey(SECRET_ARN);
   const today = formatDate(new Date());
-  let backfilled = 0;
-  let diffUpdated = 0;
-  let deferred = 0;
-  let failed = 0;
+  const fridays = listFridays(LOOKBACK_DAYS);
 
-  for (const ticker of tickers) {
+  let weeklyUpserted = 0;
+  for (const date of fridays) {
     try {
-      const isBackfill = !(await hasExistingBalance(ticker));
-      if (isBackfill && backfilled >= MAX_BACKFILL_TICKERS_PER_RUN) {
-        deferred++;
-        continue;
-      }
-
-      const lookbackDays = isBackfill ? BACKFILL_DAYS : DIFF_LOOKBACK_DAYS;
-      const from = formatDate(new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000));
-
-      const weekly = await fetchWeeklyBalances(ticker, from, today);
-      await upsertPoints(ticker, weekly);
-
-      const dailyAlert = await fetchDailyAlertBalances([ticker], today);
-      await upsertPoints(ticker, dailyAlert);
-
-      if (isBackfill) backfilled++;
-      else diffUpdated++;
-
-      console.log(`${ticker}: upserted ${weekly.length} weekly + ${dailyAlert.length} daily-alert points (backfill=${isBackfill})`);
+      const points = await fetchAllWeeklyBalancesForDate(date, apiKey);
+      const matched = resolveTargetPoints(points, targetTickers);
+      await batchUpsert(MARGIN_BALANCE_TABLE_NAME, toItems(matched));
+      weeklyUpserted += matched.size;
+      console.log(`${date}: matched ${matched.size} of ${targetTickers.size} target tickers (weekly)`);
     } catch (error) {
-      failed++;
-      console.error(`${ticker}: failed to fetch/upsert margin balance`, error);
+      console.error(`${date}: failed to fetch/upsert weekly margin balances`, error);
     }
   }
 
+  let dailyAlertUpserted = 0;
+  try {
+    const alertPoints = await fetchAllDailyAlertBalancesForDate(today, apiKey);
+    const matchedAlerts = resolveTargetPoints(alertPoints, targetTickers);
+    await batchUpsert(MARGIN_BALANCE_TABLE_NAME, toItems(matchedAlerts));
+    dailyAlertUpserted = matchedAlerts.size;
+    console.log(`${today}: matched ${matchedAlerts.size} of ${targetTickers.size} target tickers (daily-alert)`);
+  } catch (error) {
+    console.error(`${today}: failed to fetch/upsert daily-alert margin balances`, error);
+  }
+
   console.log(
-    `margin-balance-batch: backfilled ${backfilled}, diff-updated ${diffUpdated}, deferred (backfill cap reached) ${deferred}, failed ${failed} (of ${tickers.length} tickers)`,
+    `margin-balance-batch: ${fridays.length} weekly dates processed, ${weeklyUpserted} weekly points upserted, ${dailyAlertUpserted} daily-alert points upserted (of ${targetTickers.size} target tickers)`,
   );
 };

@@ -1,44 +1,32 @@
-const mockGetApiKey = jest.fn();
 const mockFetchWithRetry = jest.fn();
 
 jest.mock('../lambda/shared/jquants-batch-client', () => ({
-  getApiKey: (...args: unknown[]) => mockGetApiKey(...args),
   fetchWithRetry: (...args: unknown[]) => mockFetchWithRetry(...args),
   normalizeDate: (raw: string) => (raw.includes('-') ? raw : `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`),
 }));
 
-process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
-
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { fetchWeeklyBalances, fetchDailyAlertBalances } = require('../lambda/margin-balance-batch/data-source') as {
-  fetchWeeklyBalances: (ticker: string, from: string, to: string) => Promise<unknown[]>;
-  fetchDailyAlertBalances: (tickers: string[], date: string) => Promise<unknown[]>;
+const { fetchAllWeeklyBalancesForDate, fetchAllDailyAlertBalancesForDate } = require('../lambda/margin-balance-batch/data-source') as {
+  fetchAllWeeklyBalancesForDate: (date: string, apiKey: string) => Promise<unknown[]>;
+  fetchAllDailyAlertBalancesForDate: (date: string, apiKey: string) => Promise<unknown[]>;
 };
 
 beforeEach(() => {
-  mockGetApiKey.mockReset();
   mockFetchWithRetry.mockReset();
 });
 
-describe('fetchWeeklyBalances', () => {
-  test('calls /markets/margin-interest with code/from/to and maps system-margin fields only', async () => {
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
+describe('fetchAllWeeklyBalancesForDate', () => {
+  test('calls /markets/margin-interest with date only (no code) and maps system-margin fields for every ticker in the response', async () => {
     mockFetchWithRetry.mockResolvedValueOnce({
       json: async () => ({
         data: [
-          {
-            Date: '2026-08-28',
-            Code: '72030',
-            LongVol: 225000,
-            ShrtVol: 257400,
-            LongStdVol: 143100,
-            ShrtStdVol: 14600,
-          },
+          { Date: '2026-08-28', Code: '72030', LongVol: 225000, ShrtVol: 257400, LongStdVol: 143100, ShrtStdVol: 14600 },
+          { Date: '2026-08-28', Code: '13010', LongVol: 5000, ShrtVol: 6000, LongStdVol: 4000, ShrtStdVol: 500 },
         ],
       }),
     });
 
-    const result = await fetchWeeklyBalances('7203', '2026-08-01', '2026-08-31');
+    const result = await fetchAllWeeklyBalancesForDate('2026-08-28', 'test-api-key');
 
     expect(mockFetchWithRetry).toHaveBeenCalledTimes(1);
     expect(mockFetchWithRetry).toHaveBeenCalledWith(
@@ -48,50 +36,63 @@ describe('fetchWeeklyBalances', () => {
       5,
     );
     const url = mockFetchWithRetry.mock.calls[0][0] as string;
-    expect(url).toContain('/markets/margin-interest');
-    expect(url).toContain('code=7203');
-    expect(url).toContain('from=2026-08-01');
-    expect(url).toContain('to=2026-08-31');
+    expect(url).toContain('date=2026-08-28');
+    expect(url).not.toContain('code=');
 
-    // 一般信用込みの合計(LongVol/ShrtVol)ではなく制度信用のみ(*StdVol)を使うこと
-    expect(result).toEqual([{ date: '2026-08-28', financingBalance: 143100, lendingBalance: 14600, source: 'weekly' }]);
+    expect(result).toEqual([
+      { code: '72030', date: '2026-08-28', financingBalance: 143100, lendingBalance: 14600, source: 'weekly' },
+      { code: '13010', date: '2026-08-28', financingBalance: 4000, lendingBalance: 500, source: 'weekly' },
+    ]);
   });
 
   test('follows pagination_key across multiple pages', async () => {
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
     mockFetchWithRetry
       .mockResolvedValueOnce({
         json: async () => ({
-          data: [{ Date: '2026-08-21', Code: '72030', LongStdVol: 100, ShrtStdVol: 50 }],
+          data: [{ Date: '2026-08-28', Code: '72030', LongStdVol: 100, ShrtStdVol: 50 }],
           pagination_key: 'page2',
         }),
       })
       .mockResolvedValueOnce({
-        // 非ハイフン形式(YYYYMMDD)で返ってきてもnormalizeDateでYYYY-MM-DDに揃うことを確認する
-        json: async () => ({ data: [{ Date: '20260828', Code: '72030', LongStdVol: 200, ShrtStdVol: 60 }] }),
+        json: async () => ({ data: [{ Date: '2026-08-28', Code: '13010', LongStdVol: 200, ShrtStdVol: 60 }] }),
       });
 
-    const result = await fetchWeeklyBalances('7203', '2026-08-01', '2026-08-31');
+    const result = await fetchAllWeeklyBalancesForDate('2026-08-28', 'test-api-key');
 
     expect(mockFetchWithRetry).toHaveBeenCalledTimes(2);
     expect(mockFetchWithRetry.mock.calls[1][0]).toContain('pagination_key=page2');
     expect(result).toHaveLength(2);
-    expect(result[1]).toEqual({ date: '2026-08-28', financingBalance: 200, lendingBalance: 60, source: 'weekly' });
   });
 
-  test('returns an empty array when the ticker has no margin balance history', async () => {
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
+  test('normalizes a non-dashed Date field', async () => {
+    mockFetchWithRetry.mockResolvedValueOnce({
+      json: async () => ({ data: [{ Date: '20260828', Code: '72030', LongStdVol: 100, ShrtStdVol: 50 }] }),
+    });
+
+    const result = await fetchAllWeeklyBalancesForDate('2026-08-28', 'test-api-key');
+
+    expect(result[0]).toMatchObject({ date: '2026-08-28' });
+  });
+
+  test('returns an empty array when the date has no data', async () => {
     mockFetchWithRetry.mockResolvedValueOnce({ json: async () => ({ data: [] }) });
 
-    const result = await fetchWeeklyBalances('7203', '2026-08-01', '2026-08-31');
+    const result = await fetchAllWeeklyBalancesForDate('2026-08-28', 'test-api-key');
+
+    expect(result).toEqual([]);
+  });
+
+  test('does not throw when the response omits the data field', async () => {
+    mockFetchWithRetry.mockResolvedValueOnce({ json: async () => ({}) });
+
+    const result = await fetchAllWeeklyBalancesForDate('2026-08-28', 'test-api-key');
 
     expect(result).toEqual([]);
   });
 });
 
-describe('fetchDailyAlertBalances', () => {
-  test('calls /markets/margin-alert once per ticker with code/date, using AppDate (not PubDate) as the point date', async () => {
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
+describe('fetchAllDailyAlertBalancesForDate', () => {
+  test('calls /markets/margin-alert with date only (no code) and uses AppDate (not PubDate) as the point date', async () => {
     mockFetchWithRetry.mockResolvedValueOnce({
       json: async () => ({
         data: [
@@ -108,7 +109,7 @@ describe('fetchDailyAlertBalances', () => {
       }),
     });
 
-    const result = await fetchDailyAlertBalances(['7203'], '2026-08-27');
+    const result = await fetchAllDailyAlertBalancesForDate('2026-08-27', 'test-api-key');
 
     expect(mockFetchWithRetry).toHaveBeenCalledTimes(1);
     expect(mockFetchWithRetry).toHaveBeenCalledWith(
@@ -118,30 +119,18 @@ describe('fetchDailyAlertBalances', () => {
       5,
     );
     const url = mockFetchWithRetry.mock.calls[0][0] as string;
-    expect(url).toContain('/markets/margin-alert');
-    expect(url).toContain('code=7203');
     expect(url).toContain('date=2026-08-27');
+    expect(url).not.toContain('code=');
 
-    expect(result).toEqual([{ date: '2026-08-26', financingBalance: 8410, lendingBalance: 920, source: 'daily-alert' }]);
+    expect(result).toEqual([
+      { code: '72030', date: '2026-08-26', financingBalance: 8410, lendingBalance: 920, source: 'daily-alert' },
+    ]);
   });
 
-  test('calls once per ticker when given multiple tickers', async () => {
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
-    mockFetchWithRetry.mockResolvedValue({ json: async () => ({ data: [] }) });
-
-    await fetchDailyAlertBalances(['7203', '9999'], '2026-08-27');
-
-    expect(mockFetchWithRetry).toHaveBeenCalledTimes(2);
-    const urls = mockFetchWithRetry.mock.calls.map(([url]) => url as string);
-    expect(urls.some((u) => u.includes('code=7203'))).toBe(true);
-    expect(urls.some((u) => u.includes('code=9999'))).toBe(true);
-  });
-
-  test('returns an empty array for a ticker not on the daily-alert list', async () => {
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
+  test('returns an empty array when no daily-alert data exists for the date', async () => {
     mockFetchWithRetry.mockResolvedValueOnce({ json: async () => ({ data: [] }) });
 
-    const result = await fetchDailyAlertBalances(['7203'], '2026-08-27');
+    const result = await fetchAllDailyAlertBalancesForDate('2026-08-27', 'test-api-key');
 
     expect(result).toEqual([]);
   });
