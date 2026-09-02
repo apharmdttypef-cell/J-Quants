@@ -89,6 +89,18 @@ describe('fetchAllWeeklyBalancesForDate', () => {
 
     expect(result).toEqual([]);
   });
+
+  test('coalesces a missing LongStdVol/ShrtStdVol to null', async () => {
+    mockFetchWithRetry.mockResolvedValueOnce({
+      json: async () => ({ data: [{ Date: '2026-08-28', Code: '72030' }] }),
+    });
+
+    const result = await fetchAllWeeklyBalancesForDate('2026-08-28', 'test-api-key');
+
+    expect(result).toEqual([
+      { code: '72030', date: '2026-08-28', financingBalance: null, lendingBalance: null, source: 'weekly' },
+    ]);
+  });
 });
 
 describe('fetchAllDailyAlertBalancesForDate', () => {
@@ -133,5 +145,17 @@ describe('fetchAllDailyAlertBalancesForDate', () => {
     const result = await fetchAllDailyAlertBalancesForDate('2026-08-27', 'test-api-key');
 
     expect(result).toEqual([]);
+  });
+
+  test('coalesces a missing LongStdOut/ShrtStdOut to null', async () => {
+    mockFetchWithRetry.mockResolvedValueOnce({
+      json: async () => ({ data: [{ AppDate: '2026-08-26', Code: '72030' }] }),
+    });
+
+    const result = await fetchAllDailyAlertBalancesForDate('2026-08-27', 'test-api-key');
+
+    expect(result).toEqual([
+      { code: '72030', date: '2026-08-26', financingBalance: null, lendingBalance: null, source: 'daily-alert' },
+    ]);
   });
 });

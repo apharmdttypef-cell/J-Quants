@@ -104,7 +104,7 @@ EventBridge(毎日 JST18:20)
 
 **フェーズ分け(ダミーAPI→本番API)**: 逆日歩見積りの計算には信用残(融資残・貸株残)データが必要だが、これを取得するJ-Quants `mkt-margin-int` / `mkt-margin-alert` はStandardプラン(有料)専用。画面・遷移の動作確認が終わるまで課金を遅らせるため、当初(フェーズ1)は`lambda/margin-balance-batch/data-source.ts`が信用残を**ticker+日付から決定的な擬似乱数で生成したダミーデータ**で返していた(同じ入力には常に同じ値を返すため、日々のトレンドグラフが実行のたびにジャンプすることはない)。Standardプランへの移行に伴い、フェーズ2として`data-source.ts`を`mkt-margin-int`/`mkt-margin-alert`への実呼び出しに差し替え済み(DynamoDBスキーマ・API・逆日歩計算ロジック・フロントは変更不要)。なお取引カレンダー(権利日→受渡日の日数算出)と実績逆日歩(taisyaku.jp)はJ-QuantsのFreeプラン/無料サイトでそれぞれ取得できるため、フェーズ1から本番のデータを使っている。
 
-**フェーズ2移行時の注意**: フェーズ1のダミーデータが既に`JQuantsMarginBalance`に書き込まれている場合、`hasExistingBalance`判定により実データへの2年分バックフィルが走らない上、ダミーの日付(月曜)と実データの日付(金曜)が別レコードとして共存し古いダミー値が残り続ける。デプロイ前に必ず`JQuantsMarginBalance`テーブルを空にすること。詳細は`docs/superpowers/specs/2026-09-02-margin-balance-real-api-design.md`の「移行後の確認事項」を参照。
+**フェーズ3(2026-09-02): 全銘柄一括日付取得への切り替え**: 銘柄ごとの直列取得は実データ保有銘柄が増えるほど実行時間が伸び続ける問題があり(`hasExistingBalance`による差分更新の対象が上限なしに毎回全件処理されるため)、実際に本番で14分のLambdaタイムアウトに達することを確認した。price-batchと同じ「日付のみ指定して全上場銘柄分を1回で取得」方式に切り替え、DynamoDB書き込みもバッチ化した(詳細: `docs/superpowers/specs/2026-09-02-margin-balance-bulk-date-fetch-design.md`)。`hasExistingBalance`・`MAX_BACKFILL_TICKERS_PER_RUN`は廃止され、デプロイ前のテーブルパージは不要になった(冪等upsertで既存データを上書きするのみ)。
 
 **リスク判定の事前計算**: `GET /yutai`一覧・`GET /yutai/{ticker}`が返す`riskStatus`/`maxGyakuhibu`/`maxRate`/`days`は、`reference-api`がリクエストのたびに計算するのではなく、`YutaiRiskPrecomputeBatchFunction`(毎日JST18:20、`PriceBatchFunction`の20分後)が`JQuantsYutaiMaster`を全件スキャンして銘柄ごとに計算し、同テーブルに書き戻す方式になっている。`reference-api`側は事前計算済みの値を読むだけ。優待実施銘柄が1,000件規模に増えると、銘柄ごとに信用残・前日終値をDynamoDBへ逐次クエリする従来方式では`GET /yutai`一覧が`ReferenceApiFunction`の10秒タイムアウトを超えてしまうため、その計算をバッチ側へ移してAPIリクエストをテーブル読み取りだけで完結させる設計にしている。
 

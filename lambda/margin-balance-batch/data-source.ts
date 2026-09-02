@@ -9,16 +9,16 @@ const MAX_RETRIES = 5;
 export interface MarginBalancePoint {
   code: string;
   date: string;
-  financingBalance: number;
-  lendingBalance: number;
+  financingBalance: number | null;
+  lendingBalance: number | null;
   source: 'weekly' | 'daily-alert';
 }
 
 interface MarginIntRecord {
   Date: string;
   Code: string;
-  LongStdVol: number;
-  ShrtStdVol: number;
+  LongStdVol: number | null;
+  ShrtStdVol: number | null;
 }
 
 interface MarginIntResponse {
@@ -29,8 +29,8 @@ interface MarginIntResponse {
 interface MarginAlertRecord {
   AppDate: string;
   Code: string;
-  LongStdOut: number;
-  ShrtStdOut: number;
+  LongStdOut: number | null;
+  ShrtStdOut: number | null;
 }
 
 interface MarginAlertResponse {
@@ -43,6 +43,10 @@ interface MarginAlertResponse {
 // パターン)。逆日歩は制度信用固有の仕組みのため、一般信用込みの合計(ShrtVol/LongVol)では
 // なく制度信用のみ(ShrtStdVol/LongStdVol)を使う。2026-09-28に日次配信へ仕様変更予定だが、
 // 株数系フィールド名は新旧で同じなので、この変更を跨いでもコード変更は不要な想定。
+//
+// 全上場銘柄が対象のため、個別銘柄向けの旧codeパラメータ呼び出しでは登場しなかった
+// 値欠損レコードが混ざりうる。DynamoDBはundefinedを書き込めないため、欠損はnullにする
+// (price-batchのDailyBarと同じ number | null の扱い)。
 export async function fetchAllWeeklyBalancesForDate(date: string, apiKey: string): Promise<MarginBalancePoint[]> {
   const points: MarginBalancePoint[] = [];
   let paginationKey: string | undefined;
@@ -62,8 +66,8 @@ export async function fetchAllWeeklyBalancesForDate(date: string, apiKey: string
       points.push({
         code: record.Code,
         date: normalizeDate(record.Date),
-        financingBalance: record.LongStdVol,
-        lendingBalance: record.ShrtStdVol,
+        financingBalance: record.LongStdVol ?? null,
+        lendingBalance: record.ShrtStdVol ?? null,
         source: 'weekly',
       });
     }
@@ -98,8 +102,8 @@ export async function fetchAllDailyAlertBalancesForDate(date: string, apiKey: st
       points.push({
         code: record.Code,
         date: normalizeDate(record.AppDate),
-        financingBalance: record.LongStdOut,
-        lendingBalance: record.ShrtStdOut,
+        financingBalance: record.LongStdOut ?? null,
+        lendingBalance: record.ShrtStdOut ?? null,
         source: 'daily-alert',
       });
     }

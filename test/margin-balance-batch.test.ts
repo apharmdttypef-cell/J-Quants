@@ -52,6 +52,9 @@ afterEach(() => {
 
 test('queries every Friday within LOOKBACK_DAYS and fetches today once for daily-alert', async () => {
   mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] }); // yutai master scan
+  mockFetchAllWeekly.mockResolvedValueOnce([
+    { code: '7203', date: '2026-08-28', financingBalance: 1, lendingBalance: 1, source: 'weekly' },
+  ]);
 
   await handler();
 
@@ -94,6 +97,75 @@ test('writes only target tickers via BatchWriteCommand, matching a 4-digit ticke
   expect(putItems.some((item) => item.ticker === '13010')).toBe(false);
 });
 
+test('prefers the common-stock (0-suffixed) record when a 4-digit ticker matches multiple codes, common stock listed first', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] });
+  mockFetchAllWeekly.mockResolvedValueOnce([
+    { code: '72030', date: '2026-08-28', financingBalance: 100, lendingBalance: 50, source: 'weekly' },
+    { code: '72031', date: '2026-08-28', financingBalance: 999, lendingBalance: 999, source: 'weekly' },
+  ]);
+
+  await handler();
+
+  const putItems = mockSend.mock.calls
+    .map(([cmd]) => cmd as Record<string, unknown>)
+    .filter((cmd) => cmd.__type === 'BatchWrite')
+    .flatMap((cmd) => {
+      const requestItems = cmd.RequestItems as Record<string, { PutRequest: { Item: Record<string, unknown> } }[]>;
+      return requestItems['JQuantsMarginBalance'].map((r) => r.PutRequest.Item);
+    });
+
+  expect(putItems.filter((item) => item.ticker === '7203')).toEqual([
+    { ticker: '7203', date: '2026-08-28', financingBalance: 100, lendingBalance: 50, source: 'weekly' },
+  ]);
+});
+
+test('prefers the common-stock record when listed second (order-independent)', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] });
+  mockFetchAllWeekly.mockResolvedValueOnce([
+    { code: '72031', date: '2026-08-28', financingBalance: 999, lendingBalance: 999, source: 'weekly' },
+    { code: '72030', date: '2026-08-28', financingBalance: 100, lendingBalance: 50, source: 'weekly' },
+  ]);
+
+  await handler();
+
+  const putItems = mockSend.mock.calls
+    .map(([cmd]) => cmd as Record<string, unknown>)
+    .filter((cmd) => cmd.__type === 'BatchWrite')
+    .flatMap((cmd) => {
+      const requestItems = cmd.RequestItems as Record<string, { PutRequest: { Item: Record<string, unknown> } }[]>;
+      return requestItems['JQuantsMarginBalance'].map((r) => r.PutRequest.Item);
+    });
+
+  expect(putItems.filter((item) => item.ticker === '7203')).toEqual([
+    { ticker: '7203', date: '2026-08-28', financingBalance: 100, lendingBalance: 50, source: 'weekly' },
+  ]);
+});
+
+test('writes matched daily-alert points with correct field mapping', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] });
+  mockFetchAllDailyAlert.mockResolvedValueOnce([
+    { code: '72030', date: '2026-08-26', financingBalance: 8410, lendingBalance: 920, source: 'daily-alert' },
+  ]);
+
+  await handler();
+
+  const putItems = mockSend.mock.calls
+    .map(([cmd]) => cmd as Record<string, unknown>)
+    .filter((cmd) => cmd.__type === 'BatchWrite')
+    .flatMap((cmd) => {
+      const requestItems = cmd.RequestItems as Record<string, { PutRequest: { Item: Record<string, unknown> } }[]>;
+      return requestItems['JQuantsMarginBalance'].map((r) => r.PutRequest.Item);
+    });
+
+  expect(putItems).toContainEqual({
+    ticker: '7203',
+    date: '2026-08-26',
+    financingBalance: 8410,
+    lendingBalance: 920,
+    source: 'daily-alert',
+  });
+});
+
 test('retries BatchWriteCommand when UnprocessedItems is returned', async () => {
   let batchWriteCallCount = 0;
   mockSend.mockImplementation((cmd: Record<string, unknown>) => {
@@ -125,4 +197,19 @@ test('does nothing when yutai master is empty', async () => {
 
   expect(mockFetchAllWeekly).not.toHaveBeenCalled();
   expect(mockFetchAllDailyAlert).not.toHaveBeenCalled();
+});
+
+test('throws when every weekly date and the daily-alert fetch fail', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] });
+  mockFetchAllDailyAlert.mockRejectedValue(new Error('boom-daily'));
+  mockFetchAllWeekly.mockRejectedValue(new Error('boom-weekly'));
+
+  await expect(handler()).rejects.toThrow('all 4 fetch/upsert calls failed');
+});
+
+test('throws when every call succeeds but 0 tickers match across all dates', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] });
+  // beforeEach's defaults already resolve both fetch mocks to [] -- nothing to override
+
+  await expect(handler()).rejects.toThrow('0 points matched');
 });
