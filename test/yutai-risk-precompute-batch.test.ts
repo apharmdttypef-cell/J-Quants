@@ -87,6 +87,34 @@ test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric
   expect(typeof values[':days']).toBe('number');
 });
 
+test('applies the rights-day 4x rate multiplier (taisyaku.jp「倍率適用」) to maxRate and maxGyakuhibu', async () => {
+  jest.useFakeTimers({
+    doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick'],
+  }).setSystemTime(new Date('2026-08-01T00:00:00Z'));
+
+  try {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10' }] }) // margin balance presence: yes
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-07-31', close: 500 }] }); // latest close
+
+    await handler();
+
+    const calls = updateCalls();
+    expect(calls).toHaveLength(1);
+    const values = (calls[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
+    // rightsDate=2026-08-27(2026年8月の権利付き最終日), settlement=2026-08-31, followingTradingDay=2026-09-01, days=1。
+    // close=500・unitShares=100 → investmentUnit=50,000ちょうど → 通常時cap=100円 → 通常時maxRate=1.0円。
+    // 権利付き最終日(=権利落日の前営業日)は taisyaku.jp の「倍率適用」規定により最高料率が常に4倍になるため、
+    // maxRate=4.0円、maxGyakuhibu=4.0円×100株×1日=400円。
+    expect(values[':days']).toBe(1);
+    expect(values[':maxRate']).toBe(4.0);
+    expect(values[':maxGyakuhibu']).toBe(400);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
 test('continues past a single row failure and processes the remaining rows', async () => {
   const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   try {

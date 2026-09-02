@@ -1,6 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { calcMaxGyakuhibu, calcMaxRate } from '../shared/gyakuhibu-calc';
+import { calcMaxGyakuhibu, calcMaxRate, RIGHTS_DAY_RATE_MULTIPLIER } from '../shared/gyakuhibu-calc';
 import {
   getLocalTradingCalendar,
   settlementDate,
@@ -116,8 +116,10 @@ async function calcRisk(
   const followingTradingDay = businessDaysAfter(calendar, settlement, 1);
   const days = calendarDaysBetween(settlement, followingTradingDay);
 
-  const maxRate = calcMaxRate(closePrice, row.unitShares);
-  const maxGyakuhibu = calcMaxGyakuhibu(closePrice, row.unitShares, days);
+  // rightsDateは常に「権利落日の前営業日」(taisyaku.jpの倍率適用規定)に一致するため、
+  // 最高料率は無条件に4倍で見積もる(docs/superpowers/notes/2026-09-03-taisyaku-rights-day-rate-multiplier.md参照)。
+  const maxRate = calcMaxRate(closePrice, row.unitShares) * RIGHTS_DAY_RATE_MULTIPLIER;
+  const maxGyakuhibu = calcMaxGyakuhibu(closePrice, row.unitShares, days) * RIGHTS_DAY_RATE_MULTIPLIER;
   const riskStatus: RiskStatus = row.value > maxGyakuhibu ? 'safe' : 'danger';
   return { riskStatus, maxGyakuhibu, maxRate, days };
 }

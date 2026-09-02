@@ -19,3 +19,12 @@ export function calcMaxRate(closePrice: number, tradingUnit: number): number {
 export function calcMaxGyakuhibu(closePrice: number, tradingUnit: number, days: number): number {
   return calcMaxRate(closePrice, tradingUnit) * tradingUnit * days;
 }
+
+// taisyaku.jp「品貸入札、逆日歩、最高料率、応札ランク」の「倍率適用」規定より、配当・新株引受権等の
+// 権利付銘柄は最高料率が引き上げられる: 権利落日6営業日前~2営業日前は2倍、権利落日の前営業日
+// (=権利付き最終日そのもの)は4倍。このアプリの逆日歩見積りは常に権利付き最終日を評価対象と
+// するため、権利付き最終日は定義上つねに「権利落日の前営業日」に一致し、倍率は条件分岐なく
+// 常に4倍となる(2026-09-03にU-NEXT HD(9418)の実データで検証済み: 8/20-8/26の2倍・8/27の4倍が
+// 早見表基準値と完全一致した。詳細はdocs/superpowers/notes/2026-09-03-taisyaku-rights-day-rate-multiplier.md参照)。
+// なお倍率は最高料率(上限)にのみ適用され、実際の品貸料(入札結果)を保証するものではない。
+export const RIGHTS_DAY_RATE_MULTIPLIER = 4;
