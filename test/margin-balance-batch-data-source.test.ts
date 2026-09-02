@@ -67,7 +67,8 @@ describe('fetchWeeklyBalances', () => {
         }),
       })
       .mockResolvedValueOnce({
-        json: async () => ({ data: [{ Date: '2026-08-28', Code: '72030', LongStdVol: 200, ShrtStdVol: 60 }] }),
+        // 非ハイフン形式(YYYYMMDD)で返ってきてもnormalizeDateでYYYY-MM-DDに揃うことを確認する
+        json: async () => ({ data: [{ Date: '20260828', Code: '72030', LongStdVol: 200, ShrtStdVol: 60 }] }),
       });
 
     const result = await fetchWeeklyBalances('7203', '2026-08-01', '2026-08-31');
@@ -75,6 +76,7 @@ describe('fetchWeeklyBalances', () => {
     expect(mockFetchWithRetry).toHaveBeenCalledTimes(2);
     expect(mockFetchWithRetry.mock.calls[1][0]).toContain('pagination_key=page2');
     expect(result).toHaveLength(2);
+    expect(result[1]).toEqual({ date: '2026-08-28', financingBalance: 200, lendingBalance: 60, source: 'weekly' });
   });
 
   test('returns an empty array when the ticker has no margin balance history', async () => {
