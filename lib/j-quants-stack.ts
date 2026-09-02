@@ -206,11 +206,13 @@ export class JQuantsStack extends cdk.Stack {
       environment: {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
+        SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
 
     this.yutaiMasterTable.grantReadData(marginBalanceBatchFn);
     this.marginBalanceTable.grantReadWriteData(marginBalanceBatchFn);
+    this.apiKeySecret.grantRead(marginBalanceBatchFn);
 
     // 信用残は本来週次更新のデータ(日々公表銘柄の日次例外は別途対応、
     // docs/superpowers/specs/2026-08-18-yutai-batch-freshness-split-design.mdのスコープ外)。

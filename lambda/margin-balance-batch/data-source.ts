@@ -1,8 +1,12 @@
-// フェーズ1: J-Quants Standardプラン(mkt-margin-int / mkt-margin-alert)へのアップグレードを
-// 遅らせるため、信用残データはダミー生成する。ticker+dateから決定的な擬似乱数を作り、
-// 同じ入力には常に同じ値を返す(実行のたびに値が変わるとトレンドグラフが毎日ジャンプするため)。
-// フェーズ2ではこのファイルの中身だけをmkt-margin-int/mkt-margin-alert呼び出しに差し替える
-// (呼び出し元はこの関数がダミーか本番かを意識しない)。
+import { getApiKey, fetchWithRetry } from '../shared/jquants-batch-client';
+
+const SECRET_ARN = process.env.SECRET_ARN!;
+const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
+// mkt-margin-int/mkt-margin-alertはStandardプラン専用のエンドポイントのため、
+// Freeプラン向けの13秒デフォルトは不要。Standardプランの120req/分を想定した値。
+const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '500');
+const MAX_RETRIES = 5;
+
 export interface MarginBalancePoint {
   date: string;
   financingBalance: number;
@@ -10,51 +14,110 @@ export interface MarginBalancePoint {
   source: 'weekly' | 'daily-alert';
 }
 
-function seedFrom(...parts: string[]): number {
-  let hash = 0;
-  const input = parts.join('|');
-  for (let i = 0; i < input.length; i++) {
-    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
-  }
-  return hash;
+interface MarginIntRecord {
+  Date: string;
+  Code: string;
+  LongStdVol: number;
+  ShrtStdVol: number;
 }
 
-function pseudoRandom(seed: number): number {
-  // 単純な線形合同法。暗号強度は不要(表示用ダミーデータのため)。
-  const x = Math.sin(seed) * 10000;
-  return x - Math.floor(x);
+interface MarginIntResponse {
+  data: MarginIntRecord[];
+  pagination_key?: string;
 }
 
-function listMondays(from: string, to: string): string[] {
-  const dates: string[] = [];
-  const cursor = new Date(`${from}T00:00:00Z`);
-  const end = new Date(`${to}T00:00:00Z`);
-  // 直近の月曜まで戻す
-  const day = cursor.getUTCDay();
-  cursor.setUTCDate(cursor.getUTCDate() - ((day + 6) % 7));
-
-  while (cursor <= end) {
-    dates.push(cursor.toISOString().slice(0, 10));
-    cursor.setUTCDate(cursor.getUTCDate() + 7);
-  }
-  return dates;
+interface MarginAlertRecord {
+  AppDate: string;
+  Code: string;
+  LongStdOut: number;
+  ShrtStdOut: number;
 }
 
+interface MarginAlertResponse {
+  data: MarginAlertRecord[];
+  pagination_key?: string;
+}
+
+async function fetchMarginIntPage(params: Record<string, string>, apiKey: string): Promise<MarginIntRecord[]> {
+  const records: MarginIntRecord[] = [];
+  let paginationKey: string | undefined;
+
+  do {
+    const search = new URLSearchParams(params);
+    if (paginationKey) search.set('pagination_key', paginationKey);
+
+    const response = await fetchWithRetry(
+      `${API_BASE_URL}/markets/margin-interest?${search}`,
+      apiKey,
+      REQUEST_INTERVAL_MS,
+      MAX_RETRIES,
+    );
+    const body = (await response.json()) as MarginIntResponse;
+    records.push(...body.data);
+    paginationKey = body.pagination_key;
+  } while (paginationKey);
+
+  return records;
+}
+
+async function fetchMarginAlertPage(params: Record<string, string>, apiKey: string): Promise<MarginAlertRecord[]> {
+  const records: MarginAlertRecord[] = [];
+  let paginationKey: string | undefined;
+
+  do {
+    const search = new URLSearchParams(params);
+    if (paginationKey) search.set('pagination_key', paginationKey);
+
+    const response = await fetchWithRetry(
+      `${API_BASE_URL}/markets/margin-alert?${search}`,
+      apiKey,
+      REQUEST_INTERVAL_MS,
+      MAX_RETRIES,
+    );
+    const body = (await response.json()) as MarginAlertResponse;
+    records.push(...body.data);
+    paginationKey = body.pagination_key;
+  } while (paginationKey);
+
+  return records;
+}
+
+// 信用取引週末残高(/markets/margin-interest)から制度信用分のみを取得する。逆日歩は
+// 制度信用固有の仕組みのため、一般信用込みの合計(ShrtVol/LongVol)ではなく制度信用のみ
+// (ShrtStdVol/LongStdVol)を使う。2026-09-28に日次配信へ仕様変更予定だが、株数系
+// フィールド名は新旧で同じなので、この変更を跨いでもコード変更は不要な想定。
 export async function fetchWeeklyBalances(ticker: string, from: string, to: string): Promise<MarginBalancePoint[]> {
-  return listMondays(from, to).map((date) => {
-    const seed = seedFrom(ticker, date);
-    const base = 10_000 + Math.floor(pseudoRandom(seed) * 90_000);
-    const lendingBalance = base + Math.floor(pseudoRandom(seed + 1) * 20_000);
-    const financingBalance = base;
-    return { date, financingBalance, lendingBalance, source: 'weekly' as const };
-  });
+  const apiKey = await getApiKey(SECRET_ARN);
+  const records = await fetchMarginIntPage({ code: ticker, from, to }, apiKey);
+
+  return records.map((record) => ({
+    date: record.Date,
+    financingBalance: record.LongStdVol,
+    lendingBalance: record.ShrtStdVol,
+    source: 'weekly' as const,
+  }));
 }
 
+// 日々公表信用取引残高(/markets/margin-alert)。「日々公表銘柄」に指定された銘柄のみが
+// 対象で、mkt-margin-intとは別のデータソース。対象外の銘柄・日付は空配列が返る
+// (エラーにはならない)。dateパラメータは公表日ベースだが、レスポンスのAppDate(申込日、
+// 残高が示す基準日)をMarginBalancePoint.dateとして使い、fetchWeeklyBalancesのDateと
+// 意味を揃える。
 export async function fetchDailyAlertBalances(tickers: string[], date: string): Promise<MarginBalancePoint[]> {
-  return tickers.map((ticker) => {
-    const seed = seedFrom(ticker, date, 'daily-alert');
-    const base = 10_000 + Math.floor(pseudoRandom(seed) * 90_000);
-    const lendingBalance = base + Math.floor(pseudoRandom(seed + 1) * 30_000);
-    return { date, financingBalance: base, lendingBalance, source: 'daily-alert' as const };
-  });
+  const apiKey = await getApiKey(SECRET_ARN);
+  const points: MarginBalancePoint[] = [];
+
+  for (const ticker of tickers) {
+    const records = await fetchMarginAlertPage({ code: ticker, date }, apiKey);
+    for (const record of records) {
+      points.push({
+        date: record.AppDate,
+        financingBalance: record.LongStdOut,
+        lendingBalance: record.ShrtStdOut,
+        source: 'daily-alert' as const,
+      });
+    }
+  }
+
+  return points;
 }
