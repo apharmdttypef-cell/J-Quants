@@ -1,4 +1,4 @@
-import { getApiKey, fetchWithRetry } from '../shared/jquants-batch-client';
+import { getApiKey, fetchWithRetry, normalizeDate } from '../shared/jquants-batch-client';
 
 const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
@@ -53,7 +53,7 @@ async function fetchMarginIntPage(params: Record<string, string>, apiKey: string
       MAX_RETRIES,
     );
     const body = (await response.json()) as MarginIntResponse;
-    records.push(...body.data);
+    records.push(...(body.data ?? []));
     paginationKey = body.pagination_key;
   } while (paginationKey);
 
@@ -75,7 +75,7 @@ async function fetchMarginAlertPage(params: Record<string, string>, apiKey: stri
       MAX_RETRIES,
     );
     const body = (await response.json()) as MarginAlertResponse;
-    records.push(...body.data);
+    records.push(...(body.data ?? []));
     paginationKey = body.pagination_key;
   } while (paginationKey);
 
@@ -91,7 +91,7 @@ export async function fetchWeeklyBalances(ticker: string, from: string, to: stri
   const records = await fetchMarginIntPage({ code: ticker, from, to }, apiKey);
 
   return records.map((record) => ({
-    date: record.Date,
+    date: normalizeDate(record.Date),
     financingBalance: record.LongStdVol,
     lendingBalance: record.ShrtStdVol,
     source: 'weekly' as const,
@@ -111,7 +111,7 @@ export async function fetchDailyAlertBalances(tickers: string[], date: string): 
     const records = await fetchMarginAlertPage({ code: ticker, date }, apiKey);
     for (const record of records) {
       points.push({
-        date: record.AppDate,
+        date: normalizeDate(record.AppDate),
         financingBalance: record.LongStdOut,
         lendingBalance: record.ShrtStdOut,
         source: 'daily-alert' as const,

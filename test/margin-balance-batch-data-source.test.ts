@@ -4,6 +4,7 @@ const mockFetchWithRetry = jest.fn();
 jest.mock('../lambda/shared/jquants-batch-client', () => ({
   getApiKey: (...args: unknown[]) => mockGetApiKey(...args),
   fetchWithRetry: (...args: unknown[]) => mockFetchWithRetry(...args),
+  normalizeDate: (raw: string) => (raw.includes('-') ? raw : `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`),
 }));
 
 process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
@@ -40,6 +41,12 @@ describe('fetchWeeklyBalances', () => {
     const result = await fetchWeeklyBalances('7203', '2026-08-01', '2026-08-31');
 
     expect(mockFetchWithRetry).toHaveBeenCalledTimes(1);
+    expect(mockFetchWithRetry).toHaveBeenCalledWith(
+      expect.stringContaining('/markets/margin-interest'),
+      'test-api-key',
+      500,
+      5,
+    );
     const url = mockFetchWithRetry.mock.calls[0][0] as string;
     expect(url).toContain('/markets/margin-interest');
     expect(url).toContain('code=7203');
@@ -102,6 +109,12 @@ describe('fetchDailyAlertBalances', () => {
     const result = await fetchDailyAlertBalances(['7203'], '2026-08-27');
 
     expect(mockFetchWithRetry).toHaveBeenCalledTimes(1);
+    expect(mockFetchWithRetry).toHaveBeenCalledWith(
+      expect.stringContaining('/markets/margin-alert'),
+      'test-api-key',
+      500,
+      5,
+    );
     const url = mockFetchWithRetry.mock.calls[0][0] as string;
     expect(url).toContain('/markets/margin-alert');
     expect(url).toContain('code=7203');

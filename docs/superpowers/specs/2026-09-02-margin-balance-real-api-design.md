@@ -68,6 +68,11 @@ this.apiKeySecret.grantRead(marginBalanceBatchFn);
 - `pagination_key`が返る場合に2回目のリクエストへ引き継がれる
 - 該当データが無い場合(`data: []`)、空配列を返す(エラーにしない)
 
-## 移行後の確認事項(このタスクのスコープ外、記録のみ)
+## 移行後の確認事項
 
-Standardプラン移行後、実際にこのバッチを手動実行し、レート制限によるタイムアウトが発生しないか確認すること。発生する場合は`index.ts`側の銘柄ループ方式の見直し(price-batchと同様の日付単位一括取得への切り替え等)を別途検討する。
+Standardプラン移行・本番デプロイ前後に、以下を順に実施すること(最終レビューで発見)。
+
+1. **`JQuantsMarginBalance`テーブルを空にする(デプロイ前、必須)**: フェーズ1のダミーデータが既に全銘柄分書き込まれている。`hasExistingBalance`判定により、既存データがあるとみなされて実データへの2年分バックフィルが走らず、直近14日分の差分更新にしかならない。さらにダミーデータの日付(`listMondays`が生成していた月曜日付)と実データの週次残高の日付(`Date`項目、通常は金曜日付)は異なるため、同じ週でも別レコードとして共存し、実データが古いダミー値を上書きしない。テーブルを空にすれば`hasExistingBalance`がfalseを返し、通常のbackfillフローで実データに置き換わる。
+2. **デプロイ後、手動実行して結果を確認する**: ログの`backfilled`/`diffUpdated`/`deferred`/`failed`件数を確認する。
+3. **レート制限によるタイムアウトを確認する(既知のリスクあり)**: `fetchWithRetry`は`REQUEST_INTERVAL_MS`(デフォルト500ms)分スリープするため、1銘柄あたりweekly+daily-alertの2回呼び出しで約1.3〜1.6秒。優待実施銘柄が1,000件規模の場合、単純計算で約23〜25分かかり14分のLambdaタイムアウトを超える可能性が高い(financial-summary-batchで同種の計算が既に文書化済み: `docs/superpowers/specs/2026-08-21-yutai-batch-scale-out-design.md`)。特に`fetchDailyAlertBalances`は「日々公表銘柄」(全銘柄のごく一部)以外にも全銘柄分呼び出しており、その大半が空配列を返すだけの無駄な呼び出しになっている。タイムアウトが発生する場合は、price-batchと同様に`date`のみ指定した一括取得方式(両エンドポイントとも`code`省略+`date`指定で全上場銘柄分を1回で取得可能、ドキュメントで確認済み)への切り替えを検討する。
+4. **フロントのダミーデータ注記を外す**: `frontend/src/pages/YutaiListPage.tsx`・`YutaiDetailPage.tsx`の「信用残・貸借判定はダミーデータです」バナーは実データ移行後は不要になる。

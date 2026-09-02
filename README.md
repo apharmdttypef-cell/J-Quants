@@ -24,7 +24,7 @@ EventBridge(毎週月曜 JST20:00)
 
 EventBridge(毎週月曜 JST18:30)
   → MarginBalanceBatchFunction(Lambda)
-      - JQuantsYutaiMasterの全銘柄の信用残を取得(現在はダミーデータ、下記参照)
+      - JQuantsYutaiMasterの全銘柄の信用残を取得(mkt-margin-int/mkt-margin-alert、下記参照)
       - 信用残は本来週次更新のため週次で十分
       → JQuantsMarginBalance に upsert
 
@@ -102,7 +102,9 @@ EventBridge(毎日 JST18:20)
 
 株主優待クロス取り(現物買い+信用売りで優待だけを取得する手法)における「逆日歩(品貸料)」のリスクを事前に可視化する機能。詳細設計は`docs/superpowers/specs/2026-08-13-yutai-cross-risk-design.md`。
 
-**フェーズ分け(ダミーAPI→本番API)**: 逆日歩見積りの計算には信用残(融資残・貸株残)データが必要だが、これを取得するJ-Quants `mkt-margin-int` / `mkt-margin-alert` はStandardプラン(有料)専用。画面・遷移の動作確認が終わるまで課金を遅らせるため、現状(フェーズ1)は`lambda/margin-balance-batch/data-source.ts`が信用残を**ticker+日付から決定的な擬似乱数で生成したダミーデータ**で返している(同じ入力には常に同じ値を返すため、日々のトレンドグラフが実行のたびにジャンプすることはない)。したがって**現在デプロイされている`/yutai`画面の信用残トレンド・貸借銘柄判定はすべてダミー値**であり、実際の逆日歩リスクの参考にはならない。フェーズ2でStandardプランへアップグレードした際は、このモジュールの中身だけをJ-Quants呼び出しに差し替える設計になっており、DynamoDBスキーマ・API・逆日歩計算ロジック・フロントは変更不要。なお取引カレンダー(権利日→受渡日の日数算出)と実績逆日歩(taisyaku.jp)はJ-QuantsのFreeプラン/無料サイトでそれぞれ取得できるため、フェーズ1から本番のデータを使っている。
+**フェーズ分け(ダミーAPI→本番API)**: 逆日歩見積りの計算には信用残(融資残・貸株残)データが必要だが、これを取得するJ-Quants `mkt-margin-int` / `mkt-margin-alert` はStandardプラン(有料)専用。画面・遷移の動作確認が終わるまで課金を遅らせるため、当初(フェーズ1)は`lambda/margin-balance-batch/data-source.ts`が信用残を**ticker+日付から決定的な擬似乱数で生成したダミーデータ**で返していた(同じ入力には常に同じ値を返すため、日々のトレンドグラフが実行のたびにジャンプすることはない)。Standardプランへの移行に伴い、フェーズ2として`data-source.ts`を`mkt-margin-int`/`mkt-margin-alert`への実呼び出しに差し替え済み(DynamoDBスキーマ・API・逆日歩計算ロジック・フロントは変更不要)。なお取引カレンダー(権利日→受渡日の日数算出)と実績逆日歩(taisyaku.jp)はJ-QuantsのFreeプラン/無料サイトでそれぞれ取得できるため、フェーズ1から本番のデータを使っている。
+
+**フェーズ2移行時の注意**: フェーズ1のダミーデータが既に`JQuantsMarginBalance`に書き込まれている場合、`hasExistingBalance`判定により実データへの2年分バックフィルが走らない上、ダミーの日付(月曜)と実データの日付(金曜)が別レコードとして共存し古いダミー値が残り続ける。デプロイ前に必ず`JQuantsMarginBalance`テーブルを空にすること。詳細は`docs/superpowers/specs/2026-09-02-margin-balance-real-api-design.md`の「移行後の確認事項」を参照。
 
 **リスク判定の事前計算**: `GET /yutai`一覧・`GET /yutai/{ticker}`が返す`riskStatus`/`maxGyakuhibu`/`maxRate`/`days`は、`reference-api`がリクエストのたびに計算するのではなく、`YutaiRiskPrecomputeBatchFunction`(毎日JST18:20、`PriceBatchFunction`の20分後)が`JQuantsYutaiMaster`を全件スキャンして銘柄ごとに計算し、同テーブルに書き戻す方式になっている。`reference-api`側は事前計算済みの値を読むだけ。優待実施銘柄が1,000件規模に増えると、銘柄ごとに信用残・前日終値をDynamoDBへ逐次クエリする従来方式では`GET /yutai`一覧が`ReferenceApiFunction`の10秒タイムアウトを超えてしまうため、その計算をバッチ側へ移してAPIリクエストをテーブル読み取りだけで完結させる設計にしている。
 
@@ -141,7 +143,7 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 |---|---|---|
 | `PriceBatchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の四本値を取得し`JQuantsStockPrices`へupsert |
 | `FinancialSummaryBatchFunction` | EventBridge(`cron(0 11 ? * MON *)` = 毎週月曜 JST 20:00) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の決算サマリを取得し`JQuantsFinancialSummary`へupsert。四半期ごとの更新なので週次取得で十分 |
-| `MarginBalanceBatchFunction` | EventBridge(`cron(30 9 ? * MON *)` = 毎週月曜 JST 18:30) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を取得し`JQuantsMarginBalance`へupsert。本来週次更新のため週次取得で十分。現在は`data-source.ts`がダミーデータを生成(上記「優待クロス逆日歩リスク可視化」参照、フェーズ2で`mkt-margin-int`/`mkt-margin-alert`に差し替え予定) |
+| `MarginBalanceBatchFunction` | EventBridge(`cron(30 9 ? * MON *)` = 毎週月曜 JST 18:30) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を取得し`JQuantsMarginBalance`へupsert。本来週次更新のため週次取得で十分。`data-source.ts`が`mkt-margin-int`/`mkt-margin-alert`を呼び出す(上記「優待クロス逆日歩リスク可視化」参照) |
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
 | `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert |
