@@ -8,10 +8,10 @@ const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '7');
-// Freeプランは配信12週間遅延(=84日)。この境界を過ぎた日付を要求すると
-// 「Your subscription covers the following dates: ...」400エラーになるため、
-// "今日" を基準にせず配信済みの範囲まで遡る。日付境界のズレを避け+1日のバッファを持たせる。
-const DELIVERY_DELAY_DAYS = Number(process.env.DELIVERY_DELAY_DAYS ?? String(12 * 7 + 1));
+// Standardプラン移行(2026-09-02)によりFreeプランの「配信12週間遅延」制約(直近12週間分の
+// データが取得できず400エラーになる)は解消済み。株価四本値は当日16:30頃に配信されるため
+// (https://jpx-jquants.com/ja/spec/data-update)、当日分をそのまま取得できる。
+const DELIVERY_DELAY_DAYS = Number(process.env.DELIVERY_DELAY_DAYS ?? '0');
 // Freeプランは5req/分。余裕を持たせて13秒間隔にする(60000ms / 5req = 12000ms が下限)。
 // この値はprice-batchとfinancial-summary-batchで同じにしておくこと(1つのAPIキーのレート制限を両者で共有しているため)。
 const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '13000');

@@ -159,8 +159,9 @@ export class JQuantsStack extends cdk.Stack {
     this.yutaiMasterTable.grantReadData(priceBatchFn);
     this.apiKeySecret.grantRead(priceBatchFn);
 
-    // J-Quants Freeプランは配信12週間遅延のため取得時刻はシビアでなくてよい。
-    // JST 18:00 = UTC 09:00 に毎日実行。
+    // 株価四本値は当日16:30頃に配信される(https://jpx-jquants.com/ja/spec/data-update)。
+    // Standardプラン移行によりFreeプランの12週間遅延制約は解消済みのため、それ以降の時刻に
+    // 実行する必要がある。JST 18:00 = UTC 09:00 に毎日実行(16:30より十分後)。
     new events.Rule(this, 'PriceBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '0', hour: '9' }),
       targets: [new targets.LambdaFunction(priceBatchFn)],
