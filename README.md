@@ -88,7 +88,7 @@ EventBridge(毎日 JST18:20)
 
 - **過去2年分のデータを、12週間遅延で配信**する(直近12週間分だけが取得できない、が正しい)。
 - `/equities/bars/daily`に配信対象外の日付(=直近12週間以内)を含む`from`/`to`を指定すると、部分的に返るのではなく**HTTP 400**(`Your subscription covers the following dates: ...`)で全体が失敗する。
-- そのため`PriceBatchFunction`は取得対象の日付範囲を"今日"ではなく"今日-12週間-1日(バッファ)"を基準に計算している(`lambda/price-batch/index.ts`の`DELIVERY_DELAY_DAYS`)。
+- そのため`PriceBatchFunction`は当初、取得対象の日付範囲を"今日"ではなく"今日-12週間-1日(バッファ)"を基準に計算していた(`lambda/price-batch/index.ts`の`DELIVERY_DELAY_DAYS`)。Standardプラン移行後にこのオフセットが不要になった経緯は後述の「Standardプランへの移行に向けた準備メモ」を参照。
 - 同じ理由で`ReferenceApiFunction`の価格取得も"今日からN日前"という日付フィルタではなく、保存済みの最新N件をそのまま返す方式にしている(バッチが保存する日付は常に配信遅延分だけ過去になるため)。
 - **`/markets/calendar`(取引カレンダー)にも同じ12週間遅延が適用される**ことが本番運用中に判明した(直近の営業日を要求すると`/equities/bars/daily`と同様にHTTP 400になる)。優待クロス機能は「今日〜近い未来」の営業日を常に必要とするため、この制約を回避できず、`lambda/shared/trading-calendar.ts`の`getLocalTradingCalendar`/`isJpHoliday`で日本の祝日(振替休日・国民の休日を含む)をJ-Quantsに頼らずローカル計算する方式に切り替えた(`fetchTradingCalendar`はJ-Quants呼び出し版として残置。Standardプランへ移行しこの制約が無くなっているか再確認する用)。
 
@@ -96,7 +96,7 @@ EventBridge(毎日 JST18:20)
 
 `PriceBatchFunction`は当初、Freeプランの5req/分制限を前提にした銘柄ごとの直列取得(呼び出しごとに13秒待機)だったため、優待実施銘柄が1,000件規模まで増えると14分のLambdaタイムアウト内に収まらなくなる問題があったが、`date`のみ指定すると東証全銘柄分を1リクエストで取得できることが判明し、この方式に切り替えたことで解消済み(2026-08-24、`docs/superpowers/specs/2026-08-24-price-batch-bulk-fetch-design.md`参照)。レート制限の観点では`PriceBatchFunction`単体としてStandardプランへの移行は不要だったが、別途`DELIVERY_DELAY_DAYS`(Freeプランの配信12週間遅延を回避するための固定オフセット、デフォルト85日)がハードコードされたままだと、Standardプラン移行後もダミーの遅延で株価が85日古いまま取得され続ける問題があった(2026-09-03発見、実際に`/ticker/{code}`の前日終値が3か月前の値のままになっていた)。株価四本値は当日16:30頃に配信されるため、Standardプラン移行後は`DELIVERY_DELAY_DAYS=0`に変更し、当日分をそのまま取得するようにした。
 
-`FinancialSummaryBatchFunction`は今回のPriceBatchFunctionの変更の対象外で、引き続き銘柄ごとの直列取得のままである(同様の日付一括取得手段が使えるかは未調査)。優待実施銘柄が1,000件規模まで増えると、Freeプランの5req/分制限を前提にした直列取得(呼び出しごとに13秒待機)では14分のLambdaタイムアウト内に収まらなくなる。`REQUEST_INTERVAL_MS`環境変数で待機間隔を既に外出ししてあるため、Standardプランへ移行する際はCDK(`lib/j-quants-stack.ts`)側でこの環境変数の値を短く設定するだけで対応でき、Lambdaのコード変更は不要な想定。ただし`FinancialSummaryBatchFunction`が使う決算系エンドポイントにはプラン共通で60req/分という別枠の上限があるため、Standardプラン移行後も1,000銘柄規模では14分のタイムアウト内に全銘柄を巡回しきれない可能性がある。決算サマリは四半期でしか更新されないデータのため、一部銘柄の取得が数週間遅れても実害は小さいと判断し、この制約は許容している(カーソルベースの分割取得などの対応は現時点ではスコープ外)。
+`FinancialSummaryBatchFunction`は今回のPriceBatchFunctionの変更の対象外で、引き続き銘柄ごとの直列取得のままである。当初は「Standardプラン移行時に`REQUEST_INTERVAL_MS`を短くするだけで対応でき、コード変更は不要」と想定していたが、これは誤りだった。銘柄数が1,700件超に増えた2026-09-04時点で**実際に本番でタイムアウトしていることを確認した**(直近実行: 840秒でタイムアウト、189銘柄のみ処理、残りは未処理のまま)。`getTargetTickers()`の返す順序が実行のたびに大きく変わらないため、同じ先頭銘柄群だけが毎回更新され、後方の銘柄群が実質的に取り残されているおそれがある(margin-balance-batchで踏んだのと同じstarvationパターン)。`/fins/summary`にも`code`省略+`date`指定で全上場銘柄の指定日開示分を一括取得できるモードがあることを確認済みで、修正方針の詳細は[GitHub Issue #2](https://github.com/apharmdttypef-cell/J-Quants/issues/2)に記録している(決算データは価格・信用残高と違い企業ごと不定期開示のため、新規銘柄の初回バックフィルと既存銘柄の継続更新を分けて設計する必要があり、単純な置き換えでは済まない)。
 
 ### 優待クロス逆日歩リスク可視化(`/yutai`系)
 

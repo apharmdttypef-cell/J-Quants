@@ -12,9 +12,8 @@ const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
-// J-Quants Freeプランは配信12週間遅延のため、"今日からN日前" で絞ると実際に
-// 保存されているデータ(遅延分だけ過去の日付)が範囲外になる。日付を基準にせず、
-// 保存済みの最新N件(12週間分の営業日 ≈ 60件)をそのまま返す方式にする。
+// 日付範囲(from/to)ではなく「保存済みの最新N件」で返す方式(12週間分の営業日 ≈ 60件)。
+// 日付境界で絞るより単純で、取得が数営業日遅れても直近チャートの見た目は変わらない。
 const PRICE_RANGE_TRADING_DAYS = 60;
 // 4桁(普通株式)または5桁(末尾0付き)の銘柄コードのみ受け付ける。
 const TICKER_CODE_PATTERN = /^\d{4,5}$/;
@@ -141,7 +140,7 @@ async function getPrices(ticker: string, range: string | undefined): Promise<API
     return jsonResponse(404, { message: `Unknown ticker: ${ticker}` });
   }
   if (range !== undefined && range !== '12w') {
-    return jsonResponse(400, { message: 'Only range=12w is supported (J-Quants Free plan constraint)' });
+    return jsonResponse(400, { message: 'Only range=12w is supported' });
   }
 
   const result = await ddbDocClient.send(

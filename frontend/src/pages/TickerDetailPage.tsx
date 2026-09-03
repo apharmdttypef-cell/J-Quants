@@ -66,7 +66,6 @@ export function TickerDetailPage() {
         {meta?.companyName ?? ticker} <span className="ticker-card__code">{ticker}</span>
       </h1>
       <p className="page-subtitle">直近12週間の値動きと直近決算のサマリです。</p>
-      <div className="disclaimer-banner">データはJ-Quants Freeプランの制約により12週間遅延しています</div>
 
       {chartData.length === 0 ? (
         <StatusNote kind="empty" message="まだ価格データがありません。次回バッチ取得をお待ちください。" />

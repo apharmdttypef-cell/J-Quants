@@ -45,7 +45,6 @@ export function TickerListPage() {
     <>
       <h1 className="page-title">銘柄一覧</h1>
       <p className="page-subtitle">ウォッチリストに登録した銘柄の直近の値動きです。</p>
-      <div className="disclaimer-banner">データはJ-Quants Freeプランの制約により12週間遅延しています</div>
 
       {tickersState.loading && <StatusNote kind="loading" message="読み込み中…" />}
       {tickersState.error && <StatusNote kind="error" message={`取得に失敗しました: ${tickersState.error.message}`} />}

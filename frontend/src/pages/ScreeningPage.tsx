@@ -69,9 +69,6 @@ export function ScreeningPage() {
     <>
       <h1 className="page-title">簡易スクリーニング</h1>
       <p className="page-subtitle">直近12週間の騰落率と出来高の変化でウォッチリストを絞り込みます。</p>
-      <div className="disclaimer-banner">
-        データはJ-Quants Freeプランの制約により12週間遅延・長期トレンドやバリュエーション系の指標は対象外です
-      </div>
 
       <div className="filter-bar">
         <label>

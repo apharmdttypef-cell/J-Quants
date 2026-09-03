@@ -86,8 +86,11 @@ export interface YutaiDetail {
 
 export interface MarginTrendPoint {
   date: string;
-  financingBalance: number;
-  lendingBalance: number;
+  // 全上場銘柄一括取得の対象に含まれる値欠損レコード(J-Quants側のデータ欠落)は
+  // nullとして書き込まれる(margin-balance-batch参照)。Rechartsの<Line>はnullを
+  // その点だけ欠けとして描画するため、フロント側の追加ハンドリングは不要。
+  financingBalance: number | null;
+  lendingBalance: number | null;
 }
 
 export interface MarginTrendResponse {

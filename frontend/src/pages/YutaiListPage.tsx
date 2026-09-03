@@ -83,8 +83,7 @@ const columns: ColumnDef<YutaiListItem>[] = [
 ];
 
 // キーワード入力欄からのAPI呼び出し用デバウンス(ms)。無しだと1文字打つたびに
-// GET /yutai が発火し、Freeプランのレート制限(5req/分)に簡単に触れてしまう
-// (バックエンド側でカレンダー呼び出しをキャッシュしても、リクエスト数自体は減らない)。
+// GET /yutai が発火し、無駄なリクエストとバックエンドの再スキャンが増えてしまう。
 const KEYWORD_DEBOUNCE_MS = 400;
 
 export function YutaiListPage() {
