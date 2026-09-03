@@ -119,10 +119,6 @@ export function YutaiListPage() {
       <h1 className="page-title">優待クロス スクリーニング</h1>
       <p className="page-subtitle">権利日・優待価値と最大逆日歩の見積りを比較して絞り込みます。</p>
 
-      <div className="disclaimer-banner">
-        ⚠️ 現在、信用残・貸借判定はダミーデータです(J-Quants Standardプラン移行後に実データに切り替わります)
-      </div>
-
       {listState.data && (
         <div className="cutoff-banner">
           <span>📅</span>
