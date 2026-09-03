@@ -56,6 +56,7 @@ test('matches a yutai-related disclosure, looks it up via a single fetchAllListi
       content: '割引券（3,000円相当～）',
       rightsMonths: [2, 8],
       value: 3000,
+      minInvestment: 150000,
     },
   ]);
   mockSend.mockResolvedValue({});
@@ -67,7 +68,7 @@ test('matches a yutai-related disclosure, looks it up via a single fetchAllListi
   expect(mockSend.mock.calls[0][0]).toMatchObject({
     TableName: 'JQuantsYutaiMaster',
     Key: { ticker: '2157' },
-    ExpressionAttributeValues: { ':value': 3000, ':unitShares': 100, ':rightsMonths': [2, 8] },
+    ExpressionAttributeValues: { ':value': 3000, ':unitShares': 100, ':minInvestment': 150000, ':rightsMonths': [2, 8] },
   });
 });
 

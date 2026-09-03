@@ -4,6 +4,11 @@ export interface KabuyutaiEntry {
   content: string;
   rightsMonths: number[];
   value: number | undefined;
+  // 一覧ページの「必要投資金額」。単元株数(100株)と優待の権利獲得に必要な実際の株数が
+  // 異なる銘柄(例: 第一興商は単元100株だが優待には200株必要、2026-09-04発見)があるため、
+  // 呼び出し元(yutai-risk-precompute-batch)が現在株価と突き合わせて実際の必要株数を
+  // 逆算するために使う。
+  minInvestment: number | undefined;
 }
 
 const KABUYUTAI_BASE_URL = 'https://www.kabuyutai.com';
@@ -98,12 +103,14 @@ export function parseListPage(html: string): KabuyutaiEntry[] {
     if (!nameMatch || !contentMatch || !monthsMatch) continue;
 
     const content = contentMatch[1].trim();
+    const minInvestment = extractMinInvestment(block);
     entries.push({
       companyName: nameMatch[1],
       ticker: nameMatch[2],
       content,
       rightsMonths: parseRightsMonths(monthsMatch[1]),
-      value: extractValue(content) ?? estimateValueFromYield(extractMinInvestment(block), extractYieldPercent(block)),
+      value: extractValue(content) ?? estimateValueFromYield(minInvestment, extractYieldPercent(block)),
+      minInvestment,
     });
   }
 

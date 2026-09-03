@@ -5,6 +5,9 @@ import { fetchAllListings } from '../shared/kabuyutai-client';
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 // 2018年10月の東証売買単位統一以降、内国株の単元株数は原則100株固定
 // (有価証券上場規程第427条の2により100株以外への変更は認められていない)。スクレイピング不要。
+// ただし優待の権利獲得に必要な実際の株数は単元株数と一致するとは限らない(例: 第一興商は
+// 単元100株だが優待には200株必要、2026-09-04発見)。minInvestment(必要投資金額)を別途保存し、
+// yutai-risk-precompute-batchが現在株価と突き合わせて実際の必要株数を逆算する。
 const UNIT_SHARES = 100;
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -36,13 +39,14 @@ export const handler = async (): Promise<void> => {
           TableName: YUTAI_MASTER_TABLE_NAME,
           Key: { ticker: entry.ticker },
           UpdateExpression:
-            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, rightsMonths = :rightsMonths',
+            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths',
           ExpressionAttributeNames: { '#content': 'content', '#value': 'value' },
           ExpressionAttributeValues: {
             ':companyName': entry.companyName,
             ':content': entry.content,
             ':value': entry.value,
             ':unitShares': UNIT_SHARES,
+            ':minInvestment': entry.minInvestment ?? null,
             ':rightsMonths': entry.rightsMonths,
           },
         }),

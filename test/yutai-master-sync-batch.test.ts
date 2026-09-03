@@ -20,9 +20,16 @@ beforeEach(() => {
   mockFetchAllListings.mockReset();
 });
 
-test('upserts each listed entry with unitShares fixed at 100', async () => {
+test('upserts each listed entry with unitShares fixed at 100 and minInvestment carried through', async () => {
   mockFetchAllListings.mockResolvedValueOnce([
-    { ticker: '2157', companyName: 'コシダカホールディングス', content: '割引券（2,000円相当～）', rightsMonths: [2, 8], value: 2000 },
+    {
+      ticker: '2157',
+      companyName: 'コシダカホールディングス',
+      content: '割引券（2,000円相当～）',
+      rightsMonths: [2, 8],
+      value: 2000,
+      minInvestment: 102200,
+    },
   ]);
   mockSend.mockResolvedValue({});
 
@@ -37,8 +44,22 @@ test('upserts each listed entry with unitShares fixed at 100', async () => {
       ':content': '割引券（2,000円相当～）',
       ':value': 2000,
       ':unitShares': 100,
+      ':minInvestment': 102200,
       ':rightsMonths': [2, 8],
     },
+  });
+});
+
+test('coalesces a missing minInvestment to null rather than leaving it undefined', async () => {
+  mockFetchAllListings.mockResolvedValueOnce([
+    { ticker: '5555', companyName: 'C社', content: '特典あり（1点～）', rightsMonths: [6], value: 100, minInvestment: undefined },
+  ]);
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  expect(mockSend.mock.calls[0][0]).toMatchObject({
+    ExpressionAttributeValues: { ':minInvestment': null },
   });
 });
 

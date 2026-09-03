@@ -167,13 +167,14 @@ export const handler = async (): Promise<void> => {
           TableName: YUTAI_MASTER_TABLE_NAME,
           Key: { ticker: entry.ticker },
           UpdateExpression:
-            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, rightsMonths = :rightsMonths',
+            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths',
           ExpressionAttributeNames: { '#content': 'content', '#value': 'value' },
           ExpressionAttributeValues: {
             ':companyName': entry.companyName,
             ':content': entry.content,
             ':value': entry.value,
             ':unitShares': UNIT_SHARES,
+            ':minInvestment': entry.minInvestment ?? null,
             ':rightsMonths': entry.rightsMonths,
           },
         }),

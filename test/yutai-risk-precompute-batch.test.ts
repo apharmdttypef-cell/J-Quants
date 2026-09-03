@@ -87,6 +87,33 @@ test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric
   expect(typeof values[':days']).toBe('number');
 });
 
+test('derives unitShares from minInvestment÷closePrice when it implies more than the stored default (第一興商-style: 単元100株だが優待には200株必要)', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '7458', value: 5000, unitShares: 100, minInvestment: 378600, rightsMonths: [8] }],
+    }) // yutai master scan (unitSharesは単元株数のまま100で保存されている)
+    .mockResolvedValueOnce({ Items: [{ ticker: '7458', date: '2026-08-10' }] }) // margin balance presence: yes
+    .mockResolvedValueOnce({ Items: [{ ticker: '7458', date: '2026-08-12', close: 1893 }] }); // latest close
+
+  await handler();
+
+  const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
+  // 378,600円 ÷ 1,893円 = 200.0 → 100株単位に丸めて200株。
+  expect(values[':unitShares']).toBe(200);
+});
+
+test('falls back to the stored unitShares when minInvestment is unavailable', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '9999', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // minInvestmentフィールド無し
+    .mockResolvedValueOnce({ Items: [{ ticker: '9999', date: '2026-08-10' }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '9999', date: '2026-08-12', close: 500 }] });
+
+  await handler();
+
+  const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
+  expect(values[':unitShares']).toBe(100);
+});
+
 test('applies the rights-day 4x rate multiplier (taisyaku.jp「倍率適用」) to maxRate and maxGyakuhibu', async () => {
   jest.useFakeTimers({
     doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick'],

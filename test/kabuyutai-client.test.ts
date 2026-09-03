@@ -53,6 +53,7 @@ describe('parseListPage', () => {
         content: '「カラオケまねきねこ」のほか、グループ店舗で使える優待利用割引券（2,000円相当～）',
         rightsMonths: [2, 8],
         value: 2000,
+        minInvestment: 102200,
       },
       {
         ticker: '2164',
@@ -60,6 +61,7 @@ describe('parseListPage', () => {
         content: '自社ECサイト「ちいきの逸品」で使える優待買物割引券（9,000円相当～）など',
         rightsMonths: [2, 8],
         value: 9000,
+        minInvestment: 8512,
       },
     ]);
   });
@@ -76,7 +78,14 @@ describe('parseListPage', () => {
 `;
     const entries = parseListPage(html);
     expect(entries).toEqual([
-      { ticker: '1111', companyName: 'テスト企業', content: '特典あり', rightsMonths: [3], value: undefined },
+      {
+        ticker: '1111',
+        companyName: 'テスト企業',
+        content: '特典あり',
+        rightsMonths: [3],
+        value: undefined,
+        minInvestment: undefined,
+      },
     ]);
   });
 
@@ -91,7 +100,14 @@ describe('parseListPage', () => {
 <!-- ▲ランキング_ブロック -->
 `;
     expect(parseListPage(html)).toEqual([
-      { ticker: '3333', companyName: '単月企業', content: 'QUOカード（500円相当～）', rightsMonths: [8], value: 500 },
+      {
+        ticker: '3333',
+        companyName: '単月企業',
+        content: 'QUOカード（500円相当～）',
+        rightsMonths: [8],
+        value: 500,
+        minInvestment: undefined,
+      },
     ]);
   });
 
@@ -115,6 +131,7 @@ describe('parseListPage', () => {
         content: '1日パスポート券（1枚～）',
         rightsMonths: [3, 9],
         value: 7871,
+        minInvestment: 303900,
       },
     ]);
   });
