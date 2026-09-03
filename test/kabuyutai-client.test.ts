@@ -95,6 +95,60 @@ describe('parseListPage', () => {
     ]);
   });
 
+  test('estimates value from 必要投資金額×優待利回り when content has no "円相当" pattern (ticket-count-based benefits like theme park passes)', () => {
+    const html = `
+<!-- ▼ランキング_ブロック -->
+<div class="table_tr">
+<p><a href="x" class="kigyoumei">オリエンタルランド</a>（4661）</p>
+<p>【優待内容】1日パスポート券（1枚～）</p>
+<p>【権利確定月】<span class="tousi_price">3月・9月</span></p>
+<p>【必要投資金額】<span class="tousi_price">303,900円</span></p>
+<p>【優待利回り】<span class="tousi_price">2.59％</span></p>
+</div>
+<!-- ▲ランキング_ブロック -->
+`;
+    // 303,900円 × 2.59% = 7,871.01 → 7,871円(個別ページ記載の「7,900円相当」に近い近似値)。
+    expect(parseListPage(html)).toEqual([
+      {
+        ticker: '4661',
+        companyName: 'オリエンタルランド',
+        content: '1日パスポート券（1枚～）',
+        rightsMonths: [3, 9],
+        value: 7871,
+      },
+    ]);
+  });
+
+  test('prefers the direct "円相当" value over the yield-based estimate when both are available', () => {
+    const html = `
+<!-- ▼ランキング_ブロック -->
+<div class="table_tr">
+<p><a href="x" class="kigyoumei">直接記載企業</a>（7777）</p>
+<p>【優待内容】QUOカード（1,000円相当～）</p>
+<p>【権利確定月】<span class="tousi_price">3月</span></p>
+<p>【必要投資金額】<span class="tousi_price">468,200円</span></p>
+<p>【優待利回り】<span class="tousi_price">0.42％</span></p>
+</div>
+<!-- ▲ランキング_ブロック -->
+`;
+    // 逆算すると468,200円×0.42%≈1,966円になるが、直接記載の1,000円を優先する。
+    expect(parseListPage(html)[0].value).toBe(1000);
+  });
+
+  test('leaves value undefined when neither a "円相当" pattern nor both fallback fields are present', () => {
+    const html = `
+<!-- ▼ランキング_ブロック -->
+<div class="table_tr">
+<p><a href="x" class="kigyoumei">利回り欠損企業</a>（8888）</p>
+<p>【優待内容】記念品（1点～）</p>
+<p>【権利確定月】<span class="tousi_price">6月</span></p>
+<p>【必要投資金額】<span class="tousi_price">50,000円</span></p>
+</div>
+<!-- ▲ランキング_ブロック -->
+`;
+    expect(parseListPage(html)[0].value).toBeUndefined();
+  });
+
   test('skips a block missing a required field entirely rather than throwing', () => {
     const html = `
 <!-- ▼ランキング_ブロック -->

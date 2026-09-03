@@ -58,6 +58,36 @@ function extractValue(content: string): number | undefined {
   return Number.isNaN(value) ? undefined : value;
 }
 
+// テーマパークの1日パスポート等「枚数」でしか優待内容が書かれていない銘柄(例:
+// オリエンタルランド「1日パスポート券(1枚〜)」)は、extractValue()の「円相当」パターンに
+// マッチせずvalueがundefinedになり、一覧ページから実質的に除外されていた(2026-09-04発見)。
+// 一覧ページ自体には「必要投資金額」「優待利回り」も掲載されているため、
+// 必要投資金額×優待利回り で価値を近似できる(オリエンタルランドで検証: 303,900円×2.59%=
+// 7,871円、個別ページ記載の実際の価値「7,900円相当」に近い)。ただし別銘柄(ダスキン)では
+// 直接記載の1,000円に対し逆算値が1,966円と乖離した — 優待利回りが上位株数区分の価値を
+// 元にしている場合があるためで、この方法はあくまで近似値にとどまる。したがって直接の
+// 「円相当」記載を常に優先し、それが取れない場合のみのフォールバックとする。
+function estimateValueFromYield(minInvestment: number | undefined, yieldPercent: number | undefined): number | undefined {
+  if (minInvestment === undefined || yieldPercent === undefined) return undefined;
+  return Math.round(minInvestment * (yieldPercent / 100));
+}
+
+// 一覧ページの「必要投資金額」(例: 303,900円)を抽出する。
+function extractMinInvestment(block: string): number | undefined {
+  const match = block.match(/【必要投資金額】<span class="tousi_price">([\d,]+)円<\/span>/);
+  if (!match) return undefined;
+  const value = Number(match[1].replace(/,/g, ''));
+  return Number.isNaN(value) ? undefined : value;
+}
+
+// 一覧ページの「優待利回り」(例: 2.59％)を抽出する。
+function extractYieldPercent(block: string): number | undefined {
+  const match = block.match(/【優待利回り】<span class="tousi_price">([\d.]+)％<\/span>/);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return Number.isNaN(value) ? undefined : value;
+}
+
 export function parseListPage(html: string): KabuyutaiEntry[] {
   const entries: KabuyutaiEntry[] = [];
 
@@ -73,7 +103,7 @@ export function parseListPage(html: string): KabuyutaiEntry[] {
       ticker: nameMatch[2],
       content,
       rightsMonths: parseRightsMonths(monthsMatch[1]),
-      value: extractValue(content),
+      value: extractValue(content) ?? estimateValueFromYield(extractMinInvestment(block), extractYieldPercent(block)),
     });
   }
 
