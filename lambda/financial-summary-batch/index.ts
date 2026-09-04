@@ -1,18 +1,29 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { getApiKey, getTargetTickers, fetchWithRetry, normalizeDate } from '../shared/jquants-batch-client';
+import { batchUpsert } from '../shared/dynamodb-batch';
 
 const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
 const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
-// Freeプランは5req/分。余裕を持たせて13秒間隔にする(60000ms / 5req = 12000ms が下限)。
-// この値はprice-batchとfinancial-summary-batchで同じにしておくこと(1つのAPIキーのレート制限を両者で共有しているため)。
-const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '13000');
+// Standardプランの決算系エンドポイント専用レート制限(60req/分)を想定した値
+// (一般エンドポイントの120req/分とは別枠)。旧デフォルト13000msはFreeプラン5req/分の
+// 想定のままだった。
+const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '1000');
 const MAX_RETRIES = 5;
+// 新規銘柄1件の初回バックフィルは全期間分の逐次書き込みを伴うため、YutaiMasterへの
+// 一括追加(kabuyutai優待抽出の改善による再取得等)直後は対象銘柄が一気に膨らみ、
+// 14分のタイムアウト内に完走できなくなる。新規バックフィルの件数だけ実行あたりに
+// 上限を設け、残りは次回実行に持ち越す(継続更新は一括取得で軽いので上限の対象外)。
+const MAX_BACKFILL_TICKERS_PER_RUN = Number(process.env.MAX_BACKFILL_TICKERS_PER_RUN ?? '150');
+// 決算発表は不定期に集中するため、週次実行(7日間隔)に対して2倍のバッファを持たせる。
+const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '14');
 
-const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+  marshallOptions: { removeUndefinedValues: true },
+});
 
 interface FinancialSummary {
   Code: string;
@@ -27,13 +38,30 @@ interface FinancialSummary {
 }
 
 interface FinancialSummaryResponse {
-  data: FinancialSummary[];
+  data?: FinancialSummary[];
   pagination_key?: string;
 }
 
-// code のみ指定(from/to なし)。/fins/summary は日付範囲パラメータを持たず、
-// Freeプランの配信遅延(直近12週間分は非公開)制約はAPI側で自動的にかかる。
-async function fetchFinancialSummaries(ticker: string, apiKey: string): Promise<FinancialSummary[]> {
+function formatIsoDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+async function hasExistingSummary(ticker: string): Promise<boolean> {
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: FINANCIAL_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      Limit: 1,
+    }),
+  );
+  return (result.Items ?? []).length > 0;
+}
+
+// 新規銘柄の初回バックフィル用。codeのみ指定(dateなし)で全期間分を取得する
+// (/fins/summaryにfrom/toのような期間範囲パラメータは無いため、全期間分をこの形で
+// 取得するのが唯一の方法)。
+async function fetchAllSummariesForTicker(ticker: string, apiKey: string): Promise<FinancialSummary[]> {
   const summaries: FinancialSummary[] = [];
   let paginationKey: string | undefined;
 
@@ -43,36 +71,80 @@ async function fetchFinancialSummaries(ticker: string, apiKey: string): Promise<
 
     const response = await fetchWithRetry(`${API_BASE_URL}/fins/summary?${params}`, apiKey, REQUEST_INTERVAL_MS, MAX_RETRIES);
     const body = (await response.json()) as FinancialSummaryResponse;
-    summaries.push(...body.data);
+    summaries.push(...(body.data ?? []));
     paginationKey = body.pagination_key;
   } while (paginationKey);
 
   return summaries;
 }
 
-async function upsertFinancialSummaries(ticker: string, summaries: FinancialSummary[]): Promise<void> {
-  const updatedAt = new Date().toISOString();
+// 既存銘柄の継続更新用。codeを付けずdateのみ指定すると、その日に開示された全上場銘柄分の
+// データが1回のリクエストで返る(price-batchのfetchAllBarsForDateと同じパターン)。
+async function fetchAllSummariesForDate(date: string, apiKey: string): Promise<FinancialSummary[]> {
+  const summaries: FinancialSummary[] = [];
+  let paginationKey: string | undefined;
+
+  do {
+    const params = new URLSearchParams({ date });
+    if (paginationKey) params.set('pagination_key', paginationKey);
+
+    const response = await fetchWithRetry(`${API_BASE_URL}/fins/summary?${params}`, apiKey, REQUEST_INTERVAL_MS, MAX_RETRIES);
+    const body = (await response.json()) as FinancialSummaryResponse;
+    summaries.push(...(body.data ?? []));
+    paginationKey = body.pagination_key;
+  } while (paginationKey);
+
+  return summaries;
+}
+
+// 一括取得したレスポンスのCodeは5桁(例: '72030')。アプリ内のtickerは通常4桁(例: '7203')だが、
+// 優先株式等を指定する5桁のticker(例: '72030')もありうる。そのため5桁の完全一致と4桁prefix
+// の一致の両方をチェックする(price-batchのresolveTargetBarsと同じ変換)。同じ4桁prefixに
+// 複数のcodeが存在する場合(普通株式・優先株式等)は5桁目が'0'(普通株式)のレコードを優先する。
+function resolveTargetSummaries(summaries: FinancialSummary[], targetTickers: Set<string>): Map<string, FinancialSummary> {
+  const resolved = new Map<string, FinancialSummary>();
 
   for (const summary of summaries) {
-    await ddbDocClient.send(
-      new PutCommand({
-        TableName: FINANCIAL_TABLE_NAME,
-        Item: {
-          ticker,
-          discDate: normalizeDate(summary.DiscDate),
-          docType: summary.DocType,
-          curPerType: summary.CurPerType,
-          // 桁数が大きく精度が必要なためAPIが返す文字列のまま保持する。
-          sales: summary.Sales,
-          operatingProfit: summary.OP,
-          ordinaryProfit: summary.OdP,
-          netProfit: summary.NP,
-          eps: summary.EPS,
-          updated_at: updatedAt,
-        },
-      }),
-    );
+    const isCommonStock = summary.Code[4] === '0';
+
+    if (targetTickers.has(summary.Code)) {
+      resolved.set(summary.Code, summary);
+    }
+
+    const prefix = summary.Code.slice(0, 4);
+    if (targetTickers.has(prefix)) {
+      const existing = resolved.get(prefix);
+      if (!existing || isCommonStock) {
+        resolved.set(prefix, summary);
+      }
+    }
   }
+
+  return resolved;
+}
+
+// 桁数が大きく精度が必要なためAPIが返す文字列のまま保持する。
+function toItem(ticker: string, summary: FinancialSummary, updatedAt: string): Record<string, unknown> {
+  return {
+    ticker,
+    discDate: normalizeDate(summary.DiscDate),
+    docType: summary.DocType,
+    curPerType: summary.CurPerType,
+    sales: summary.Sales,
+    operatingProfit: summary.OP,
+    ordinaryProfit: summary.OdP,
+    netProfit: summary.NP,
+    eps: summary.EPS,
+    updated_at: updatedAt,
+  };
+}
+
+function listRecentDates(lookbackDays: number, now: number): string[] {
+  const dates: string[] = [];
+  for (let offset = 0; offset <= lookbackDays; offset++) {
+    dates.push(formatIsoDate(new Date(now - offset * 24 * 60 * 60 * 1000)));
+  }
+  return dates;
 }
 
 export const handler = async (): Promise<void> => {
@@ -81,16 +153,54 @@ export const handler = async (): Promise<void> => {
     console.warn('No target tickers (watchlist and yutai master are both empty); nothing to fetch');
     return;
   }
+  const targetTickers = new Set(tickers);
 
   const apiKey = await getApiKey(SECRET_ARN);
 
+  const newTickers: string[] = [];
   for (const ticker of tickers) {
+    if (!(await hasExistingSummary(ticker))) newTickers.push(ticker);
+  }
+
+  let backfilled = 0;
+  let deferred = 0;
+  let backfillFailed = 0;
+  for (const ticker of newTickers) {
+    if (backfilled >= MAX_BACKFILL_TICKERS_PER_RUN) {
+      deferred++;
+      continue;
+    }
     try {
-      const summaries = await fetchFinancialSummaries(ticker, apiKey);
-      await upsertFinancialSummaries(ticker, summaries);
-      console.log(`${ticker}: upserted ${summaries.length} financial summaries`);
+      const summaries = await fetchAllSummariesForTicker(ticker, apiKey);
+      const updatedAt = new Date().toISOString();
+      await batchUpsert(ddbDocClient, FINANCIAL_TABLE_NAME, summaries.map((s) => toItem(ticker, s, updatedAt)));
+      backfilled++;
+      console.log(`${ticker}: backfilled ${summaries.length} financial summaries`);
     } catch (error) {
-      console.error(`${ticker}: failed to fetch/upsert financial summaries`, error);
+      backfillFailed++;
+      console.error(`${ticker}: failed to backfill financial summaries`, error);
     }
   }
+
+  const dates = listRecentDates(LOOKBACK_DAYS, Date.now());
+  let dateUpdated = 0;
+  let dateFailed = 0;
+  for (const date of dates) {
+    try {
+      const summaries = await fetchAllSummariesForDate(date, apiKey);
+      const matched = resolveTargetSummaries(summaries, targetTickers);
+      const updatedAt = new Date().toISOString();
+      const items = [...matched.entries()].map(([ticker, summary]) => toItem(ticker, summary, updatedAt));
+      await batchUpsert(ddbDocClient, FINANCIAL_TABLE_NAME, items);
+      dateUpdated += matched.size;
+      console.log(`${date}: matched ${matched.size} of ${targetTickers.size} target tickers (disclosed that day)`);
+    } catch (error) {
+      dateFailed++;
+      console.error(`${date}: failed to fetch/upsert financial summaries`, error);
+    }
+  }
+
+  console.log(
+    `financial-summary-batch: ${backfilled} new tickers backfilled, ${deferred} deferred (backfill cap reached), ${backfillFailed} backfill failures (of ${newTickers.length} new); ${dates.length} recent dates checked, ${dateUpdated} points updated, ${dateFailed} date fetch failures (of ${targetTickers.size} target tickers)`,
+  );
 };

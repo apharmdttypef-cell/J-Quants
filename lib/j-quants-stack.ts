@@ -171,8 +171,9 @@ export class JQuantsStack extends cdk.Stack {
       entry: path.join(__dirname, '..', 'lambda', 'financial-summary-batch', 'index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
-      // 銘柄あたり決算サマリー1リクエストを13秒間隔(5req/分制限)で直列に行うため長めに確保。
-      // ウォッチリストが増える場合は要見直し。
+      // 新規銘柄の初回バックフィル(銘柄ごと直列)+直近日付の一括チェックの合計時間を
+      // 見込んで長めに確保(lambda/financial-summary-batch/index.tsのMAX_BACKFILL_TICKERS_PER_RUN
+      // 参照)。
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
       bundling: { externalModules: ['@aws-sdk/*'] },
@@ -185,12 +186,12 @@ export class JQuantsStack extends cdk.Stack {
     });
 
     this.financialSummaryTable.grantWriteData(financialSummaryBatchFn);
+    this.financialSummaryTable.grantReadData(financialSummaryBatchFn);
     this.watchlistTable.grantReadData(financialSummaryBatchFn);
     this.yutaiMasterTable.grantReadData(financialSummaryBatchFn);
     this.apiKeySecret.grantRead(financialSummaryBatchFn);
 
-    // 決算サマリは四半期ごとしか更新されないため週次で十分(株価と違い日付範囲を
-    // 持たないエンドポイントなので、頻度を上げても新しい情報は増えない)。
+    // 決算サマリは四半期ごとしか更新されないため週次で十分。
     // JST 月曜20:00 = UTC 月曜11:00。
     new events.Rule(this, 'FinancialSummaryBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '0', hour: '11', weekDay: 'MON' }),
