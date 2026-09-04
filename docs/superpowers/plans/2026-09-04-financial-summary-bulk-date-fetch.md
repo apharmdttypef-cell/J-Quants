@@ -103,8 +103,13 @@ test('throws after more than 10 retries', async () => {
     });
 
     const promise = batchUpsert(ddbDocClient, 'MyTable', [{ id: 1 }]);
+    // rejects.toThrow()を先に呼んでpromiseにハンドラを同期的に付けてから
+    // runAllTimersAsync()でリトライを進める。逆順だとfake timersが
+    // マイクロタスクをフラッシュしてpromiseが先に(未ハンドラのまま)rejectし、
+    // Jestがテスト失敗として扱うPromiseRejectionHandledWarningが出る。
+    const assertion = expect(promise).rejects.toThrow('too many retries');
     await jest.runAllTimersAsync();
-    await expect(promise).rejects.toThrow('too many retries');
+    await assertion;
   } finally {
     jest.useRealTimers();
   }
