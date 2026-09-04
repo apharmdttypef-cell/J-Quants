@@ -208,3 +208,104 @@ test('continues past a single ticker backfill failure and a single date fetch fa
     errorSpy.mockRestore();
   }
 });
+
+test('checks discDate against a lookback cutoff, not just row existence, when classifying a ticker as new-vs-existing', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
+    if (cmd.__type === 'Query') return Promise.resolve({ Items: [] });
+    return Promise.resolve({});
+  });
+
+  await handler();
+
+  const queryCall = mockDdbSend.mock.calls.find(([cmd]) => (cmd as Record<string, unknown>).__type === 'Query');
+  expect(queryCall).toBeDefined();
+  const queryCmd = queryCall![0] as { KeyConditionExpression: string; ExpressionAttributeValues: Record<string, unknown> };
+  expect(queryCmd.KeyConditionExpression).toBe('ticker = :ticker AND discDate < :cutoff');
+  expect(queryCmd.ExpressionAttributeValues[':cutoff']).toEqual(expect.any(String));
+});
+
+test('dedupes same-ticker same-discDate backfill items before writing (keeps the last one)', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
+    if (cmd.__type === 'Query') return Promise.resolve({ Items: [] });
+    return Promise.resolve({});
+  });
+  mockFetchWithRetry.mockImplementation((url: string) => {
+    if (url.includes('code=7203')) {
+      return Promise.resolve({
+        json: async () => ({
+          data: [
+            {
+              Code: '72030',
+              DiscDate: '2026-05-08',
+              DocType: 'ForecastRevision_Consolidated_IFRS',
+              CurPerType: 'FY',
+              Sales: '1',
+              OP: '1',
+              OdP: '1',
+              NP: '1',
+              EPS: '0.1',
+            },
+            {
+              Code: '72030',
+              DiscDate: '2026-05-08',
+              DocType: 'FYFinancialStatements_Consolidated_IFRS',
+              CurPerType: 'FY',
+              Sales: '999',
+              OP: '99',
+              OdP: '98',
+              NP: '97',
+              EPS: '9.0',
+            },
+          ],
+        }),
+      });
+    }
+    return Promise.resolve({ json: async () => ({ data: [] }) });
+  });
+
+  await handler();
+
+  const items = putItems().filter((item) => item.ticker === '7203' && item.discDate === '2026-05-08');
+  expect(items).toHaveLength(1);
+  expect(items[0].sales).toBe('999');
+});
+
+test('counts failed backfill attempts against the cap, not just successes', async () => {
+  const manyNewTickers = Array.from({ length: 151 }, (_, i) => `T${String(i).padStart(4, '0')}`);
+  mockGetTargetTickers.mockResolvedValueOnce(manyNewTickers);
+  mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
+    if (cmd.__type === 'Query') return Promise.resolve({ Items: [] });
+    return Promise.resolve({});
+  });
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    mockFetchWithRetry.mockImplementation((url: string) => {
+      if (url.includes('code=')) return Promise.reject(new Error('boom'));
+      return Promise.resolve({ json: async () => ({ data: [] }) });
+    });
+
+    await handler();
+
+    const backfillCalls = mockFetchWithRetry.mock.calls.filter(([url]) => (url as string).includes('code='));
+    expect(backfillCalls).toHaveLength(150);
+  } finally {
+    errorSpy.mockRestore();
+  }
+});
+
+test('throws when every date fetch/upsert fails (so a broken run alarms instead of reporting success)', async () => {
+  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    mockFetchWithRetry.mockImplementation((url: string) => {
+      if (url.includes('date=')) return Promise.reject(new Error('boom'));
+      return Promise.resolve({ json: async () => ({ data: [] }) });
+    });
+
+    await expect(handler()).rejects.toThrow('all 4 date fetch/upsert calls failed');
+  } finally {
+    errorSpy.mockRestore();
+  }
+});

@@ -12,8 +12,9 @@ const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '7');
 // データが取得できず400エラーになる)は解消済み。株価四本値は当日16:30頃に配信されるため
 // (https://jpx-jquants.com/ja/spec/data-update)、当日分をそのまま取得できる。
 const DELIVERY_DELAY_DAYS = Number(process.env.DELIVERY_DELAY_DAYS ?? '0');
-// Freeプランは5req/分。余裕を持たせて13秒間隔にする(60000ms / 5req = 12000ms が下限)。
-// この値はprice-batchとfinancial-summary-batchで同じにしておくこと(1つのAPIキーのレート制限を両者で共有しているため)。
+// 価格・信用残高等の一般エンドポイントは1つのAPIキーで120req/分を共有(決算系エンドポイントは
+// 60req/分の別枠のレート制限を持つため、financial-summary-batchのREQUEST_INTERVAL_MSとは
+// 独立して調整してよい)。
 const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '13000');
 const MAX_RETRIES = 5;
 

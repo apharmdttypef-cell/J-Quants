@@ -18,8 +18,14 @@ const MAX_RETRIES = 5;
 // 14分のタイムアウト内に完走できなくなる。新規バックフィルの件数だけ実行あたりに
 // 上限を設け、残りは次回実行に持ち越す(継続更新は一括取得で軽いので上限の対象外)。
 const MAX_BACKFILL_TICKERS_PER_RUN = Number(process.env.MAX_BACKFILL_TICKERS_PER_RUN ?? '150');
+if (!Number.isFinite(MAX_BACKFILL_TICKERS_PER_RUN) || MAX_BACKFILL_TICKERS_PER_RUN < 0) {
+  throw new Error(`financial-summary-batch: invalid MAX_BACKFILL_TICKERS_PER_RUN env var: ${process.env.MAX_BACKFILL_TICKERS_PER_RUN}`);
+}
 // 決算発表は不定期に集中するため、週次実行(7日間隔)に対して2倍のバッファを持たせる。
 const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '14');
+if (!Number.isFinite(LOOKBACK_DAYS) || LOOKBACK_DAYS < 0) {
+  throw new Error(`financial-summary-batch: invalid LOOKBACK_DAYS env var: ${process.env.LOOKBACK_DAYS}`);
+}
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
@@ -46,12 +52,18 @@ function formatIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-async function hasExistingSummary(ticker: string): Promise<boolean> {
+// LOOKBACK_DAYSの一括取得ループは新規(未バックフィル)銘柄も対象に含めるため、バックフィル
+// 待ちの銘柄でも直近の開示が先に書き込まれることがある。単純な「1件でも存在するか」判定だと、
+// このループ経由の書き込みだけで「既存」とみなされてしまい、そのtickerの全期間バックフィルが
+// 二度と行われなくなる(このループ自体が原因でバックフィルを永久に取りこぼす)。そのため、
+// lookbackウィンドウより古いdiscDateを持つ行があるかどうかで判定する(ウィンドウ内の行は
+// 一括取得ループ由来の可能性があるため無視する)。
+async function hasExistingSummary(ticker: string, cutoffDate: string): Promise<boolean> {
   const result = await ddbDocClient.send(
     new QueryCommand({
       TableName: FINANCIAL_TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker',
-      ExpressionAttributeValues: { ':ticker': ticker },
+      KeyConditionExpression: 'ticker = :ticker AND discDate < :cutoff',
+      ExpressionAttributeValues: { ':ticker': ticker, ':cutoff': cutoffDate },
       Limit: 1,
     }),
   );
@@ -157,25 +169,32 @@ export const handler = async (): Promise<void> => {
 
   const apiKey = await getApiKey(SECRET_ARN);
 
+  const cutoffDate = formatIsoDate(new Date(Date.now() - (LOOKBACK_DAYS + 1) * 24 * 60 * 60 * 1000));
   const newTickers: string[] = [];
   for (const ticker of tickers) {
-    if (!(await hasExistingSummary(ticker))) newTickers.push(ticker);
+    if (!(await hasExistingSummary(ticker, cutoffDate))) newTickers.push(ticker);
   }
 
+  let attempted = 0;
   let backfilled = 0;
   let deferred = 0;
   let backfillFailed = 0;
   for (const ticker of newTickers) {
-    if (backfilled >= MAX_BACKFILL_TICKERS_PER_RUN) {
+    if (attempted >= MAX_BACKFILL_TICKERS_PER_RUN) {
       deferred++;
       continue;
     }
+    attempted++;
     try {
       const summaries = await fetchAllSummariesForTicker(ticker, apiKey);
       const updatedAt = new Date().toISOString();
-      await batchUpsert(ddbDocClient, FINANCIAL_TABLE_NAME, summaries.map((s) => toItem(ticker, s, updatedAt)));
+      // 同一ticker・同一discDateの重複行(APIが同日に複数DocType/CurPerTypeを返す場合)は
+      // BatchWriteItemが「同一キーを含むバッチ全体」を丸ごと拒否するため、書き込み前に
+      // discDateでdedupeする(後勝ち。1件ずつPutしていた旧実装と同じ挙動を維持)。
+      const items = [...new Map(summaries.map((s) => [normalizeDate(s.DiscDate), toItem(ticker, s, updatedAt)])).values()];
+      await batchUpsert(ddbDocClient, FINANCIAL_TABLE_NAME, items);
       backfilled++;
-      console.log(`${ticker}: backfilled ${summaries.length} financial summaries`);
+      console.log(`${ticker}: backfilled ${items.length} financial summaries`);
     } catch (error) {
       backfillFailed++;
       console.error(`${ticker}: failed to backfill financial summaries`, error);
@@ -201,6 +220,13 @@ export const handler = async (): Promise<void> => {
   }
 
   console.log(
-    `financial-summary-batch: ${backfilled} new tickers backfilled, ${deferred} deferred (backfill cap reached), ${backfillFailed} backfill failures (of ${newTickers.length} new); ${dates.length} recent dates checked, ${dateUpdated} points updated, ${dateFailed} date fetch failures (of ${targetTickers.size} target tickers)`,
+    `financial-summary-batch: ${attempted} new tickers attempted (${backfilled} backfilled, ${backfillFailed} failed), ${deferred} deferred (backfill cap reached), of ${newTickers.length} new; ${dates.length} recent dates checked, ${dateUpdated} points updated, ${dateFailed} date fetch failures (of ${targetTickers.size} target tickers)`,
   );
+
+  // 日付一括取得が全滅した場合、handlerが常にresolveすると実行は"成功"に見えてしまう
+  // (margin-balance-batchで同じ理由から導入した安全策と同じ)。dateパラメータの形式や
+  // APIキーなど構造的な問題を疑い、CloudWatch/EventBridgeにエラーとして見えるようにする。
+  if (dateFailed === dates.length) {
+    throw new Error(`financial-summary-batch: all ${dates.length} date fetch/upsert calls failed`);
+  }
 };
