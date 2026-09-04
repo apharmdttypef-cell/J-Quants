@@ -1,6 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, BatchWriteCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { getApiKey } from '../shared/jquants-batch-client';
+import { batchUpsert } from '../shared/dynamodb-batch';
 import { fetchAllWeeklyBalancesForDate, fetchAllDailyAlertBalancesForDate, type MarginBalancePoint } from './data-source';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
@@ -22,10 +23,6 @@ const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
 
 function formatIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function getYutaiTickers(): Promise<string[]> {
@@ -81,31 +78,6 @@ function toItems(matched: Map<string, MarginBalancePoint>): Record<string, unkno
   }));
 }
 
-// DynamoDBのBatchWriteItemは25件までしか受け付け、スロットリング時はUnprocessedItemsに
-// 未処理分を積んで200番台で返す(エラーにはならない)。ここでリトライしないと、書き込みが
-// エラーなく黙って欠落する(信用残高テーブルの一括パージ作業で実際に踏んだ不具合と同じ)。
-async function batchUpsert(tableName: string, items: Record<string, unknown>[]): Promise<void> {
-  for (let i = 0; i < items.length; i += 25) {
-    let pending: { PutRequest: { Item: Record<string, unknown> } }[] = items
-      .slice(i, i + 25)
-      .map((Item) => ({ PutRequest: { Item } }));
-    let attempt = 0;
-
-    while (pending.length > 0) {
-      const result = await ddbDocClient.send(new BatchWriteCommand({ RequestItems: { [tableName]: pending } }));
-      const unprocessed = (result.UnprocessedItems?.[tableName] ?? []) as typeof pending;
-      if (unprocessed.length === 0) break;
-
-      attempt += 1;
-      if (attempt > 10) {
-        throw new Error(`batchUpsert: too many retries, ${unprocessed.length} items still unprocessed`);
-      }
-      await sleep(Math.min(2000, 100 * 2 ** attempt));
-      pending = unprocessed;
-    }
-  }
-}
-
 function listFridays(lookbackDays: number, now: number): string[] {
   const fridays: string[] = [];
   for (let offset = 0; offset <= lookbackDays; offset++) {
@@ -135,7 +107,7 @@ export const handler = async (): Promise<void> => {
   try {
     const alertPoints = await fetchAllDailyAlertBalancesForDate(today, apiKey);
     const matchedAlerts = resolveTargetPoints(alertPoints, targetTickers);
-    await batchUpsert(MARGIN_BALANCE_TABLE_NAME, toItems(matchedAlerts));
+    await batchUpsert(ddbDocClient, MARGIN_BALANCE_TABLE_NAME, toItems(matchedAlerts));
     dailyAlertUpserted = matchedAlerts.size;
     console.log(`${today}: matched ${matchedAlerts.size} of ${targetTickers.size} target tickers (daily-alert)`);
   } catch (error) {
@@ -149,7 +121,7 @@ export const handler = async (): Promise<void> => {
     try {
       const points = await fetchAllWeeklyBalancesForDate(date, apiKey);
       const matched = resolveTargetPoints(points, targetTickers);
-      await batchUpsert(MARGIN_BALANCE_TABLE_NAME, toItems(matched));
+      await batchUpsert(ddbDocClient, MARGIN_BALANCE_TABLE_NAME, toItems(matched));
       weeklyUpserted += matched.size;
       console.log(`${date}: matched ${matched.size} of ${targetTickers.size} target tickers (weekly)`);
     } catch (error) {
