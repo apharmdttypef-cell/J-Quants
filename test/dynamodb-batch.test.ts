@@ -64,8 +64,9 @@ test('throws after more than 10 retries', async () => {
     });
 
     const promise = batchUpsert(ddbDocClient, 'MyTable', [{ id: 1 }]);
+    const assertion = expect(promise).rejects.toThrow('too many retries');
     await jest.runAllTimersAsync();
-    await expect(promise).rejects.toThrow('too many retries');
+    await assertion;
   } finally {
     jest.useRealTimers();
   }
