@@ -46,10 +46,25 @@ function knownPastRightsDate(): string {
 test('fetches and upserts actual gyakuhibu only for past rights dates not yet in JQuantsGyakuhibuActual', async () => {
   const rightsDate = knownPastRightsDate();
   mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203', unitShares: 100, rightsMonths: [3] }] }); // yutai master scan
-  mockSend.mockResolvedValue({ Item: undefined }); // alreadyFetched: 常に未取得として扱う(候補が複数年分生成されるため)
+  mockSend.mockResolvedValue({ Item: undefined }); // isEnriched: 常に未取得として扱う(候補が複数年分生成されるため)
   taisyakuClient.fetchTaisyakuCsv.mockResolvedValue('csv-body');
   taisyakuClient.parseTaisyakuCsv.mockImplementation((_csv, targetRightsDate) =>
-    targetRightsDate === rightsDate ? { rightsDate, totalAmount: 680, days: 2, avgRate: 0.4 } : undefined,
+    targetRightsDate === rightsDate
+      ? {
+          rightsDate,
+          occurred: true,
+          totalAmount: 680,
+          days: 2,
+          avgRate: 0.4,
+          financingBalance: 50000,
+          lendingBalance: 40000,
+          lendingPrice: 1200,
+          maxRateActual: 0.5,
+          bidRank: 'A',
+          restriction: null,
+          emergencyMeasure: null,
+        }
+      : undefined,
   );
 
   await handler();
@@ -60,15 +75,24 @@ test('fetches and upserts actual gyakuhibu only for past rights dates not yet in
   expect(putCalls.some((call) => (call[0] as { Item: { rightsDate: string } }).Item.rightsDate === rightsDate)).toBe(true);
   const matchingCall = putCalls.find((call) => (call[0] as { Item: { rightsDate: string } }).Item.rightsDate === rightsDate);
   expect(matchingCall![0]).toMatchObject({
-    Item: { ticker: '7203', rightsDate, totalAmount: 680, days: 2, avgRate: 0.4 },
+    Item: {
+      ticker: '7203',
+      rightsDate,
+      totalAmount: 680,
+      days: 2,
+      avgRate: 0.4,
+      enriched: true,
+      financingBalance: 50000,
+      lendingBalance: 40000,
+    },
   });
 });
 
 test('writes a noGyakuhibu marker row (instead of nothing) when parseTaisyakuCsv finds no lending fee, so the date is not re-scraped forever', async () => {
   mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203', unitShares: 100, rightsMonths: [3] }] }); // yutai master scan
-  mockSend.mockResolvedValue({ Item: undefined }); // alreadyFetched: 常に未取得
+  mockSend.mockResolvedValue({ Item: undefined }); // isEnriched: 常に未取得
   taisyakuClient.fetchTaisyakuCsv.mockResolvedValue('csv-body');
-  taisyakuClient.parseTaisyakuCsv.mockReturnValue(undefined); // どの候補日も品薄なし
+  taisyakuClient.parseTaisyakuCsv.mockReturnValue(undefined); // どの候補日もCSVに行自体が無い
 
   await handler();
 
@@ -77,6 +101,10 @@ test('writes a noGyakuhibu marker row (instead of nothing) when parseTaisyakuCsv
   );
   expect(putCalls.length).toBeGreaterThan(0);
   expect(putCalls.every((call) => (call[0] as { Item: { noGyakuhibu?: boolean } }).Item.noGyakuhibu === true)).toBe(true);
+  // point === undefined(行自体が無い)場合はenriched: trueを付けない代わりにcheckedAtを書く
+  // (30日以内の再スキップ用)。enrichedを付けてしまうと残高の無いこの行が永久に完了扱いになる。
+  expect(putCalls.every((call) => (call[0] as { Item: { enriched?: boolean } }).Item.enriched === undefined)).toBe(true);
+  expect(putCalls.every((call) => typeof (call[0] as { Item: { checkedAt?: string } }).Item.checkedAt === 'string')).toBe(true);
 });
 
 test('caps the number of real taisyaku.jp fetches per run at MAX_GYAKUHIBU_FETCHES_PER_RUN, leaving the rest for next time', async () => {
@@ -109,4 +137,117 @@ test('caps the number of real taisyaku.jp fetches per run at MAX_GYAKUHIBU_FETCH
     if (previousEnv === undefined) delete process.env.MAX_GYAKUHIBU_FETCHES_PER_RUN;
     else process.env.MAX_GYAKUHIBU_FETCHES_PER_RUN = previousEnv;
   }
+});
+
+test('re-fetches a rights date whose row exists but is not yet enriched', async () => {
+  // Task 1より前に書かれた既存行を模す: totalAmountはあるがenrichedが無い(undefined)。
+  // 旧alreadyFetchedはItemが存在するだけでスキップしていたが、isEnrichedはenriched!==trueなので
+  // スキップしない = 再取得してenriched: trueと残高列で上書きする。
+  const rightsDate = knownPastRightsDate();
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203', unitShares: 100, rightsMonths: [3] }] }); // yutai master scan
+  mockSend.mockResolvedValue({ Item: { ticker: '7203', rightsDate, totalAmount: 600, enriched: undefined } }); // isEnriched: 既存行はあるが未enriched
+  taisyakuClient.fetchTaisyakuCsv.mockResolvedValue('csv-body');
+  taisyakuClient.parseTaisyakuCsv.mockImplementation((_csv, targetRightsDate) =>
+    targetRightsDate === rightsDate
+      ? {
+          rightsDate,
+          occurred: true,
+          totalAmount: 680,
+          days: 2,
+          avgRate: 0.4,
+          financingBalance: 50000,
+          lendingBalance: 40000,
+          lendingPrice: 1200,
+          maxRateActual: 0.5,
+          bidRank: 'A',
+          restriction: null,
+          emergencyMeasure: null,
+        }
+      : undefined,
+  );
+
+  await handler();
+
+  expect(taisyakuClient.fetchTaisyakuCsv).toHaveBeenCalled();
+  const putCalls = mockSend.mock.calls.filter(
+    ([cmd]) => 'Item' in (cmd as Record<string, unknown>) && (cmd as { TableName?: string }).TableName === 'JQuantsGyakuhibuActual',
+  );
+  const matchingCall = putCalls.find((call) => (call[0] as { Item: { rightsDate: string } }).Item.rightsDate === rightsDate);
+  expect(matchingCall).toBeDefined();
+  expect(matchingCall![0]).toMatchObject({
+    Item: { ticker: '7203', rightsDate, enriched: true, financingBalance: 50000 },
+  });
+});
+
+test('stores noGyakuhibu:true together with balances when occurred is false', async () => {
+  // parseTaisyakuCsvが行を見つけたが、その日は品貸料が発生しなかった(occurred: false)ケース。
+  // 残高は取得できているのでnoGyakuhibu: trueとenriched: trueが両立する。
+  const rightsDate = knownPastRightsDate();
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203', unitShares: 100, rightsMonths: [3] }] }); // yutai master scan
+  mockSend.mockResolvedValue({ Item: undefined }); // isEnriched: 未取得
+  taisyakuClient.fetchTaisyakuCsv.mockResolvedValue('csv-body');
+  taisyakuClient.parseTaisyakuCsv.mockImplementation((_csv, targetRightsDate) =>
+    targetRightsDate === rightsDate
+      ? {
+          rightsDate,
+          occurred: false,
+          totalAmount: 0,
+          days: 0,
+          avgRate: 0,
+          financingBalance: 75000,
+          lendingBalance: 60000,
+          lendingPrice: 900,
+          maxRateActual: null,
+          bidRank: null,
+          restriction: null,
+          emergencyMeasure: null,
+        }
+      : undefined,
+  );
+
+  await handler();
+
+  const putCalls = mockSend.mock.calls.filter(
+    ([cmd]) => 'Item' in (cmd as Record<string, unknown>) && (cmd as { TableName?: string }).TableName === 'JQuantsGyakuhibuActual',
+  );
+  const matchingCall = putCalls.find((call) => (call[0] as { Item: { rightsDate: string } }).Item.rightsDate === rightsDate);
+  expect(matchingCall).toBeDefined();
+  const item = matchingCall![0] as { Item: { noGyakuhibu?: boolean; enriched?: boolean; lendingBalance?: number } };
+  expect(item.Item.noGyakuhibu).toBe(true);
+  expect(item.Item.enriched).toBe(true);
+  expect(item.Item.lendingBalance).toBe(60000);
+});
+
+test('skips a rights date that is already enriched', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203', unitShares: 100, rightsMonths: [3] }] }); // yutai master scan
+  mockSend.mockResolvedValue({ Item: { enriched: true } }); // isEnriched: 既にenriched済み
+
+  await handler();
+
+  expect(taisyakuClient.fetchTaisyakuCsv).not.toHaveBeenCalled();
+});
+
+test('skips a rights date whose checkedAt is within the last 30 days, even without enriched', async () => {
+  // 行自体がCSVに無いことを直近に確認済み(checkedAt=今日)のケース。enrichedは付いていないが、
+  // クールダウン期間内なので今日は再取得しない。
+  const recentCheckedAt = new Date().toISOString().slice(0, 10);
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203', unitShares: 100, rightsMonths: [3] }] }); // yutai master scan
+  mockSend.mockResolvedValue({ Item: { ticker: '7203', noGyakuhibu: true, checkedAt: recentCheckedAt } });
+
+  await handler();
+
+  expect(taisyakuClient.fetchTaisyakuCsv).not.toHaveBeenCalled();
+});
+
+test('re-fetches a rights date whose checkedAt is older than 30 days', async () => {
+  // 30日クールダウンが切れていれば、enrichedが無い(かつcheckedAtが古い)行は再取得対象に戻る。
+  const staleCheckedAt = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203', unitShares: 100, rightsMonths: [3] }] }); // yutai master scan
+  mockSend.mockResolvedValue({ Item: { ticker: '7203', noGyakuhibu: true, checkedAt: staleCheckedAt } });
+  taisyakuClient.fetchTaisyakuCsv.mockResolvedValue('csv-body');
+  taisyakuClient.parseTaisyakuCsv.mockReturnValue(undefined);
+
+  await handler();
+
+  expect(taisyakuClient.fetchTaisyakuCsv).toHaveBeenCalled();
 });
