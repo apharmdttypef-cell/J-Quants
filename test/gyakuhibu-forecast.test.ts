@@ -79,6 +79,24 @@ test('forecast with 4 ticker samples weights ticker and pool equally (K=4)', () 
   expect(result.fillMean).toBeCloseTo(0.5);
 });
 
+test('forecast only blends pool samples from the chosen scenario bin, ignoring other bins', () => {
+  const wrongBinSamples = [0.9, 0.9].map((f) => sample(f, { excessRatio: 3.5 })); // bin '2〜5'
+  const rightBinSamples = [0.1, 0.1].map((f) => sample(f, { excessRatio: 1.5 })); // bin '1〜2'
+  const result = forecast({
+    tickerSamples: [],
+    poolSamples: [...wrongBinSamples, ...rightBinSamples],
+    scenario: 'last-rights',
+    excessRatio: 1.5,
+    maxGyakuhibu: 1000,
+    value: 500,
+  });
+  // 採用ビン('1〜2')に属するのはrightBinSamplesの2件のみ。wrongBinSamples(ビン'2〜5')が
+  // 混ざっていれば poolSamples は4、fillMean は (0.9+0.9+0.1+0.1)/4=0.5 になってしまうはずで、
+  // この期待値(2件・0.1)はビンフィルタが正しく効いていることを示す。
+  expect(result.poolSamples).toBe(2);
+  expect(result.fillMean).toBeCloseTo(0.1);
+});
+
 test('forecast with an empty pool bin falls back to ticker samples only', () => {
   const tickerSamples = [0.2, 0.6, 1.0].map((f) => sample(f));
   const result = forecast({

@@ -213,8 +213,16 @@ export function forecastStatus(value: number, p50: number, p90: number): Forecas
 // (どちらか片方のサンプルしか重み付き配列に積まないため、式でwを求めるまでもなく
 // そのまま等価になる)。両方0ならna。maxGyakuhibuが無い場合も判定はnaにする
 // (充足率分布そのものは計算できてもforecastStatusは金額比較のため未定義)。
+//
+// `args.poolSamples`の契約: 呼び出し側は**全銘柄横断のプールサンプル全体**(buildPoolに
+// 渡すのと同じ、ビンで絞り込んでいない生の配列)を渡すこと。この関数が内部で
+// `args.excessRatio`から決まるビンに一致するサンプルだけへ絞り込む(上のpoolBinSamples)。
+// 呼び出し側が先にビンで絞り込んで渡すと、二重フィルタ(結果は変わらないが紛らわしい)や、
+// 誤ったビン基準での絞り込み(サイレントに`na`や銘柄のみのフォールバックに見えてしまい、
+// エラーにならず気づきにくい)につながるため、必ず未フィルタの全件を渡すこと。
 export function forecast(args: {
   tickerSamples: ForecastSample[];
+  /** 全銘柄横断のプールサンプル全体。ビンで絞り込まずに渡すこと(上記コメント参照)。 */
   poolSamples: ForecastSample[];
   scenario: Scenario;
   excessRatio: number | null;
