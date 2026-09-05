@@ -39,6 +39,14 @@ function formatPercent(value: number | null): string {
   return value !== null ? `${Math.round(value * 100)}%` : '—';
 }
 
+// excessRatioはfinancing=0の行(真の無限大/融資残0の無データ行)がどちらもnullに潰れて
+// 届く(JSON.stringifyがInfinityをnullにするため)。同じ行のfinancingBalance/lendingBalance
+// (常に有限数)から本当に無限大なのか(貸株残>0)、単にデータが無いのか(両方0)を区別する。
+function excessRatioLabel(h: YutaiForecastHistoryPoint): string {
+  if (h.financingBalance === 0 && h.lendingBalance > 0) return '∞';
+  return h.excessRatio !== null ? h.excessRatio.toFixed(2) : '—';
+}
+
 function formatSignedYen(value: number | null): string {
   if (value === null) return '—';
   return `${value < 0 ? '-' : ''}${formatFinancialYen(String(Math.abs(value)))}`;
@@ -246,9 +254,7 @@ export function YutaiForecastDetailPage() {
                   <td className="num">{h.financingBalance.toLocaleString('ja-JP')}</td>
                   <td className="num">{h.lendingBalance.toLocaleString('ja-JP')}</td>
                   <td className="num">{h.excessShares.toLocaleString('ja-JP')}</td>
-                  <td className="num">
-                    {h.excessRatio !== null && Number.isFinite(h.excessRatio) ? h.excessRatio.toFixed(2) : '∞'}
-                  </td>
+                  <td className="num">{excessRatioLabel(h)}</td>
                   <td className="num">{formatFinancialYen(String(h.totalAmount))}</td>
                   <td className="num">
                     {h.maxRateActual !== null ? formatFinancialYen(String(h.maxRateActual * data.unitShares)) : '—'}
