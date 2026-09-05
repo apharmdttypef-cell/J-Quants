@@ -9,6 +9,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   PutCommand: jest.fn((input: unknown) => input),
   QueryCommand: jest.fn((input: unknown) => input),
   ScanCommand: jest.fn((input: unknown) => input),
+  UpdateCommand: jest.fn((input: unknown) => input),
 }));
 jest.mock('../lambda/gyakuhibu-history-batch/taisyaku-client', () => ({
   fetchTaisyakuCsv: jest.fn(),
@@ -105,6 +106,39 @@ test('writes a noGyakuhibu marker row (instead of nothing) when parseTaisyakuCsv
   // (30日以内の再スキップ用)。enrichedを付けてしまうと残高の無いこの行が永久に完了扱いになる。
   expect(putCalls.every((call) => (call[0] as { Item: { enriched?: boolean } }).Item.enriched === undefined)).toBe(true);
   expect(putCalls.every((call) => typeof (call[0] as { Item: { checkedAt?: string } }).Item.checkedAt === 'string')).toBe(true);
+});
+
+test('preserves existing totalAmount when a legacy (not-yet-enriched) row falls outside the CSV response, instead of overwriting it with zero', async () => {
+  // 既存行(Task 1以前に書かれた、totalAmountはあるがenrichedが無いレガシー行)が、
+  // taisyaku.jpの3年公開ウィンドウから外れて今日のCSVには含まれなくなったケースを模す。
+  const rightsDate = knownPastRightsDate();
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203', unitShares: 100, rightsMonths: [3] }] }); // yutai master scan
+  mockSend.mockResolvedValue({ Item: { ticker: '7203', rightsDate, totalAmount: 600, enriched: undefined } }); // 既存の未enriched行(実データ持ち)
+  taisyakuClient.fetchTaisyakuCsv.mockResolvedValue('csv-body');
+  taisyakuClient.parseTaisyakuCsv.mockReturnValue(undefined); // 3年公開ウィンドウから外れ、CSVにこの日の行が無い
+
+  await handler();
+
+  const putCalls = mockSend.mock.calls.filter(
+    ([cmd]) => 'Item' in (cmd as Record<string, unknown>) && (cmd as { TableName?: string }).TableName === 'JQuantsGyakuhibuActual',
+  );
+  // totalAmountを消す(=0を書く)PutCommandが発行されていないことを確認する
+  expect(putCalls.some((call) => (call[0] as { Item?: { totalAmount?: number } }).Item?.totalAmount === 0)).toBe(false);
+
+  const updateCalls = mockSend.mock.calls.filter(
+    ([cmd]) => 'UpdateExpression' in (cmd as Record<string, unknown>) && (cmd as { TableName?: string }).TableName === 'JQuantsGyakuhibuActual',
+  );
+  expect(updateCalls.length).toBeGreaterThan(0);
+  // rightsMonths: [3]は複数年分の過去候補を生成し、そのすべてで既存行があるためUpdateCommandが
+  // 複数回発行される。対象のrightsDateに対応する1件を見つけて検証する。
+  const matchingUpdateCall = updateCalls.find(
+    (call) => (call[0] as { Key?: { rightsDate?: string } }).Key?.rightsDate === rightsDate,
+  );
+  expect(matchingUpdateCall).toBeDefined();
+  expect(matchingUpdateCall![0]).toMatchObject({
+    Key: { ticker: '7203', rightsDate },
+    ExpressionAttributeValues: { ':checkedAt': expect.any(String) },
+  });
 });
 
 test('caps the number of real taisyaku.jp fetches per run at MAX_GYAKUHIBU_FETCHES_PER_RUN, leaving the rest for next time', async () => {

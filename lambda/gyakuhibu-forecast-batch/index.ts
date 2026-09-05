@@ -14,6 +14,15 @@ const GYAKUHIBU_FORECAST_TABLE_NAME = process.env.GYAKUHIBU_FORECAST_TABLE_NAME!
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
+// DynamoDBはInfinity/-Infinity/NaNを含む数値をmarshalできず、PutCommandが例外を投げて
+// ハンドラ全体が失敗する。BIN_EDGESの融資超過/5以上ビンのlo/hiは数学的には
+// -Infinity/Infinityであり(lambda/shared/gyakuhibu-forecast.tsの純粋関数側では正しい)、
+// excessRatioも融資残高0の銘柄でInfinityになりうる。保存直前に必ずこのヘルパーを通し、
+// 非有限値はnullに変換する。
+function finiteOrNull(value: number | null): number | null {
+  return value !== null && Number.isFinite(value) ? value : null;
+}
+
 interface MasterRow {
   ticker: string;
   value: number;
@@ -122,7 +131,11 @@ export const handler = async (): Promise<void> => {
   await ddbDocClient.send(
     new PutCommand({
       TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
-      Item: { ticker: '_POOL_', bins: pool, computedAt },
+      Item: {
+        ticker: '_POOL_',
+        bins: pool.map((bin) => ({ ...bin, lo: finiteOrNull(bin.lo), hi: finiteOrNull(bin.hi) })),
+        computedAt,
+      },
     }),
   );
 
@@ -155,7 +168,7 @@ export const handler = async (): Promise<void> => {
       await ddbDocClient.send(
         new PutCommand({
           TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
-          Item: { ticker: row.ticker, rightsDate: nextDate, ...result, computedAt },
+          Item: { ticker: row.ticker, rightsDate: nextDate, ...result, excessRatio: finiteOrNull(result.excessRatio), computedAt },
         }),
       );
       written++;

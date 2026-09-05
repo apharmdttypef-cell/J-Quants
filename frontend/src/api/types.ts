@@ -154,8 +154,8 @@ export interface YutaiForecastHistoryPoint {
 
 export interface PoolBin {
   label: string;
-  lo: number;
-  hi: number;
+  lo: number | null;
+  hi: number | null;
   n: number;
   pOccur: number;
   fillP50: number;

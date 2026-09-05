@@ -228,7 +228,7 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 
 ### 逆日歩予測機能のバックフィル状況(2026-09-05時点、デプロイ前)
 
-`JQuantsGyakuhibuActual`の既存行(残高列拡張前)は約5,000件と見込まれ、`MAX_GYAKUHIBU_FETCHES_PER_RUN`の既定値(200件/回)のままだと約25日かかる計算のため、デプロイ直後は一時的に800前後まで引き上げてバックフィルを加速する運用を想定している(コード変更不要、CDK環境変数のみ)。実際にバックフィルへ要した日数、`GyakuhibuForecastBatchFunction`が算出したビン別サンプル数(`_POOL_`行の`bins[].n`)の実測、`MAX_GYAKUHIBU_FETCHES_PER_RUN`を既定値へ戻した日付は、デプロイ・バックフィル完了後にこの節へ追記する。
+`JQuantsGyakuhibuActual`の既存行(残高列拡張前)は約5,000件と見込まれ、`MAX_GYAKUHIBU_FETCHES_PER_RUN`の既定値(200件/回)のままだと約25日かかる計算のため、デプロイ直後は一時的に引き上げてバックフィルを加速する運用を想定している(コード変更不要、CDK環境変数のみ)。ただし`GyakuhibuHistoryBatchFunction`の14分タイムアウト内では、1件あたり3回のHTTPラウンドトリップ+`TAISYAKU_REQUEST_INTERVAL_MS`(既定1000ms)の待機がかかるため、実際に完走できる上限は300〜400件程度が目安(800まで上げてもタイムアウトで打ち切られ、EventBridgeの自動リトライで逆にtaisyaku.jpへの負荷が増える)。実際にバックフィルへ要した日数、`GyakuhibuForecastBatchFunction`が算出したビン別サンプル数(`_POOL_`行の`bins[].n`)の実測、`MAX_GYAKUHIBU_FETCHES_PER_RUN`を既定値へ戻した日付は、デプロイ・バックフィル完了後にこの節へ追記する。
 
 ## 主要コマンド
 

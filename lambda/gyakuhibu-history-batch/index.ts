@@ -1,5 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { fetchTaisyakuCsv, parseTaisyakuCsv, GyakuhibuActualPoint } from './taisyaku-client';
 import { getLocalTradingCalendar, rightsDateForMonth } from '../shared/trading-calendar';
 
@@ -89,6 +89,13 @@ function isoDateDaysAgo(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
+async function getExistingRow(ticker: string, rightsDate: string): Promise<Record<string, unknown> | undefined> {
+  const result = await ddbDocClient.send(
+    new GetCommand({ TableName: GYAKUHIBU_ACTUAL_TABLE_NAME, Key: { ticker, rightsDate } }),
+  );
+  return result.Item;
+}
+
 // 旧alreadyFetchedは「行が存在するかどうか」だけを見ていたため、Task 1で
 // parseTaisyakuCsvが残高/レート列を返すようになる前に書かれた既存行(約5,000件、
 // enrichedフィールドが無い)が永久にスキップされてしまっていた。isEnrichedは
@@ -97,13 +104,10 @@ function isoDateDaysAgo(days: number): string {
 //   - checkedAt が直近ENRICHED_RECHECK_COOLDOWN_DAYS日以内: 行そのものがCSVに
 //     無いことを確認済み(=noGyakuhibuのみでenrichedは付いていない)で、かつ
 //     確認してからまだ日が浅い。毎日ハンマーしないためのクールダウン。
-async function isEnriched(ticker: string, rightsDate: string): Promise<boolean> {
-  const result = await ddbDocClient.send(
-    new GetCommand({ TableName: GYAKUHIBU_ACTUAL_TABLE_NAME, Key: { ticker, rightsDate } }),
-  );
-  if (result.Item?.enriched === true) return true;
+function isEnriched(existing: Record<string, unknown> | undefined): boolean {
+  if (existing?.enriched === true) return true;
 
-  const checkedAt = result.Item?.checkedAt;
+  const checkedAt = existing?.checkedAt;
   if (typeof checkedAt === 'string' && checkedAt >= isoDateDaysAgo(ENRICHED_RECHECK_COOLDOWN_DAYS)) return true;
 
   return false;
@@ -143,23 +147,41 @@ export const handler = async (): Promise<void> => {
     // (isEnrichedでスキップした行まで待つのは無駄なため)。
     let attemptedFetch = false;
     try {
-      if (await isEnriched(ticker, rightsDate)) continue;
+      const existing = await getExistingRow(ticker, rightsDate);
+      if (isEnriched(existing)) continue;
 
       attemptedFetch = true;
       fetchCount++;
       const csv = await fetchTaisyakuCsv(ticker, rightsDate, rightsDate);
       const point = parseTaisyakuCsv(csv, rightsDate, unitShares, ticker);
       if (!point) {
-        // 対象の申込日がCSVに全く含まれていない(行自体が無い)場合。残高も無いため
-        // enriched: trueは付けない代わりにcheckedAt: todayを書き、isEnrichedの
-        // クールダウン判定で当面(ENRICHED_RECHECK_COOLDOWN_DAYS日)の毎日再取得を防ぐ。
-        console.log(`${ticker}: no row for ${rightsDate} in taisyaku.jp CSV; recording checkedAt`);
-        await ddbDocClient.send(
-          new PutCommand({
-            TableName: GYAKUHIBU_ACTUAL_TABLE_NAME,
-            Item: { ticker, rightsDate, totalAmount: 0, days: 0, avgRate: 0, noGyakuhibu: true, checkedAt: todayIso() },
-          }),
-        );
+        if (existing) {
+          // 既存行がある(=以前は実データを取得できていた)場合は上書きしない。taisyaku.jpの
+          // 公開範囲(直近3年)から外れて再取得できなくなった場合、CSVにその日の行が無くなり
+          // parseTaisyakuCsvがundefinedを返すが、これは「実績が無かった」ことを意味しない。
+          // checkedAtだけ更新してクールダウンに乗せる(唯一の取得元であるtaisyaku.jpから
+          // 再取得できないため、上書きすると実データが永久に失われる)。
+          console.log(`${ticker}: no row for ${rightsDate} in taisyaku.jp CSV but an existing row has data; touching checkedAt only`);
+          await ddbDocClient.send(
+            new UpdateCommand({
+              TableName: GYAKUHIBU_ACTUAL_TABLE_NAME,
+              Key: { ticker, rightsDate },
+              UpdateExpression: 'SET checkedAt = :checkedAt',
+              ExpressionAttributeValues: { ':checkedAt': todayIso() },
+            }),
+          );
+        } else {
+          // 対象の申込日がCSVに全く含まれていない(行自体が無い)場合。残高も無いため
+          // enriched: trueは付けない代わりにcheckedAt: todayを書き、isEnrichedの
+          // クールダウン判定で当面(ENRICHED_RECHECK_COOLDOWN_DAYS日)の毎日再取得を防ぐ。
+          console.log(`${ticker}: no row for ${rightsDate} in taisyaku.jp CSV; recording checkedAt`);
+          await ddbDocClient.send(
+            new PutCommand({
+              TableName: GYAKUHIBU_ACTUAL_TABLE_NAME,
+              Item: { ticker, rightsDate, totalAmount: 0, days: 0, avgRate: 0, noGyakuhibu: true, checkedAt: todayIso() },
+            }),
+          );
+        }
         continue;
       }
 

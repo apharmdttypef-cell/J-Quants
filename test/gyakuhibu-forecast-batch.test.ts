@@ -1,3 +1,5 @@
+import { marshall } from '@aws-sdk/util-dynamodb';
+
 const mockSend = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn() }));
@@ -131,5 +133,30 @@ test('marks tickers without maxGyakuhibu as na even when sample history exists',
     const item = (tickerPut[0] as { Item: Record<string, unknown> }).Item;
     expect(item.tickerSamples).toBe(1); // サンプルはある
     expect(item.forecastStatus).toBe('na'); // それでもmaxGyakuhibuが無いのでna
+  });
+});
+
+test('every PutCommand Item survives real DynamoDB marshalling (no Infinity/-Infinity reaches storage)', async () => {
+  await withFixedNow(async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
+      .mockResolvedValueOnce({
+        Items: [
+          {
+            ticker: '1234', rightsDate: '2025-08-27', financingBalance: 0, lendingBalance: 250,
+            avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
+          },
+        ],
+      }) // financingBalance:0, lendingBalance>0 -> excessRatio = Infinity (実在しうる状態)
+      .mockResolvedValueOnce({}) // _POOL_ put
+      .mockResolvedValueOnce({ Items: [] }) // margin balance query
+      .mockResolvedValueOnce({}); // 1234のforecast put
+
+    await handler();
+
+    for (const [cmd] of putCalls()) {
+      const { Item } = cmd as { Item: Record<string, unknown> };
+      expect(() => marshall(Item)).not.toThrow();
+    }
   });
 });

@@ -146,7 +146,7 @@ test('skips a rights date that is already enriched', async () => {
   - `point.occurred === true` → `{ ...balances, totalAmount, days, avgRate, enriched: true }`
 - [ ] **Step 4:** PASS
 - [ ] **Step 5:** `git commit -m "Backfill balance columns into JQuantsGyakuhibuActual and skip only enriched rows"`
-- [ ] **Step 6(デプロイ後の運用):** CDKの`MAX_GYAKUHIBU_FETCHES_PER_RUN`を一時的に`800`にしてデプロイ。CloudWatchで`enriched`の埋まり具合を見て、完了後`200`に戻す
+- [ ] **Step 6(デプロイ後の運用):** CDKの`MAX_GYAKUHIBU_FETCHES_PER_RUN`を一時的に`300`にしてデプロイ(`GyakuhibuHistoryBatchFunction`の14分タイムアウト内で1件あたり3回のHTTPラウンドトリップ+待機がかかるため、実際に完走できる上限はこの程度が目安。800まで上げるとタイムアウトで打ち切られる)。CloudWatchで`enriched`の埋まり具合を見て、完了後`200`に戻す
 
 ---
 
@@ -1561,7 +1561,7 @@ EventBridge(毎日 JST18:40、YutaiRiskPrecomputeBatchFunctionの20分後)
 
 ## デプロイ順序と確認
 
-1. Task 1〜2 をデプロイ(`MAX_GYAKUHIBU_FETCHES_PER_RUN=800`)。数日待ち、`JQuantsGyakuhibuActual`の`enriched`行が増えるのを確認
+1. Task 1〜2 をデプロイ(`MAX_GYAKUHIBU_FETCHES_PER_RUN=300`、14分タイムアウト内で完走できる上限が実際の目安)。数日待ち、`JQuantsGyakuhibuActual`の`enriched`行が増えるのを確認
 2. Task 3〜5 をデプロイ。`GyakuhibuForecastBatchFunction`を手動invokeし、`_POOL_`行の`bins[].n`を確認(極端に偏るビンがあれば`BIN_EDGES`を調整してTask 3のテストも更新)
 3. Task 6〜8 をデプロイ。9418・トヨタ(7203、常に0円)・直近の高逆日歩銘柄で画面を目視
 4. バックフィル完了後、`MAX_GYAKUHIBU_FETCHES_PER_RUN`を200に戻す
