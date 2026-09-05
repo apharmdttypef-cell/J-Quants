@@ -692,8 +692,120 @@ test('GET /yutai/{ticker}/forecast returns 404 for an unknown ticker', async () 
 - Modify: `frontend/src/api/types.ts`
 - Modify: `frontend/src/api/client.ts`
 
-- [ ] `YutaiForecastStatus`, `YutaiForecast`, `YutaiForecastListItem`, `YutaiForecastListResponse`, `YutaiForecastHistoryPoint`, `PoolBin`, `YutaiForecastDetail` を追加(設計書のJSONそのまま)
-- [ ] `fetchYutaiForecastList(params: YutaiListParams & { forecastStatus?: ... })`, `fetchYutaiForecastDetail(ticker)` を追加
+Task 5で実際に実装された`GET /yutai/forecast`・`GET /yutai/{ticker}/forecast`のレスポンス形状に**そのまま**合わせる(設計書のJSON例は`unitShares`が一覧レスポンスにも書かれているが、実装は既存`YutaiListItem`/`listYutai`と同じく一覧では`unitShares`を返さない。詳細レスポンスにはある。以下はTask 5の実コードから起こした正確な形)。
+
+- [ ] `frontend/src/api/types.ts`の末尾(既存`MarginTrendResponse`の後)に追加:
+
+```typescript
+export type YutaiForecastStatus = 'safe' | 'caution' | 'danger' | 'na';
+export type YutaiForecastScenario = 'last-rights' | 'current-tse' | 'none';
+
+export interface YutaiForecast {
+  scenario: YutaiForecastScenario;
+  excessRatio: number | null;
+  bin: string | null;
+  pOccur: number | null;
+  fillP50: number | null;
+  fillP90: number | null;
+  fillMean: number | null;
+  forecastP50: number | null;
+  forecastP90: number | null;
+  forecastMean: number | null;
+  expectedNet: number | null;
+  forecastStatus: YutaiForecastStatus;
+  tickerSamples: number;
+  poolSamples: number;
+}
+
+export interface YutaiForecastListItem {
+  ticker: string;
+  companyName?: string;
+  content: string;
+  value: number;
+  rightsDate: string | null;
+  riskStatus: YutaiRiskStatus;
+  maxGyakuhibu: number | null;
+  forecast: YutaiForecast;
+}
+
+export interface YutaiForecastListResponse {
+  tickers: YutaiForecastListItem[];
+  currentMonthLastTradableDate: string;
+  poolComputedAt: string | null;
+}
+
+export interface YutaiForecastHistoryPoint {
+  rightsDate: string;
+  excessRatio: number | null;
+  excessShares: number;
+  financingBalance: number;
+  lendingBalance: number;
+  lendingPrice: number | null;
+  fillRatio: number | null;
+  totalAmount: number;
+  maxRateActual: number | null;
+  bidRank: string | null;
+  restriction: string | null;
+  emergencyMeasure: string | null;
+  occurred: boolean;
+}
+
+export interface PoolBin {
+  label: string;
+  lo: number;
+  hi: number;
+  n: number;
+  pOccur: number;
+  fillP50: number;
+  fillP90: number;
+  fillMean: number;
+}
+
+export interface YutaiForecastMarginLatest {
+  date: string;
+  financingBalance: number;
+  lendingBalance: number;
+}
+
+export interface YutaiForecastDetail {
+  ticker: string;
+  companyName: string | null;
+  content: string;
+  value: number;
+  unitShares: number;
+  rightsDate: string | null;
+  maxGyakuhibu: number | null;
+  forecast: YutaiForecast;
+  history: YutaiForecastHistoryPoint[];
+  poolBins: PoolBin[];
+  marginTrend: { latest: YutaiForecastMarginLatest | null };
+}
+```
+
+- [ ] `frontend/src/api/client.ts`の末尾(既存`fetchYutaiMarginTrend`の後)に追加。既存`fetchYutaiList`と同じ`URLSearchParams`の組み立て方に揃える:
+
+```typescript
+export interface YutaiForecastListParams extends YutaiListParams {
+  forecastStatus?: YutaiForecastStatus | 'all';
+}
+
+export function fetchYutaiForecastList(params: YutaiForecastListParams): Promise<YutaiForecastListResponse> {
+  const query = new URLSearchParams();
+  if (params.rightsDateFrom) query.set('rightsDateFrom', params.rightsDateFrom);
+  if (params.rightsDateTo) query.set('rightsDateTo', params.rightsDateTo);
+  if (params.keyword) query.set('keyword', params.keyword);
+  if (params.forecastStatus) query.set('forecastStatus', params.forecastStatus);
+  return request(`/yutai/forecast?${query}`);
+}
+
+export function fetchYutaiForecastDetail(ticker: string): Promise<YutaiForecastDetail> {
+  return request(`/yutai/${ticker}/forecast`);
+}
+```
+
+  `YutaiForecastListParams`は`riskStatus`(既存`YutaiListParams`由来、`/yutai/forecast`では未使用)を含んだままでよい(使わなければ単に送信されないだけで害はない)。`YutaiForecastStatus`は`frontend/src/api/types.ts`からimportする。
+
+- [ ] `frontend`ディレクトリで`npm run build`(`tsc -b && vite build`)を実行し、型エラーなくビルドが通ることを確認する(フロントにjestテストは無い。既存の型・ビルドチェックのみが検証手段)
 - [ ] `git commit -m "Add forecast API types and client functions"`
 
 ---
