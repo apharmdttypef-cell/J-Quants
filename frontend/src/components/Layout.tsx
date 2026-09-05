@@ -5,6 +5,7 @@ const NAV_ITEMS = [
   { to: '/screening', label: 'スクリーニング' },
   { to: '/watchlist', label: 'ウォッチリスト管理' },
   { to: '/yutai', label: '優待クロス' },
+  { to: '/yutai/forecast', label: '逆日歩予測' },
 ];
 
 export function Layout() {

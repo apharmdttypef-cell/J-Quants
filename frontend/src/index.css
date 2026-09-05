@@ -9,6 +9,7 @@
   --accent-contrast: #ffffff;
   --up: #c0392b;
   --down: #1e8449;
+  --caution: #b8860b;
   --focus: #2563eb;
 
   --font-display: 'Zen Kaku Gothic New', 'Hiragino Sans', 'Yu Gothic', sans-serif;
@@ -30,6 +31,7 @@
     --accent-contrast: #10121a;
     --up: #ff6b5b;
     --down: #34c77b;
+    --caution: #e0b64c;
     --focus: #8b98ff;
   }
 }
@@ -432,6 +434,20 @@ a {
 .risk-badge--na {
   color: var(--text-muted);
   background: var(--surface-alt);
+}
+
+.risk-badge--caution {
+  color: var(--caution);
+  background: color-mix(in srgb, var(--caution) 14%, transparent);
+}
+
+.basis-badge {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: var(--surface-alt);
+  margin-left: 0.4rem;
 }
 
 .cutoff-banner {
