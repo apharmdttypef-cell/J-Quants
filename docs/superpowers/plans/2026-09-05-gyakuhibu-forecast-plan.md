@@ -1145,13 +1145,334 @@ export function YutaiForecastListPage() {
 - Modify: `frontend/src/pages/YutaiDetailPage.tsx`(リンク1行)
 - Modify: `frontend/src/main.tsx`, `frontend/src/index.css`
 
-- [ ] **サマリカード4枚**(`.forecast-cards` grid、モバイル2列): 発生確率 / 予測中央値 / 予測P90 / 優待価値−P90。下段に最大逆日歩・判定バッジ・シナリオ文言(`前回同月(2025-09-26)の超過率 1.6 を採用` / `東証信用残ベース(参考)` / `実績なし`)
-- [ ] **曲線グラフ**(recharts `ComposedChart`): x=ビン(カテゴリ軸、6ビン)、`Bar`=発生確率(左軸)、`Line`=fillP50・fillP90(右軸、0〜1)。同銘柄の`history`を`Scatter`で重ねる(x=その権利日のビン、y=fillRatio、赤)。採用ビンに`ReferenceArea`で薄い背景
-- [ ] **過去権利日テーブル**: 権利日 / 融資残 / 貸株残 / 超過株数 / 超過率 / 実績逆日歩 / 上限(`maxRateActual×unitShares`) / 充足率 / 応札 / 規制。`occurred=false`の行は灰色文字
-- [ ] **感度表**: `poolBins`から採用ビンの前後1つずつ(端なら片側2つ)を取り、各ビンで`forecastP50 = fillP50×maxGyakuhibu`等を画面側で計算して表示。ただし銘柄実績のブレンドは画面では再現しないので「市場プールのみの値」と注記
-- [ ] **信用残トレンド**: `fetchYutaiMarginTrend`を再利用し、`history`の各`rightsDate`に`ReferenceLine`
-- [ ] `YutaiDetailPage.tsx`の「逆日歩リスク計算」カード見出し右に `<Link to={`/yutai/${ticker}/forecast`}>予測を見る →</Link>`
-- [ ] 手動確認: 予測未計算銘柄で「予測計算中」、実績0件銘柄で曲線がプールのみ、9418で過去8/27の行が充足率1.0
+既存`frontend/src/pages/YutaiDetailPage.tsx`の構造(`.section-heading`+`.card`の繰り返し、`useAsync`、信用残トレンドの`LineChart`)をそのまま踏襲する。**重要な制約**: APIの`forecast`オブジェクト(Task 5/`YutaiForecast`型)は`scenario`と`excessRatio`(結果の数値)だけを返し、採用した具体的な権利日や「同月一致か直近フォールバックか」の区別までは返さない。設計書の例文「前回同月(2025-09-26)の超過率 1.6 を採用」はこの情報を前提にしているが、実際に取得できるのは`excessRatio`の数値のみなので、以下のコードでは「過去の権利日実績の超過率」という一般的な文言にする(存在しないフィールドを参照しない)。
+
+- [ ] `frontend/src/index.css`の`.summary-item__value`ブロックの直後に追加:
+
+```css
+.forecast-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+}
+```
+
+  (このプロジェクトのCSSには`@media`によるブレークポイントが無く、`.summary-grid`等すべて`auto-fit`+`minmax()`で自然にモバイル2列程度まで縮小する方式に統一されている。ここも同じ方式に揃える)
+
+- [ ] `frontend/src/pages/YutaiForecastDetailPage.tsx`(新規):
+
+```typescript
+import { Link, useParams } from 'react-router-dom';
+import {
+  Bar,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  LineChart,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  Scatter,
+  Tooltip as ChartTooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import { fetchYutaiForecastDetail, fetchYutaiMarginTrend } from '../api/client';
+import type { YutaiForecast, YutaiForecastHistoryPoint, PoolBin } from '../api/types';
+import { StatusNote } from '../components/StatusNote';
+import { formatFinancialYen } from '../lib/format';
+import { useAsync } from '../lib/useAsync';
+
+const FORECAST_STATUS_LABEL: Record<string, string> = { danger: '危険', caution: '注意', safe: '安全', na: '対象外' };
+
+// lambda/shared/gyakuhibu-forecast.tsのBIN_EDGESと同じ6区分。フロントはバックエンドの
+// 純粋関数を直接importできない(別npmパッケージ)ため、この境界値をこのファイル内に複製する
+// (既存の各Lambdaファイルが銘柄マッチングロジックを複製しているのと同じ方針)。
+const BIN_LABELS = ['融資超過', '0〜0.5', '0.5〜1', '1〜2', '2〜5', '5以上'] as const;
+
+function binLabelFor(ratio: number): string {
+  if (ratio < 0) return '融資超過';
+  if (ratio < 0.5) return '0〜0.5';
+  if (ratio < 1) return '0.5〜1';
+  if (ratio < 2) return '1〜2';
+  if (ratio < 5) return '2〜5';
+  return '5以上';
+}
+
+function formatPercent(value: number | null): string {
+  return value !== null ? `${Math.round(value * 100)}%` : '—';
+}
+
+function formatSignedYen(value: number | null): string {
+  if (value === null) return '—';
+  return `${value < 0 ? '-' : ''}${formatFinancialYen(String(Math.abs(value)))}`;
+}
+
+function scenarioText(forecast: YutaiForecast): string {
+  if (forecast.scenario === 'last-rights') {
+    const ratio =
+      forecast.excessRatio !== null && Number.isFinite(forecast.excessRatio) ? forecast.excessRatio.toFixed(1) : '—';
+    return `過去の権利日実績の超過率 ${ratio} を採用`;
+  }
+  if (forecast.scenario === 'current-tse') return '東証信用残ベース(参考)';
+  return '実績なし';
+}
+
+// 採用ビンの前後1つずつ(3ビン)。端なら片側2つを取る。
+function sensitivityWindow(poolBins: PoolBin[], adoptedLabel: string | null): PoolBin[] {
+  if (adoptedLabel === null) return [];
+  const idx = poolBins.findIndex((b) => b.label === adoptedLabel);
+  if (idx === -1) return [];
+  let start = idx - 1;
+  let end = idx + 1;
+  if (start < 0) {
+    end += -start;
+    start = 0;
+  }
+  if (end > poolBins.length - 1) {
+    start -= end - (poolBins.length - 1);
+    end = poolBins.length - 1;
+  }
+  start = Math.max(0, start);
+  return poolBins.slice(start, end + 1);
+}
+
+export function YutaiForecastDetailPage() {
+  const { ticker } = useParams<{ ticker: string }>();
+
+  const detailState = useAsync(async () => {
+    if (!ticker) throw new Error('ticker is missing');
+    return fetchYutaiForecastDetail(ticker);
+  }, [ticker]);
+
+  const trendState = useAsync(async () => {
+    if (!ticker) throw new Error('ticker is missing');
+    return fetchYutaiMarginTrend(ticker);
+  }, [ticker]);
+
+  if (detailState.loading) return <StatusNote kind="loading" message="読み込み中…" />;
+  if (detailState.error) return <StatusNote kind="error" message={`取得に失敗しました: ${detailState.error.message}`} />;
+  if (!detailState.data) return null;
+
+  const { data } = detailState;
+  const { forecast } = data;
+  const maxGyakuhibu = data.maxGyakuhibu;
+  const netP90 = forecast.forecastP90 !== null ? data.value - forecast.forecastP90 : null;
+
+  const chartData = BIN_LABELS.map((label) => {
+    const bin = data.poolBins.find((b) => b.label === label);
+    return {
+      label,
+      pOccur: bin?.pOccur ?? 0,
+      fillP50: bin?.fillP50 ?? 0,
+      fillP90: bin?.fillP90 ?? 0,
+    };
+  });
+
+  const scatterData = data.history
+    .filter((h) => h.excessRatio !== null && Number.isFinite(h.excessRatio))
+    .map((h) => ({ label: binLabelFor(h.excessRatio as number), fillRatio: h.fillRatio ?? 0 }));
+
+  const sensitivityBins = forecast.forecastStatus !== 'na' ? sensitivityWindow(data.poolBins, forecast.bin) : [];
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <h1 className="page-title">
+          {data.companyName ?? data.ticker} <span className="ticker-card__code">{data.ticker}</span>
+        </h1>
+        <div style={{ display: 'flex', gap: '1rem' }}>
+          <Link to={`/yutai/${data.ticker}`} style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            逆日歩リスク計算を見る →
+          </Link>
+          <Link to={`/tickers/${data.ticker}`} style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+            既存の個別銘柄画面を見る →
+          </Link>
+        </div>
+      </div>
+
+      {forecast.forecastStatus === 'na' ? (
+        <StatusNote kind="empty" message="予測計算中です(まだ十分な実績データがありません)。" />
+      ) : (
+        <div className="forecast-cards">
+          <div className="card">
+            <div className="summary-item__label">発生確率</div>
+            <div className="summary-item__value">{formatPercent(forecast.pOccur)}</div>
+          </div>
+          <div className="card">
+            <div className="summary-item__label">予測逆日歩(中央値)</div>
+            <div className="summary-item__value">
+              {forecast.forecastP50 !== null ? formatFinancialYen(String(forecast.forecastP50)) : '—'}
+            </div>
+          </div>
+          <div className="card">
+            <div className="summary-item__label">予測逆日歩(P90)</div>
+            <div className="summary-item__value">
+              {forecast.forecastP90 !== null ? formatFinancialYen(String(forecast.forecastP90)) : '—'}
+            </div>
+          </div>
+          <div className="card">
+            <div className="summary-item__label">優待価値−P90</div>
+            <div className="summary-item__value">{formatSignedYen(netP90)}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="card" style={{ marginTop: '0.75rem' }}>
+        <div className="summary-item__label">最大逆日歩(上限)</div>
+        <div className="summary-item__value">{maxGyakuhibu !== null ? formatFinancialYen(String(maxGyakuhibu)) : '—'}</div>
+        <p style={{ marginTop: '0.5rem' }}>
+          <span className={`risk-badge risk-badge--${forecast.forecastStatus}`}>
+            {FORECAST_STATUS_LABEL[forecast.forecastStatus]}
+          </span>
+        </p>
+        <p style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>{scenarioText(forecast)}</p>
+      </div>
+
+      <div className="section-heading">貸株超過率と充足率(全銘柄プール)</div>
+      <div className="card" style={{ height: 300 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <XAxis dataKey="label" type="category" allowDuplicatedCategory={false} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+            <YAxis yAxisId="left" domain={[0, 1]} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={40} />
+            <YAxis yAxisId="right" orientation="right" domain={[0, 1]} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={40} />
+            <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
+            {forecast.bin !== null && (
+              <ReferenceArea yAxisId="left" x1={forecast.bin} x2={forecast.bin} fill="var(--accent)" fillOpacity={0.12} ifOverflow="visible" />
+            )}
+            <Bar yAxisId="left" dataKey="pOccur" fill="var(--accent)" name="発生確率" barSize={28} />
+            <Line yAxisId="right" type="monotone" dataKey="fillP50" stroke="var(--down)" dot={false} name="充足率P50" />
+            <Line yAxisId="right" type="monotone" dataKey="fillP90" stroke="var(--up)" dot={false} name="充足率P90" />
+            <Scatter yAxisId="right" data={scatterData} dataKey="fillRatio" fill="var(--up)" name="自銘柄の実績" />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {sensitivityBins.length > 0 && maxGyakuhibu !== null && (
+        <>
+          <div className="section-heading">感度表(市場プールのみの値。銘柄実績とのブレンドは反映していません)</div>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>超過率レンジ</th>
+                  <th>発生確率</th>
+                  <th>予測P50</th>
+                  <th>予測P90</th>
+                  <th>優待価値との差</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sensitivityBins.map((bin) => {
+                  const p50 = bin.fillP50 * maxGyakuhibu;
+                  const p90 = bin.fillP90 * maxGyakuhibu;
+                  return (
+                    <tr key={bin.label} style={bin.label === forecast.bin ? { fontWeight: 700 } : undefined}>
+                      <td>{bin.label}</td>
+                      <td className="num">{formatPercent(bin.pOccur)}</td>
+                      <td className="num">{formatFinancialYen(String(p50))}</td>
+                      <td className="num">{formatFinancialYen(String(p90))}</td>
+                      <td className="num">{formatSignedYen(data.value - p90)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      <div className="section-heading">過去権利日</div>
+      {data.history.length === 0 ? (
+        <StatusNote kind="empty" message="過去の権利日実績がありません。" />
+      ) : (
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>権利日</th>
+                <th>融資残</th>
+                <th>貸株残</th>
+                <th>超過株数</th>
+                <th>超過率</th>
+                <th>実績逆日歩</th>
+                <th>上限</th>
+                <th>充足率</th>
+                <th>応札</th>
+                <th>規制</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.history.map((h: YutaiForecastHistoryPoint) => (
+                <tr key={h.rightsDate} style={!h.occurred ? { color: 'var(--text-muted)' } : undefined}>
+                  <td>{h.rightsDate}</td>
+                  <td className="num">{h.financingBalance.toLocaleString('ja-JP')}</td>
+                  <td className="num">{h.lendingBalance.toLocaleString('ja-JP')}</td>
+                  <td className="num">{h.excessShares.toLocaleString('ja-JP')}</td>
+                  <td className="num">
+                    {h.excessRatio !== null && Number.isFinite(h.excessRatio) ? h.excessRatio.toFixed(2) : '∞'}
+                  </td>
+                  <td className="num">{formatFinancialYen(String(h.totalAmount))}</td>
+                  <td className="num">
+                    {h.maxRateActual !== null ? formatFinancialYen(String(h.maxRateActual * data.unitShares)) : '—'}
+                  </td>
+                  <td className="num">{formatPercent(h.fillRatio)}</td>
+                  <td>{h.bidRank ?? '—'}</td>
+                  <td>{[h.restriction, h.emergencyMeasure].filter(Boolean).join('/') || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="section-heading">信用残トレンド(過去1年)</div>
+      {trendState.loading && <StatusNote kind="loading" message="読み込み中…" />}
+      {trendState.error && <StatusNote kind="error" message={`取得に失敗しました: ${trendState.error.message}`} />}
+      {trendState.data && trendState.data.points.length === 0 && (
+        <StatusNote kind="empty" message="まだ信用残データがありません(取得中です)。" />
+      )}
+      {trendState.data && trendState.data.points.length > 0 && (
+        <div className="card" style={{ height: 220 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={trendState.data.points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+              <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
+              <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
+              <Line type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
+              <Line type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
+              {data.history.map((h) => (
+                <ReferenceLine key={h.rightsDate} x={h.rightsDate} stroke="var(--up)" strokeDasharray="3 3" />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </>
+  );
+}
+```
+
+  **チャート描画は必ずブラウザで目視確認すること**(recharts特有の癖 -- カテゴリ軸上での`Scatter`の位置揃えや、`x1===x2`の`ReferenceArea`が実際に帯として見えるか -- はコード上の型チェックだけでは保証できない)。もし`Scatter`がカテゴリ軸上で正しく点を打たない・`ReferenceArea`が見えない等の問題が実機で見つかった場合は、無理に直そうとせず具体的な症状を報告に書くこと(Bar/Lineだけでも意味のあるグラフにはなる)。
+
+- [ ] `frontend/src/pages/YutaiDetailPage.tsx`: 「逆日歩リスク計算」の`<div className="section-heading">逆日歩リスク計算</div>`を以下に置き換える:
+
+```typescript
+<div className="section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+  <span>逆日歩リスク計算</span>
+  <Link to={`/yutai/${data.ticker}/forecast`} style={{ fontSize: '0.85rem', fontWeight: 400 }}>
+    予測を見る →
+  </Link>
+</div>
+```
+
+  (このファイルは既に`Link`をimport済み)
+
+- [ ] `frontend/src/main.tsx`: `import { YutaiForecastDetailPage } from './pages/YutaiForecastDetailPage';`を追加し、`<Route path="yutai/:ticker" element={<YutaiDetailPage />} />`の直後に`<Route path="yutai/:ticker/forecast" element={<YutaiForecastDetailPage />} />`を追加する
+- [ ] `frontend`ディレクトリで`npm run build`が型エラーなく通ることを確認
+- [ ] 手動確認(devサーバー起動+ブラウザ、または前タスクと同様にPlaywright等で): 予測未計算銘柄で「予測計算中」の表示になること、実績0件銘柄で曲線グラフがプール(Bar/Line)のみ表示されること、`YutaiDetailPage`の「逆日歩リスク計算」見出し右のリンクから遷移できること。9418(バックフィル済みならデプロイ後の本番で)の過去8/27の行の充足率が1.0になることは、デプロイ後の実データ確認事項としてTask 9のnotesに書き残す(ローカルではAPIサーバーが無いため確認できない)
 - [ ] `git commit -m "Add /yutai/:ticker/forecast detail page and link it from the yutai detail page"`
 
 ---
