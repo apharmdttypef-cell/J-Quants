@@ -29,6 +29,7 @@ process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:sec
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
+process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'JQuantsGyakuhibuForecast';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/reference-api/index') as {
@@ -409,4 +410,118 @@ test('GET /yutai/{ticker}/margin-trend returns the balance time series in ascend
       { date: '2026-08-05', financingBalance: 100, lendingBalance: 200 },
     ],
   });
+});
+
+test('GET /yutai/forecast joins master and forecast tables by ticker and filters by forecastStatus', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 5000 },
+        { ticker: '5678', companyName: 'B', content: 'B優待', value: 2000, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 100 },
+      ],
+    }) // yutai master scan
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '_POOL_', bins: [], computedAt: '2026-08-01' },
+        { ticker: '1234', rightsDate: '2026-08-27', scenario: 'last-rights', forecastStatus: 'danger', forecastP50: 1000, forecastP90: 4000, tickerSamples: 3, poolSamples: 400, computedAt: '2026-08-01' },
+        { ticker: '5678', rightsDate: '2026-08-27', scenario: 'none', forecastStatus: 'safe', forecastP50: 10, forecastP90: 50, tickerSamples: 0, poolSamples: 400, computedAt: '2026-08-01' },
+      ],
+    }); // gyakuhibu forecast scan
+
+  const result = await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: { forecastStatus: 'danger' } }));
+
+  const parsed = body(result) as {
+    tickers: Array<{ ticker: string; forecast: { forecastStatus: string; forecastP90: number } }>;
+    poolComputedAt: string;
+  };
+  expect(parsed.tickers).toHaveLength(1);
+  expect(parsed.tickers[0].ticker).toBe('1234');
+  expect(parsed.tickers[0].forecast.forecastStatus).toBe('danger');
+  expect(parsed.tickers[0].forecast.forecastP90).toBe(4000);
+  expect(parsed.poolComputedAt).toBe('2026-08-01');
+});
+
+test('GET /yutai/forecast marks a ticker with no forecast row yet as forecastStatus na', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '9999', companyName: 'C', content: 'C優待', value: 500, unitShares: 100, rightsMonths: [8], riskStatus: 'na', maxGyakuhibu: null }],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu forecast scan(_POOL_行も無い)
+
+  const result = await handler(makeEvent('GET /yutai/forecast', {}));
+
+  const parsed = body(result) as { tickers: Array<{ forecast: { forecastStatus: string } }>; poolComputedAt: unknown };
+  expect(parsed.tickers).toHaveLength(1);
+  expect(parsed.tickers[0].forecast.forecastStatus).toBe('na');
+  expect(parsed.poolComputedAt).toBeNull();
+});
+
+test('GET /yutai/{ticker}/forecast returns history including noGyakuhibu rows with excessRatio/fillRatio/occurred', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 5000 },
+    }) // master get
+    .mockResolvedValueOnce({
+      Item: { ticker: '1234', rightsDate: '2026-08-27', scenario: 'last-rights', forecastStatus: 'danger', forecastP50: 1000, forecastP90: 4000, tickerSamples: 1, poolSamples: 1 },
+    }) // forecast get
+    .mockResolvedValueOnce({
+      Item: { ticker: '_POOL_', bins: [{ label: '1〜2', lo: 1, hi: 2, n: 400, pOccur: 0.5, fillP50: 0.2, fillP90: 0.8, fillMean: 0.3 }], computedAt: '2026-08-01' },
+    }) // _POOL_ get
+    .mockResolvedValueOnce({
+      Items: [
+        {
+          ticker: '1234', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250, avgRate: 10, days: 1,
+          maxRateActual: 10, lendingPrice: 1700, bidRank: 'A', restriction: null, emergencyMeasure: null, totalAmount: 1000, enriched: true,
+        },
+        {
+          ticker: '1234', rightsDate: '2024-08-27', financingBalance: 200, lendingBalance: 150, avgRate: 0, days: 0,
+          maxRateActual: 5, noGyakuhibu: true, totalAmount: 0, enriched: true,
+        },
+      ],
+    }) // gyakuhibu actual query(権利日降順、noGyakuhibu行も含む)
+    .mockResolvedValueOnce({ Items: [] }); // margin balance query
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '1234' } }));
+
+  const parsed = body(result) as { history: Array<Record<string, unknown>>; poolBins: Array<Record<string, unknown>> };
+  expect(parsed.history).toHaveLength(2); // noGyakuhibu行も含めて2件(既存/yutai/{ticker}のrightsHistoryとは違い除外しない)
+
+  const occurredRow = parsed.history.find((h) => h.rightsDate === '2025-08-27')!;
+  expect(occurredRow.excessRatio).toBeCloseTo(1.5); // (250-100)/100
+  expect(occurredRow.excessShares).toBe(150); // 250-100
+  expect(occurredRow.fillRatio).toBe(1); // (10*1)/10
+  expect(occurredRow.occurred).toBe(true);
+
+  const noFeeRow = parsed.history.find((h) => h.rightsDate === '2024-08-27')!;
+  expect(noFeeRow.occurred).toBe(false);
+  expect(noFeeRow.excessRatio).toBeCloseTo(-0.25); // (150-200)/200
+
+  expect(parsed.poolBins).toHaveLength(1);
+  expect(parsed.poolBins[0]).toMatchObject({ label: '1〜2', n: 400 });
+});
+
+test('GET /yutai/{ticker}/forecast returns forecastStatus na and empty history/poolBins when nothing is computed yet', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '9999', companyName: 'C', content: 'C優待', value: 500, unitShares: 100, rightsMonths: [8], riskStatus: 'na', maxGyakuhibu: null },
+    }) // master get
+    .mockResolvedValueOnce({}) // forecast get(Item無し)
+    .mockResolvedValueOnce({}) // _POOL_ get(Item無し)
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual query
+    .mockResolvedValueOnce({ Items: [] }); // margin balance query
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '9999' } }));
+
+  const parsed = body(result) as { forecast: { forecastStatus: string }; poolBins: unknown[]; history: unknown[] };
+  expect(parsed.forecast.forecastStatus).toBe('na');
+  expect(parsed.poolBins).toEqual([]);
+  expect(parsed.history).toEqual([]);
+});
+
+test('GET /yutai/{ticker}/forecast returns 404 for an unknown ticker', async () => {
+  mockSend.mockResolvedValueOnce({}); // master get: Item無し
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '0000' } }));
+
+  expect((result as { statusCode: number }).statusCode).toBe(404);
 });

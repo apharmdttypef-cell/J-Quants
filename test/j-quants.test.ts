@@ -138,6 +138,8 @@ test('creates the HTTP API with tickers CRUD and the price/summary routes', () =
     'GET /yutai',
     'GET /yutai/{ticker}',
     'GET /yutai/{ticker}/margin-trend',
+    'GET /yutai/forecast',
+    'GET /yutai/{ticker}/forecast',
   ];
   for (const routeKey of routeKeys) {
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: routeKey });

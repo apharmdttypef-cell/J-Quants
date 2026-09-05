@@ -3,6 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getLocalTradingCalendar, isTradingDay, nextRightsDate } from '../shared/trading-calendar';
+import { excessRatio, fillRatio } from '../shared/gyakuhibu-forecast';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
@@ -11,6 +12,7 @@ const SECRET_ARN = process.env.SECRET_ARN!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
+const GYAKUHIBU_FORECAST_TABLE_NAME = process.env.GYAKUHIBU_FORECAST_TABLE_NAME!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 // 日付範囲(from/to)ではなく「保存済みの最新N件」で返す方式(12週間分の営業日 ≈ 60件)。
 // 日付境界で絞るより単純で、取得が数営業日遅れても直近チャートの見た目は変わらない。
@@ -243,6 +245,89 @@ async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
   return rows;
 }
 
+// JQuantsGyakuhibuForecastの全件スキャン(scanYutaiMasterと同じdo-whileページング)。
+// `_POOL_`行(全銘柄横断のプール曲線)も含めてそのまま返す。呼び出し側で
+// `ticker === '_POOL_'`により銘柄別の予測行と分離する。
+async function scanForecastTable(): Promise<Array<Record<string, unknown>>> {
+  const rows: Array<Record<string, unknown>> = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({ TableName: GYAKUHIBU_FORECAST_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
+    );
+    for (const item of result.Items ?? []) {
+      rows.push(item);
+    }
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  return rows;
+}
+
+// 逆日歩予測(lambda/shared/gyakuhibu-forecast.tsのForecastResult)のAPIレスポンス形状。
+// listYutaiForecast/getYutaiForecastの両方で共用する(予測行が未計算の銘柄は
+// defaultForecast()と同じ形を返す。フィールドを省略したり例外を投げたりしない)。
+interface ForecastFields {
+  scenario: string;
+  excessRatio: number | null;
+  bin: string | null;
+  pOccur: number | null;
+  fillP50: number | null;
+  fillP90: number | null;
+  fillMean: number | null;
+  forecastP50: number | null;
+  forecastP90: number | null;
+  forecastMean: number | null;
+  expectedNet: number | null;
+  forecastStatus: string;
+  tickerSamples: number;
+  poolSamples: number;
+}
+
+function defaultForecast(): ForecastFields {
+  return {
+    scenario: 'none',
+    excessRatio: null,
+    bin: null,
+    pOccur: null,
+    fillP50: null,
+    fillP90: null,
+    fillMean: null,
+    forecastP50: null,
+    forecastP90: null,
+    forecastMean: null,
+    expectedNet: null,
+    forecastStatus: 'na',
+    tickerSamples: 0,
+    poolSamples: 0,
+  };
+}
+
+// JQuantsGyakuhibuForecastの1行(GetCommand/ScanCommandの生Item)からForecastFieldsを
+// 組み立てる。行が無ければdefaultForecast()を返す(呼び出し側はforecastフィールドを
+// 省略したりクラッシュしたりしない)。
+function buildForecast(item: Record<string, unknown> | undefined): ForecastFields {
+  if (!item) return defaultForecast();
+  const fallback = defaultForecast();
+  return {
+    scenario: (item.scenario as string | undefined) ?? fallback.scenario,
+    excessRatio: (item.excessRatio as number | null | undefined) ?? fallback.excessRatio,
+    bin: (item.bin as string | null | undefined) ?? fallback.bin,
+    pOccur: (item.pOccur as number | null | undefined) ?? fallback.pOccur,
+    fillP50: (item.fillP50 as number | null | undefined) ?? fallback.fillP50,
+    fillP90: (item.fillP90 as number | null | undefined) ?? fallback.fillP90,
+    fillMean: (item.fillMean as number | null | undefined) ?? fallback.fillMean,
+    forecastP50: (item.forecastP50 as number | null | undefined) ?? fallback.forecastP50,
+    forecastP90: (item.forecastP90 as number | null | undefined) ?? fallback.forecastP90,
+    forecastMean: (item.forecastMean as number | null | undefined) ?? fallback.forecastMean,
+    expectedNet: (item.expectedNet as number | null | undefined) ?? fallback.expectedNet,
+    forecastStatus: (item.forecastStatus as string | undefined) ?? fallback.forecastStatus,
+    tickerSamples: (item.tickerSamples as number | undefined) ?? fallback.tickerSamples,
+    poolSamples: (item.poolSamples as number | undefined) ?? fallback.poolSamples,
+  };
+}
+
 // 当月末の最終営業日から2営業日前(受渡T+2)を「権利付き最終日」の目安として返す。
 // 月末が権利確定日の銘柄が多いため、このバナー1つを一覧全体で使い回す(銘柄ごとには計算しない)。
 function currentMonthLastTradableDate(calendar: { date: string; holDiv: string }[]): string {
@@ -251,24 +336,42 @@ function currentMonthLastTradableDate(calendar: { date: string; holDiv: string }
   return businessDays[cutoffIndex];
 }
 
+interface YutaiListFilters {
+  keyword?: string;
+  rightsDateFrom?: string;
+  rightsDateTo?: string;
+}
+
+// keyword/rightsDateFrom/rightsDateToによる絞り込み。listYutaiとlistYutaiForecastの
+// 両方から呼ばれる(riskStatus/forecastStatusによる絞り込みはハンドラごとに別条件のため含めない)。
+function passesYutaiFilters(
+  row: YutaiMasterRow,
+  rightsDate: string | undefined,
+  filters: YutaiListFilters,
+): boolean {
+  if (filters.keyword) {
+    const haystack = `${row.companyName ?? ''} ${row.content}`.toLowerCase();
+    if (!haystack.includes(filters.keyword)) return false;
+  }
+  if (filters.rightsDateFrom && (!rightsDate || rightsDate < filters.rightsDateFrom)) return false;
+  if (filters.rightsDateTo && (!rightsDate || rightsDate > filters.rightsDateTo)) return false;
+  return true;
+}
+
 async function listYutai(query: Record<string, string | undefined>): Promise<APIGatewayProxyResultV2> {
-  const rightsDateFrom = query.rightsDateFrom;
-  const rightsDateTo = query.rightsDateTo;
-  const keyword = query.keyword?.toLowerCase();
+  const filters: YutaiListFilters = {
+    keyword: query.keyword?.toLowerCase(),
+    rightsDateFrom: query.rightsDateFrom,
+    rightsDateTo: query.rightsDateTo,
+  };
   const riskStatusFilter = query.riskStatus && query.riskStatus !== 'all' ? query.riskStatus : undefined;
 
   const rows = await scanYutaiMaster();
 
   const items = [];
   for (const row of rows) {
-    if (keyword) {
-      const haystack = `${row.companyName ?? ''} ${row.content}`.toLowerCase();
-      if (!haystack.includes(keyword)) continue;
-    }
-
     const rightsDate = nextRightsDate(row.rightsMonths);
-    if (rightsDateFrom && (!rightsDate || rightsDate < rightsDateFrom)) continue;
-    if (rightsDateTo && (!rightsDate || rightsDate > rightsDateTo)) continue;
+    if (!passesYutaiFilters(row, rightsDate, filters)) continue;
 
     if (riskStatusFilter && row.riskStatus !== riskStatusFilter) continue;
 
@@ -291,6 +394,56 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
   return jsonResponse(200, {
     tickers: items,
     currentMonthLastTradableDate: currentMonthLastTradableDate(monthCalendar),
+  });
+}
+
+async function listYutaiForecast(query: Record<string, string | undefined>): Promise<APIGatewayProxyResultV2> {
+  const filters: YutaiListFilters = {
+    keyword: query.keyword?.toLowerCase(),
+    rightsDateFrom: query.rightsDateFrom,
+    rightsDateTo: query.rightsDateTo,
+  };
+  const forecastStatusFilter = query.forecastStatus && query.forecastStatus !== 'all' ? query.forecastStatus : undefined;
+
+  // 呼び出し順はテストのmockResolvedValueOnce順(master scan → forecast scan)と
+  // 一致させるため、この順で逐次await(Promise.allは使わない)。
+  const masterRows = await scanYutaiMaster();
+  const forecastRows = await scanForecastTable();
+
+  const forecastByTicker = new Map(
+    forecastRows.filter((r) => r.ticker !== '_POOL_').map((r) => [r.ticker as string, r]),
+  );
+  const poolRow = forecastRows.find((r) => r.ticker === '_POOL_');
+
+  const items = [];
+  for (const row of masterRows) {
+    const rightsDate = nextRightsDate(row.rightsMonths);
+    if (!passesYutaiFilters(row, rightsDate, filters)) continue;
+
+    const forecast = buildForecast(forecastByTicker.get(row.ticker));
+    if (forecastStatusFilter && forecast.forecastStatus !== forecastStatusFilter) continue;
+
+    items.push({
+      ticker: row.ticker,
+      companyName: row.companyName,
+      content: row.content,
+      value: row.value,
+      rightsDate: rightsDate ?? null,
+      riskStatus: row.riskStatus,
+      maxGyakuhibu: row.maxGyakuhibu,
+      forecast,
+    });
+  }
+
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+  const monthCalendar = getLocalTradingCalendar(monthStart, monthEnd);
+
+  return jsonResponse(200, {
+    tickers: items,
+    currentMonthLastTradableDate: currentMonthLastTradableDate(monthCalendar),
+    poolComputedAt: (poolRow?.computedAt as string | undefined) ?? null,
   });
 }
 
@@ -399,6 +552,90 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
   });
 }
 
+async function getYutaiForecast(ticker: string): Promise<APIGatewayProxyResultV2> {
+  const master = await getYutaiMaster(ticker);
+  if (!master) return jsonResponse(404, { message: `Unknown yutai ticker: ${ticker}` });
+
+  // 呼び出し順はテストのmockResolvedValueOnce順(forecast get → _POOL_ get → actual query →
+  // margin query)と一致させるため、この順で逐次await(Promise.allは使わない)。
+  const forecastResult = await ddbDocClient.send(
+    new GetCommand({ TableName: GYAKUHIBU_FORECAST_TABLE_NAME, Key: { ticker } }),
+  );
+  const poolResult = await ddbDocClient.send(
+    new GetCommand({ TableName: GYAKUHIBU_FORECAST_TABLE_NAME, Key: { ticker: '_POOL_' } }),
+  );
+  const actualResult = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: GYAKUHIBU_ACTUAL_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      ScanIndexForward: false,
+    }),
+  );
+  const marginResult = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: MARGIN_BALANCE_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      ScanIndexForward: false,
+      Limit: 1,
+    }),
+  );
+
+  const forecast = buildForecast(forecastResult.Item);
+
+  // 既存gyakuhibuHistory(/yutai/{ticker}のrightsHistory)と違い、noGyakuhibu行も
+  // 除外せず含める(occurred: falseとして「その権利日は確認済みで発生しなかった」ことを表す)。
+  const history = (actualResult.Items ?? []).map((item) => {
+    const financingBalance = typeof item.financingBalance === 'number' ? item.financingBalance : 0;
+    const lendingBalance = typeof item.lendingBalance === 'number' ? item.lendingBalance : 0;
+    return {
+      rightsDate: item.rightsDate,
+      excessRatio: excessRatio(financingBalance, lendingBalance),
+      excessShares: lendingBalance - financingBalance,
+      financingBalance,
+      lendingBalance,
+      lendingPrice: item.lendingPrice ?? null,
+      fillRatio: fillRatio(item.avgRate ?? 0, item.days ?? 0, item.maxRateActual ?? null),
+      totalAmount: item.totalAmount ?? 0,
+      maxRateActual: item.maxRateActual ?? null,
+      bidRank: item.bidRank ?? null,
+      restriction: item.restriction ?? null,
+      emergencyMeasure: item.emergencyMeasure ?? null,
+      occurred: item.noGyakuhibu !== true,
+    };
+  });
+
+  const poolBins = poolResult.Item?.bins ?? [];
+
+  const marginLatest = marginResult.Items?.[0];
+  const marginTrend = marginLatest
+    ? {
+        latest: {
+          date: marginLatest.date,
+          financingBalance: marginLatest.financingBalance,
+          lendingBalance: marginLatest.lendingBalance,
+        },
+      }
+    : { latest: null };
+
+  const rightsDate = nextRightsDate(master.rightsMonths);
+
+  return jsonResponse(200, {
+    ticker: master.ticker,
+    companyName: master.companyName ?? null,
+    content: master.content,
+    value: master.value,
+    unitShares: master.unitShares,
+    rightsDate: rightsDate ?? null,
+    maxGyakuhibu: master.maxGyakuhibu,
+    forecast,
+    history,
+    poolBins,
+    marginTrend,
+  });
+}
+
 const MARGIN_TREND_RANGE_DAYS = 365;
 
 async function getMarginTrend(ticker: string): Promise<APIGatewayProxyResultV2> {
@@ -445,6 +682,10 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return ticker ? getYutaiDetail(ticker) : jsonResponse(400, { message: 'Missing ticker' });
     case 'GET /yutai/{ticker}/margin-trend':
       return ticker ? getMarginTrend(ticker) : jsonResponse(400, { message: 'Missing ticker' });
+    case 'GET /yutai/forecast':
+      return listYutaiForecast(event.queryStringParameters ?? {});
+    case 'GET /yutai/{ticker}/forecast':
+      return ticker ? getYutaiForecast(ticker) : jsonResponse(400, { message: 'Missing ticker' });
     default:
       return jsonResponse(404, { message: 'Not found' });
   }

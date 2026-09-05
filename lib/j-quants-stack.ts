@@ -361,6 +361,7 @@ export class JQuantsStack extends cdk.Stack {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
+        GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName,
       },
     });
 
@@ -371,6 +372,7 @@ export class JQuantsStack extends cdk.Stack {
     this.yutaiMasterTable.grantReadData(referenceApiFn);
     this.marginBalanceTable.grantReadData(referenceApiFn);
     this.gyakuhibuActualTable.grantReadData(referenceApiFn);
+    this.gyakuhibuForecastTable.grantReadData(referenceApiFn);
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 
@@ -465,6 +467,16 @@ function handler(event) {
     });
     this.api.addRoutes({
       path: '/yutai/{ticker}/margin-trend',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: referenceApiIntegration,
+    });
+    this.api.addRoutes({
+      path: '/yutai/forecast',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: referenceApiIntegration,
+    });
+    this.api.addRoutes({
+      path: '/yutai/{ticker}/forecast',
       methods: [apigwv2.HttpMethod.GET],
       integration: referenceApiIntegration,
     });
