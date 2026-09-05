@@ -528,19 +528,161 @@ handler:
 - Modify: `lib/j-quants-stack.ts`
 - Modify: `test/reference-api.test.ts`, `test/j-quants.test.ts`
 
+**Interfaces(既存`lambda/reference-api/index.ts`への追加。Task 3の`excessRatio`/`fillRatio`をそのまま輸入する):**
+```typescript
+import { excessRatio, fillRatio } from '../shared/gyakuhibu-forecast';
+```
+
 - [ ] **Step 1: 失敗するテストを書く**
-  - `GET /yutai/forecast` が master と forecast を ticker で結合し、`forecastStatus` フィルタが効く
-  - `GET /yutai/{ticker}/forecast` が `history`(noGyakuhibu 行を含む、`excessRatio`/`fillRatio` 付き)と `poolBins` を返す
-  - forecast 行が無い銘柄は `forecast.forecastStatus === 'na'`
+
+`test/reference-api.test.ts`は既存の`mockSend`/`makeEvent`/`body`ヘルパーをそのまま使う。呼び出し順は必ず`mockSend`が呼ばれる順(下記コメント参照)。`process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'JQuantsGyakuhibuForecast';`をファイル先頭のprocess.env設定群に追加すること。
+
+```typescript
+test('GET /yutai/forecast joins master and forecast tables by ticker and filters by forecastStatus', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 5000 },
+        { ticker: '5678', companyName: 'B', content: 'B優待', value: 2000, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 100 },
+      ],
+    }) // yutai master scan
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '_POOL_', bins: [], computedAt: '2026-08-01' },
+        { ticker: '1234', rightsDate: '2026-08-27', scenario: 'last-rights', forecastStatus: 'danger', forecastP50: 1000, forecastP90: 4000, tickerSamples: 3, poolSamples: 400, computedAt: '2026-08-01' },
+        { ticker: '5678', rightsDate: '2026-08-27', scenario: 'none', forecastStatus: 'safe', forecastP50: 10, forecastP90: 50, tickerSamples: 0, poolSamples: 400, computedAt: '2026-08-01' },
+      ],
+    }); // gyakuhibu forecast scan
+
+  const result = await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: { forecastStatus: 'danger' } }));
+
+  const parsed = body(result) as {
+    tickers: Array<{ ticker: string; forecast: { forecastStatus: string; forecastP90: number } }>;
+    poolComputedAt: string;
+  };
+  expect(parsed.tickers).toHaveLength(1);
+  expect(parsed.tickers[0].ticker).toBe('1234');
+  expect(parsed.tickers[0].forecast.forecastStatus).toBe('danger');
+  expect(parsed.tickers[0].forecast.forecastP90).toBe(4000);
+  expect(parsed.poolComputedAt).toBe('2026-08-01');
+});
+
+test('GET /yutai/forecast marks a ticker with no forecast row yet as forecastStatus na', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '9999', companyName: 'C', content: 'C優待', value: 500, unitShares: 100, rightsMonths: [8], riskStatus: 'na', maxGyakuhibu: null }],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu forecast scan(_POOL_行も無い)
+
+  const result = await handler(makeEvent('GET /yutai/forecast', {}));
+
+  const parsed = body(result) as { tickers: Array<{ forecast: { forecastStatus: string } }>; poolComputedAt: unknown };
+  expect(parsed.tickers).toHaveLength(1);
+  expect(parsed.tickers[0].forecast.forecastStatus).toBe('na');
+  expect(parsed.poolComputedAt).toBeNull();
+});
+
+test('GET /yutai/{ticker}/forecast returns history including noGyakuhibu rows with excessRatio/fillRatio/occurred', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 5000 },
+    }) // master get
+    .mockResolvedValueOnce({
+      Item: { ticker: '1234', rightsDate: '2026-08-27', scenario: 'last-rights', forecastStatus: 'danger', forecastP50: 1000, forecastP90: 4000, tickerSamples: 1, poolSamples: 1 },
+    }) // forecast get
+    .mockResolvedValueOnce({
+      Item: { ticker: '_POOL_', bins: [{ label: '1〜2', lo: 1, hi: 2, n: 400, pOccur: 0.5, fillP50: 0.2, fillP90: 0.8, fillMean: 0.3 }], computedAt: '2026-08-01' },
+    }) // _POOL_ get
+    .mockResolvedValueOnce({
+      Items: [
+        {
+          ticker: '1234', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250, avgRate: 10, days: 1,
+          maxRateActual: 10, lendingPrice: 1700, bidRank: 'A', restriction: null, emergencyMeasure: null, totalAmount: 1000, enriched: true,
+        },
+        {
+          ticker: '1234', rightsDate: '2024-08-27', financingBalance: 200, lendingBalance: 150, avgRate: 0, days: 0,
+          maxRateActual: 5, noGyakuhibu: true, totalAmount: 0, enriched: true,
+        },
+      ],
+    }) // gyakuhibu actual query(権利日降順、noGyakuhibu行も含む)
+    .mockResolvedValueOnce({ Items: [] }); // margin balance query
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '1234' } }));
+
+  const parsed = body(result) as { history: Array<Record<string, unknown>>; poolBins: Array<Record<string, unknown>> };
+  expect(parsed.history).toHaveLength(2); // noGyakuhibu行も含めて2件(既存/yutai/{ticker}のrightsHistoryとは違い除外しない)
+
+  const occurredRow = parsed.history.find((h) => h.rightsDate === '2025-08-27')!;
+  expect(occurredRow.excessRatio).toBeCloseTo(1.5); // (250-100)/100
+  expect(occurredRow.excessShares).toBe(150); // 250-100
+  expect(occurredRow.fillRatio).toBe(1); // (10*1)/10
+  expect(occurredRow.occurred).toBe(true);
+
+  const noFeeRow = parsed.history.find((h) => h.rightsDate === '2024-08-27')!;
+  expect(noFeeRow.occurred).toBe(false);
+  expect(noFeeRow.excessRatio).toBeCloseTo(-0.25); // (150-200)/200
+
+  expect(parsed.poolBins).toHaveLength(1);
+  expect(parsed.poolBins[0]).toMatchObject({ label: '1〜2', n: 400 });
+});
+
+test('GET /yutai/{ticker}/forecast returns forecastStatus na and empty history/poolBins when nothing is computed yet', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '9999', companyName: 'C', content: 'C優待', value: 500, unitShares: 100, rightsMonths: [8], riskStatus: 'na', maxGyakuhibu: null },
+    }) // master get
+    .mockResolvedValueOnce({}) // forecast get(Item無し)
+    .mockResolvedValueOnce({}) // _POOL_ get(Item無し)
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual query
+    .mockResolvedValueOnce({ Items: [] }); // margin balance query
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '9999' } }));
+
+  const parsed = body(result) as { forecast: { forecastStatus: string }; poolBins: unknown[]; history: unknown[] };
+  expect(parsed.forecast.forecastStatus).toBe('na');
+  expect(parsed.poolBins).toEqual([]);
+  expect(parsed.history).toEqual([]);
+});
+
+test('GET /yutai/{ticker}/forecast returns 404 for an unknown ticker', async () => {
+  mockSend.mockResolvedValueOnce({}); // master get: Item無し
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '0000' } }));
+
+  expect(result.statusCode).toBe(404);
+});
+```
+
 - [ ] **Step 2:** FAIL 確認
 - [ ] **Step 3: 実装**
-  - `listYutai`のフィルタ部分(`rightsDateFrom/To`, `keyword`)を関数に切り出して共用する
-  - `listYutaiForecast`: `scanYutaiMaster` + `scanForecastTable` → Mapで結合。`forecastStatus`フィルタ。`_POOL_`行の`computedAt`を`poolComputedAt`として返す
-  - `getYutaiForecast`: master Get + forecast Get + `_POOL_` Get + actual Query(全期間) + margin Query(Limit 1)。`history`は`toSample`と同じ式で`excessRatio`/`fillRatio`を付け、`occurred = !noGyakuhibu`
-  - switch文に2ルート追加。`GET /yutai/forecast`は`GET /yutai/{ticker}`より**前**に置く必要はない(routeKeyが違う)が、可読性のため隣接させる
+  - `lambda/reference-api/index.ts`の先頭に`import { excessRatio, fillRatio } from '../shared/gyakuhibu-forecast';`を追加
+  - 環境変数`GYAKUHIBU_FORECAST_TABLE_NAME`を追加
+  - `listYutai`のフィルタ部分(`keyword`・`rightsDateFrom`/`rightsDateTo`)を`passesYutaiFilters(row, rightsDate, filters)`のような関数に切り出し、`listYutai`と`listYutaiForecast`の両方から呼ぶ(`riskStatus`/`forecastStatus`フィルタはそれぞれ別条件なので切り出し関数には含めない)
+  - `scanForecastTable()`: `GYAKUHIBU_FORECAST_TABLE_NAME`の全件スキャン(`scanYutaiMaster`と同じdo-whileページング)。`_POOL_`行も含めてそのまま返す(呼び出し側で`ticker === '_POOL_'`により分離する)
+  - `listYutaiForecast(query)`:
+    1. `masterRows = await scanYutaiMaster()`、`forecastRows = await scanForecastTable()`(この順で逐次await。呼び出し順がテストの`mockResolvedValueOnce`順と一致する)
+    2. `forecastByTicker = new Map(forecastRows.filter(r => r.ticker !== '_POOL_').map(r => [r.ticker, r]))`、`poolRow = forecastRows.find(r => r.ticker === '_POOL_')`
+    3. `masterRows`をループし、`passesYutaiFilters`と`keyword`/`rightsDateFrom`/`rightsDateTo`で絞り込み、`forecastByTicker.get(row.ticker)`が無ければ`{ scenario: 'none', excessRatio: null, bin: null, pOccur: null, fillP50: null, fillP90: null, forecastP50: null, forecastP90: null, forecastMean: null, expectedNet: null, forecastStatus: 'na', tickerSamples: 0, poolSamples: 0 }`をデフォルト値として使う。`query.forecastStatus`が`'all'`でなければ、確定した`forecast.forecastStatus`と一致しない行を除外する
+    4. レスポンス: `{ currentMonthLastTradableDate, poolComputedAt: poolRow?.computedAt ?? null, tickers: items }`(`currentMonthLastTradableDate`は既存`listYutai`と同じ計算をそのまま再利用)
+  - `getYutaiForecast(ticker)`:
+    1. `master = await getYutaiMaster(ticker)`。無ければ404(既存`getYutaiDetail`と同じ)
+    2. 以下を**この順で逐次await**する(テストの`mockResolvedValueOnce`順と一致させるため、`Promise.all`は使わない): `forecastResult = GetCommand({ TableName: GYAKUHIBU_FORECAST_TABLE_NAME, Key: { ticker } })`、`poolResult = GetCommand({ TableName: GYAKUHIBU_FORECAST_TABLE_NAME, Key: { ticker: '_POOL_' } })`、`actualResult = QueryCommand({ TableName: GYAKUHIBU_ACTUAL_TABLE_NAME, KeyConditionExpression: 'ticker = :ticker', ExpressionAttributeValues: { ':ticker': ticker }, ScanIndexForward: false })`(既存`gyakuhibuHistory`と違い`noGyakuhibu`行を除外しない)、`marginResult = QueryCommand({ TableName: MARGIN_BALANCE_TABLE_NAME, ..., ScanIndexForward: false, Limit: 1 })`
+    3. `forecast`オブジェクトは`listYutaiForecast`と同じデフォルト値ロジックを共用する(`forecastResult.Item`が無ければ`na`/`none`のデフォルト)
+    4. `history = (actualResult.Items ?? []).map(item => ({ rightsDate, excessRatio: excessRatio(financingBalance, lendingBalance), excessShares: lendingBalance - financingBalance, financingBalance, lendingBalance, lendingPrice: item.lendingPrice ?? null, fillRatio: fillRatio(item.avgRate ?? 0, item.days ?? 0, item.maxRateActual ?? null), totalAmount: item.totalAmount ?? 0, maxRateActual: item.maxRateActual ?? null, bidRank: item.bidRank ?? null, restriction: item.restriction ?? null, emergencyMeasure: item.emergencyMeasure ?? null, occurred: item.noGyakuhibu !== true }))`(`financingBalance`/`lendingBalance`は`typeof item.X === 'number' ? item.X : 0`で正規化してから計算に使う)
+    5. `poolBins = poolResult.Item?.bins ?? []`
+    6. `marginTrend = marginResult.Items?.[0] ? { latest: { date: ..., financingBalance: ..., lendingBalance: ... } } : { latest: null }`
+    7. レスポンス: `{ ticker, companyName, content, value, unitShares, rightsDate, maxGyakuhibu: master.maxGyakuhibu, forecast, history, poolBins, marginTrend }`
+  - switch文に2ルート追加。`GET /yutai/forecast`は`GET /yutai/{ticker}`より**前**に置く必要はない(routeKeyが違う)が、可読性のため隣接させる:
+    ```typescript
+    case 'GET /yutai/forecast':
+      return listYutaiForecast(event.queryStringParameters ?? {});
+    case 'GET /yutai/{ticker}/forecast':
+      return ticker ? getYutaiForecast(ticker) : jsonResponse(400, { message: 'Missing ticker' });
+    ```
 - [ ] **Step 4:** PASS
-- [ ] **Step 5: CDK** — `addRoutes` 2本、`routeKeys`配列に追加。forecast テーブルの read 権限を`referenceApiFn`に付与、環境変数追加
-- [ ] **Step 6:** `git commit -m "Add GET /yutai/forecast and GET /yutai/{ticker}/forecast"`
+- [ ] **Step 5: CDK** — `lib/j-quants-stack.ts`の`referenceApiFn`定義に`GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName`を環境変数追加し、`this.gyakuhibuForecastTable.grantReadData(referenceApiFn);`を追加。`this.api.addRoutes({ path: '/yutai/forecast', methods: [apigwv2.HttpMethod.GET], integration: referenceApiIntegration })`と`path: '/yutai/{ticker}/forecast'`の2つを、既存の`/yutai/{ticker}/margin-trend`ルート追加の直後に追加する。`test/j-quants.test.ts`の`'creates the HTTP API with tickers CRUD and the price/summary routes'`テスト内の既存`routeKeys`配列に`'GET /yutai/forecast'`と`'GET /yutai/{ticker}/forecast'`を追加する(新規テストではなく既存配列への追記でよい)
+- [ ] **Step 6:** `npx jest` 全体PASS
+- [ ] **Step 7:** `git commit -m "Add GET /yutai/forecast and GET /yutai/{ticker}/forecast"`
 
 ---
 
