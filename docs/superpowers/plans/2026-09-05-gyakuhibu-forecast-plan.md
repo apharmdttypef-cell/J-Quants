@@ -28,7 +28,7 @@
 ```typescript
 export interface GyakuhibuActualPoint {
   rightsDate: string;
-  occurred: boolean;          // 品貸料率が'-'以外
+  occurred: boolean;          // 品貸料率が数値としてparseできる('-'・'*****'等の非数値マーカーはfalse)
   totalAmount: number;        // occurred=false なら 0
   days: number;               // occurred=false なら 0
   avgRate: number;            // occurred=false なら 0
@@ -44,42 +44,68 @@ export function splitCsvLine(line: string): string[];   // クォート内カン
 export function parseTaisyakuCsv(csv: string, rightsDate: string, unitShares: number, ticker?: string): GyakuhibuActualPoint | undefined;
 ```
 
-- [ ] **Step 1: 失敗するテストを書く**(Task 0の実列名で置き換えること)
+- [ ] **Step 1: 失敗するテストを書く**
+
+Task 0(`docs/superpowers/notes/2026-09-05-taisyaku-csv-balance-columns.md`)で実機確認した実物のヘッダー・行をそのまま使う(全角括弧・全27列)。
 
 ```typescript
-const HEADER = '"申込日","融資残高","貸株残高","差引残高","貸借値段(円)","品貸料率(品貸日数分/円)","品貸日数","最高料率(品貸日数分/円)","応札ランク","制限措置","臨時措置"';
+const HEADER = '"銘柄コード","銘柄名","直後基準日","直近制限措置","直近臨時措置","直近特別措置","申込日","市場区分","貸借区分","融資新規（株）","融資返済（株）","融資残高（株）","貸株新規（株）","貸株返済（株）","貸株残高（株）","差引残高（株）","貸借値段（円）","品貸料率（品貸日数分/円）","品貸日数","品貸料率（年率換算/％）","最高料率（品貸日数分/円）","最低料率（品貸日数分/円）","応札ランク","制限措置","臨時措置","特別措置","新株引受・権利入札"';
 
+// splitCsvLineのクォート考慮パーサ自体は、実機データ(3ヶ月・63行)ではカンマ区切りの
+// 数値を一度も観測できなかったため防御的な実装(将来カンマ区切りの列が来ても壊れない)。
+// このテストは実在パターンではなく、想定される入力形への耐性を確認するもの。
 test('splitCsvLine keeps thousands separators inside quoted fields', () => {
   expect(splitCsvLine('"2026-08-27","1,234,567","2,000,000"')).toEqual(['2026-08-27', '1,234,567', '2,000,000']);
 });
 
 test('parseTaisyakuCsv returns balances and the actual max rate alongside the fee', () => {
-  const csv = [HEADER, '"2026-08-27","75,000","195,000","-120,000","1,752.00","14.40","1","14.40","A","",""'].join('\n');
+  // 実物(9418、2026-08-27、権利付き最終日): 融資残高1,100/貸株残高2,039,300/差引残高-2,038,200
+  // (=融資残高-貸株残高。excessRatioの符号とは逆なので自前計算に使わない)/
+  // 貸借値段1,752円/品貸料率14.40円(=最高料率と一致、応札ランクA=最も逼迫)。
+  const row = '"9418","","20270228","","","","20260827","東証","貸借","0","500","1100","1785200","1800","2039300","-2038200","1752.00","14.40","1","300.00","14.40","0.00","A","","","",""';
+  const csv = [HEADER, row].join('\n');
   expect(parseTaisyakuCsv(csv, '2026-08-27', 100)).toEqual({
     rightsDate: '2026-08-27', occurred: true, totalAmount: 1440, days: 1, avgRate: 14.4,
-    financingBalance: 75000, lendingBalance: 195000, lendingPrice: 1752, maxRateActual: 14.4,
+    financingBalance: 1100, lendingBalance: 2039300, lendingPrice: 1752, maxRateActual: 14.4,
     bidRank: 'A', restriction: null, emergencyMeasure: null,
   });
 });
 
 test('parseTaisyakuCsv returns occurred=false with balances when the fee is a dash', () => {
-  const csv = [HEADER, '"2026-08-27","75,000","60,000","15,000","1,752.00","-","1","3.60","","",""'].join('\n');
-  const point = parseTaisyakuCsv(csv, '2026-08-27', 100);
+  // 実物(9418、2026-08-20、通常日): 品貸料率"-"(品薄なし)。応札ランクも"-"(=null)。
+  const row = '"9418","","20270228","","","","20260820","東証","貸借","0","5300","25800","0","2000","21900","3900","1775.00","-","1","-","7.20","0.00","-","","","",""';
+  const csv = [HEADER, row].join('\n');
+  const point = parseTaisyakuCsv(csv, '2026-08-20', 100);
   expect(point?.occurred).toBe(false);
   expect(point?.totalAmount).toBe(0);
-  expect(point?.lendingBalance).toBe(60000);
-  expect(point?.maxRateActual).toBe(3.6);
+  expect(point?.lendingBalance).toBe(21900);
+  expect(point?.maxRateActual).toBe(7.2);
+  expect(point?.bidRank).toBeNull();
+});
+
+test('parseTaisyakuCsv treats a non-numeric "*****" fee the same as a dash (occurred=false)', () => {
+  // 実機で発見した想定外パターン(9418、2026-08-21): 融資残高=貸株残高=26,100で差引残高が
+  // ちょうど0になる境界日にだけ、品貸料率・年率換算の両方が"-"ではなく"*****"になる
+  // (Task 0のnotes参照、63行中1行のみ観測)。Number('*****')はNaNなので、
+  // 「'-'と等しいか」ではなく「数値としてparseできるか」で判定しないとoccurred:trueに
+  // 誤判定され、totalAmount等がNaNになる。最高料率自体は通常通りの数値のまま。
+  const row = '"9418","","20270228","","","","20260821","東証","貸借","16800","16500","26100","10300","6100","26100","0","1755.00","*****","1","*****","7.20","0.00","-","","","",""';
+  const csv = [HEADER, row].join('\n');
+  const point = parseTaisyakuCsv(csv, '2026-08-21', 100);
+  expect(point?.occurred).toBe(false);
+  expect(point?.totalAmount).toBe(0);
+  expect(point?.maxRateActual).toBe(7.2);
 });
 
 test('parseTaisyakuCsv still returns undefined when the rights date row is absent', () => { /* 既存テストを流用 */ });
 ```
 
-既存の「品貸料率が`-`なら`undefined`」を期待するテストは**`occurred: false`を期待する形に書き換える**。
-
 - [ ] **Step 2:** `npx jest test/taisyaku-client.test.ts` → FAIL を確認
 - [ ] **Step 3: 実装**
   - `splitCsvLine`: 1文字ずつ走査し、`"`でinQuoteをトグル、inQuote外の`,`で分割。各フィールドは`stripQuotes`
-  - 数値変換ヘルパー `toNumber(field): number | null`(カンマ除去→`Number`、空/`-`/NaNは`null`)
+  - 数値変換ヘルパー `toNumber(field): number | null`(カンマ除去→trim後に空文字列なら`null`を即返す — `Number('')`は`NaN`ではなく`0`になるJSの罠があるため、空文字列は先に弾く。それ以外は`Number()`に通し、結果が`NaN`なら`null`。`-`・`*****`はいずれも`Number()`で`NaN`になるためこれで`null`になる)
+  - 文字列フィールド用ヘルパー `blankToNull(field): string | null`(空文字列または`-`なら`null`、それ以外はそのまま。`応札ランク`・`制限措置`・`臨時措置`に使う — `応札ランク`の「未実施」は`-`、`制限措置`等の「無し」は空文字列と実機で表記が異なるため、両方を`null`に丸める共通ヘルパーにする)
+  - **`occurred`判定**: `品貸料率(品貸日数分/円)`列の生文字列を`toNumber`に通した結果が`null`(`NaN`)なら`occurred: false`。文字列が`'-'`かどうかの直接比較はしない(実機で`'*****'`という別の非数値マーカーも観測されているため、NaN判定に一本化して未知のマーカーにも耐えるようにする)
   - ヘッダー探索: `融資`と`残高`を両方含む列 / `貸株`と`残高`を両方含む列 / `貸借値段` / `最高料率` / `応札` / `制限` / `臨時`。`融資`・`貸株`の残高列が見つからなければ例外(ヘッダー変化に気づくため)
   - 権利日行が見つかったら残高2列が数値であることを必須にし、どちらかが`null`なら`undefined`を返して警告ログ
 - [ ] **Step 4:** テスト PASS
