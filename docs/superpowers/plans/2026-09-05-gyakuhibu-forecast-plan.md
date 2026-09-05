@@ -1481,11 +1481,80 @@ export function YutaiForecastDetailPage() {
 
 **Files:** `README.md`, `docs/superpowers/notes/2026-09-05-taisyaku-csv-balance-columns.md`(Task 0で作成済み、実装後の追記)
 
-- [ ] アーキテクチャ図に`GyakuhibuForecastBatchFunction`を追加(JST 18:40)
-- [ ] テーブル一覧に`JQuantsGyakuhibuForecast`、`JQuantsGyakuhibuActual`の追加列を記載
-- [ ] Lambda一覧・API一覧・フロント画面一覧に追加
-- [ ] 「予測ロジック」節: ビン定義・縮小推定(K=4)・シナリオ・判定式を設計書から要約。「最高料率は自前計算ではなくCSVの実値(倍率適用済み)を分母にする」ことを明記
-- [ ] 実機メモ: バックフィルに要した日数、ビン別サンプル数の実測、`MAX_GYAKUHIBU_FETCHES_PER_RUN`を戻したこと
+この機能はまだ本番デプロイされていない(このプランはワークツリー内で実装中)。「実機メモ」は実測値を記載できないため、後日デプロイ・バックフィル完了後に追記する前提の文言にする(存在しない数値を捏造しない)。
+
+- [ ] `README.md`のアーキテクチャ図(```で囲まれたコードブロック)の`YutaiRiskPrecomputeBatchFunction`のブロック(`EventBridge(毎日 JST18:20)`〜`→ JQuantsYutaiMaster に riskStatus/maxGyakuhibu/maxRate/days を書き戻す`)の直後、`ブラウザ`ブロックの直前に追加:
+
+```
+EventBridge(毎日 JST18:40、YutaiRiskPrecomputeBatchFunctionの20分後)
+  → GyakuhibuForecastBatchFunction(Lambda)
+      - JQuantsYutaiMaster・JQuantsGyakuhibuActual(全件)・JQuantsMarginBalance(直近値)を読み、
+        貸株超過率→充足率の実績分布(全銘柄プール+銘柄別)から次回権利日の予測逆日歩を算出
+      → JQuantsGyakuhibuForecast に upsert(銘柄行 + 全銘柄横断のプール曲線行`_POOL_`)
+```
+
+- [ ] テーブル一覧(`### データ`)の`JQuantsGyakuhibuActual`行を以下に置き換え(既存列はそのまま、追加列の説明を追記):
+
+```
+| `JQuantsGyakuhibuActual` | PK `ticker` / SK `rightsDate` | taisyaku.jpから取得した権利日ごとの実績逆日歩(`totalAmount` / `days` / `avgRate`)。直近3年分のみ存在しうる。2026-09-05以降、逆日歩予測機能のため残高・レート・措置列(`financingBalance`/`lendingBalance`/`lendingPrice`/`maxRateActual`/`bidRank`/`restriction`/`emergencyMeasure`)と取得済みフラグ`enriched`を追加。拡張前からの既存行は`GyakuhibuHistoryBatchFunction`が`enriched`無しの行として検知し順次バックフィルする |
+```
+
+  `JQuantsGyakuhibuActual`行の直後に新しい行を追加:
+
+```
+| `JQuantsGyakuhibuForecast` | PK `ticker` | 逆日歩予測(貸株超過率→充足率の実績分布ベース)の日次事前計算結果。銘柄ごとの予測分布・判定(`forecastStatus`)に加え、全銘柄横断の統計曲線を持つ特殊行(`ticker`=`_POOL_`)。`GyakuhibuForecastBatchFunction`が毎日全件洗い替えする派生データ |
+```
+
+  テーブル一覧直後の「`cdk destroy` してもこの6テーブルは残る」の「6」を「7」に直す。
+
+- [ ] `### Lambda`テーブルの`YutaiRiskPrecomputeBatchFunction`行の直後に追加:
+
+```
+| `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 9 * * ? *)` = JST 18:40 毎日) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`・`JQuantsMarginBalance`(直近値)を読み、貸株超過率のビン別充足率分布(全銘柄プール+銘柄実績の縮小推定ブレンド)から次回権利日の予測逆日歩を算出し`JQuantsGyakuhibuForecast`へupsert |
+```
+
+- [ ] `### API`テーブルの`GET /yutai/{ticker}/margin-trend`行の直後に追加:
+
+```
+| `GET /yutai/forecast?rightsDateFrom=&rightsDateTo=&keyword=&forecastStatus=` | 予測付き優待銘柄一覧。`GET /yutai`と同じ絞り込みに加え、`forecastStatus`(`safe`\|`caution`\|`danger`\|`na`\|`all`、省略時`all`)でも絞り込み可能。各行に予測分布(発生確率・予測逆日歩P50/P90・判定・根拠件数)を含む |
+| `GET /yutai/{ticker}/forecast` | 銘柄別の予測詳細。予測分布・過去権利日ごとの実績(残高・超過率・充足率・応札・措置)・全銘柄プールのビン別統計・信用残トレンド直近値をまとめて返す |
+```
+
+- [ ] フロント画面一覧(`## フロントエンド`直下のテーブル)の`/yutai/:ticker`行の直後に追加:
+
+```
+| `/yutai/forecast` | 逆日歩予測 一覧(読み取り専用)。`/yutai`と同じ絞り込みに加え判定(危険/注意/安全/対象外)でも絞り込み、判定→期待値差の順でデフォルトソート |
+| `/yutai/:ticker/forecast` | 逆日歩予測 詳細。サマリカード(発生確率・予測中央値・予測P90・優待価値との差)→貸株超過率と充足率の曲線グラフ(全銘柄プール+自銘柄実績の重ね書き)→感度表→過去権利日テーブル→信用残トレンド、の順。既存の`/yutai/:ticker`から相互リンク |
+```
+
+- [ ] 「### 優待クロス逆日歩リスク可視化(`/yutai`系)」セクション内、「**権利付き最終日の4倍ルール**」の段落の直後、「### taisyaku.jp(日本証券金融)からの実績逆日歩取得」の見出しの直前に、新しい段落として追加:
+
+```
+**逆日歩予測(貸株超過率→実績逆日歩、`/yutai/forecast`系)**: 上記の「最大逆日歩」はあくまで入札の上限であり、実際に付く金額は毎日の入札で決まる変動相場(流動性の高い銘柄では権利日でも0円のことが多い)。この機能は`GyakuhibuHistoryBatchFunction`が蓄積した権利日ごとの残高・実績逆日歩の履歴から、貸株超過率(`(貸株残高-融資残高)/融資残高`)を6段階のビン(`融資超過`/`0〜0.5`/`0.5〜1`/`1〜2`/`2〜5`/`5以上`)に分け、ビンごとの充足率(実績逆日歩÷最高料率の実値、0〜1)の経験分布を全銘柄横断で作る(`lambda/shared/gyakuhibu-forecast.ts`)。**充足率の分母はこのアプリが自前計算する最高料率ではなく、taisyaku.jp CSVの「最高料率」列の実値(倍率適用済み)を使う** — 自前計算値は権利付き最終日の4倍ルール等の例外を全て正確に再現できるとは限らないため、実際に日証金が公開した値をそのまま使う方が正確。銘柄ごとの実績(直近の権利日、件数`n_t`)と全銘柄プール(該当ビンの件数`n_p`)を`w = n_t / (n_t + 4)`(縮小推定、`SHRINKAGE_K=4`)で加重ブレンドし、発生確率・充足率の中央値/P90を求める。次回権利日の超過率シナリオは「同銘柄・同月の直近実績」→「同銘柄の直近実績(月不問)」→「東証信用残(`JQuantsMarginBalance`)ベース、参考扱い」→「実績なし」の優先順で選ぶ。予測逆日歩(P50/P90)は充足率×最大逆日歩(上限)で金額化し、優待価値と比較して`forecastStatus`(`safe`/`caution`/`danger`/`na`)を判定する(価値がP90を上回れば`safe`、P50〜P90なら`caution`、P50以下なら`danger`)。既存の`riskStatus`(最大逆日歩=上限ベースの二値判定)とは別フィールドとして共存し、既存の意味は変更しない。設計の詳細は`docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md`。
+```
+
+- [ ] 「### taisyaku.jp(日本証券金融)からの実績逆日歩取得(実機で判明)」セクションの最後(現在の最終段落の直後)に追加:
+
+```
+2026-09-05、上記の逆日歩予測機能のため`parseTaisyakuCsv`を拡張し、残高(`融資残高`/`貸株残高`)・貸借値段・最高料率・応札ランク・制限措置・臨時措置の各列も取得するようにした。実機確認(`docs/superpowers/notes/2026-09-05-taisyaku-csv-balance-columns.md`)で、実際のCSVはヘッダーが27列(想定していた11列程度より多い)で、桁区切りカンマは観測されず、品貸料率列には`-`以外に`*****`という想定外の非数値マーカーも存在する(差引残高がちょうど0になる境界日にのみ出現)ことが判明した。`occurred`(その日に実際の品薄が発生したか)の判定は文字列`'-'`との比較ではなく「数値としてparseできるか」に一本化し、`*****`を含む未知のマーカーにも耐えるようにしている。
+```
+
+- [ ] `README.md`の「## 主要コマンド」の直前、既存の「### スコープを絞った点」の後に、新しい小見出しとして追加(実機メモ、デプロイ前提のため保留事項として記載):
+
+```
+### 逆日歩予測機能のバックフィル状況(2026-09-05時点、デプロイ前)
+
+`JQuantsGyakuhibuActual`の既存行(残高列拡張前)は約5,000件と見込まれ、`MAX_GYAKUHIBU_FETCHES_PER_RUN`の既定値(200件/回)のままだと約25日かかる計算のため、デプロイ直後は一時的に800前後まで引き上げてバックフィルを加速する運用を想定している(コード変更不要、CDK環境変数のみ)。実際にバックフィルへ要した日数、`GyakuhibuForecastBatchFunction`が算出したビン別サンプル数(`_POOL_`行の`bins[].n`)の実測、`MAX_GYAKUHIBU_FETCHES_PER_RUN`を既定値へ戻した日付は、デプロイ・バックフィル完了後にこの節へ追記する。
+```
+
+- [ ] `docs/superpowers/notes/2026-09-05-taisyaku-csv-balance-columns.md`の「## 未確認のまま残った点」セクションの直後に追加:
+
+```
+## 実装後の追記(Task 9、2026-09-05)
+
+`occurred`判定は当初案の「品貸料率が`'-'`かどうか」ではなく「数値としてparseできるかどうか」に変更して実装した(Task 1)。これにより上記の`'*****'`も含め、今後未知の非数値マーカーが現れても`occurred: false`側に安全に倒れる。`*****`自体の正式な意味は引き続き未確認のまま。
+```
+
 - [ ] `git commit -m "Document the gyakuhibu forecast feature"`
 
 ---
