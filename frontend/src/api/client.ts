@@ -5,6 +5,9 @@ import type {
   WatchlistTicker,
   YutaiDetail,
   YutaiListResponse,
+  YutaiForecastStatus,
+  YutaiForecastListResponse,
+  YutaiForecastDetail,
 } from './types';
 import { clearStoredAppPassword, getStoredAppPassword } from '../lib/appPassword';
 
@@ -95,4 +98,21 @@ export function fetchYutaiDetail(ticker: string): Promise<YutaiDetail> {
 
 export function fetchYutaiMarginTrend(ticker: string): Promise<MarginTrendResponse> {
   return request(`/yutai/${ticker}/margin-trend`);
+}
+
+export interface YutaiForecastListParams extends YutaiListParams {
+  forecastStatus?: YutaiForecastStatus | 'all';
+}
+
+export function fetchYutaiForecastList(params: YutaiForecastListParams): Promise<YutaiForecastListResponse> {
+  const query = new URLSearchParams();
+  if (params.rightsDateFrom) query.set('rightsDateFrom', params.rightsDateFrom);
+  if (params.rightsDateTo) query.set('rightsDateTo', params.rightsDateTo);
+  if (params.keyword) query.set('keyword', params.keyword);
+  if (params.forecastStatus) query.set('forecastStatus', params.forecastStatus);
+  return request(`/yutai/forecast?${query}`);
+}
+
+export function fetchYutaiForecastDetail(ticker: string): Promise<YutaiForecastDetail> {
+  return request(`/yutai/${ticker}/forecast`);
 }

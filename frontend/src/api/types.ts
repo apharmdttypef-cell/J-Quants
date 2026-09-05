@@ -98,3 +98,87 @@ export interface MarginTrendResponse {
   range: '1y';
   points: MarginTrendPoint[];
 }
+
+export type YutaiForecastStatus = 'safe' | 'caution' | 'danger' | 'na';
+export type YutaiForecastScenario = 'last-rights' | 'current-tse' | 'none';
+
+export interface YutaiForecast {
+  scenario: YutaiForecastScenario;
+  excessRatio: number | null;
+  bin: string | null;
+  pOccur: number | null;
+  fillP50: number | null;
+  fillP90: number | null;
+  fillMean: number | null;
+  forecastP50: number | null;
+  forecastP90: number | null;
+  forecastMean: number | null;
+  expectedNet: number | null;
+  forecastStatus: YutaiForecastStatus;
+  tickerSamples: number;
+  poolSamples: number;
+}
+
+export interface YutaiForecastListItem {
+  ticker: string;
+  companyName?: string;
+  content: string;
+  value: number;
+  rightsDate: string | null;
+  riskStatus: YutaiRiskStatus;
+  maxGyakuhibu: number | null;
+  forecast: YutaiForecast;
+}
+
+export interface YutaiForecastListResponse {
+  tickers: YutaiForecastListItem[];
+  currentMonthLastTradableDate: string;
+  poolComputedAt: string | null;
+}
+
+export interface YutaiForecastHistoryPoint {
+  rightsDate: string;
+  excessRatio: number | null;
+  excessShares: number;
+  financingBalance: number;
+  lendingBalance: number;
+  lendingPrice: number | null;
+  fillRatio: number | null;
+  totalAmount: number;
+  maxRateActual: number | null;
+  bidRank: string | null;
+  restriction: string | null;
+  emergencyMeasure: string | null;
+  occurred: boolean;
+}
+
+export interface PoolBin {
+  label: string;
+  lo: number;
+  hi: number;
+  n: number;
+  pOccur: number;
+  fillP50: number;
+  fillP90: number;
+  fillMean: number;
+}
+
+export interface YutaiForecastMarginLatest {
+  date: string;
+  financingBalance: number;
+  lendingBalance: number;
+}
+
+export interface YutaiForecastDetail {
+  ticker: string;
+  companyName: string | null;
+  content: string;
+  value: number;
+  unitShares: number;
+  rightsDate: string | null;
+  maxGyakuhibu: number | null;
+  forecast: YutaiForecast;
+  history: YutaiForecastHistoryPoint[];
+  poolBins: PoolBin[];
+  marginTrend: { latest: YutaiForecastMarginLatest | null };
+}
