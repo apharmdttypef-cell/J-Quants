@@ -1,4 +1,4 @@
-import { extractCsrfToken, parseTaisyakuCsv, fetchTaisyakuCsv } from '../lambda/gyakuhibu-history-batch/taisyaku-client';
+import { extractCsrfToken, splitCsvLine, parseTaisyakuCsv, fetchTaisyakuCsv } from '../lambda/gyakuhibu-history-batch/taisyaku-client';
 
 test('extractCsrfToken reads the csrf_test_name hidden input value', () => {
   const html = '<input type="hidden" name="csrf_test_name" value="abc123def456">';
@@ -9,81 +9,109 @@ test('extractCsrfToken throws when the token is missing', () => {
   expect(() => extractCsrfToken('<html></html>')).toThrow();
 });
 
-// CSVは日付ごとに1行、taisyaku.jpの画面表示テーブルと同じ列名(申込日/品貸料率(品貸日数分/円)/品貸日数)を持つ想定。
-// 実際にダウンロードしたCSVの列名・行列の向きが異なると判明した場合は、このテストと
-// parseTaisyakuCsvの実装を実物に合わせて書き換えること(docs/superpowers/notes/2026-08-13-taisyaku-csv-format.md 参照)。
-test('parseTaisyakuCsv scales the per-share lending fee to unitShares for the matching rights date', () => {
-  const csv = [
-    '申込日,品貸料率(品貸日数分/円),品貸日数',
-    '2026-08-25,6.00,1',
-    '2026-08-26,18.00,3',
-  ].join('\n');
+// Task 0(docs/superpowers/notes/2026-09-05-taisyaku-csv-balance-columns.md)で実機確認した
+// 実物のヘッダー・行をそのまま使う(全角括弧・全27列)。
+const HEADER =
+  '"銘柄コード","銘柄名","直後基準日","直近制限措置","直近臨時措置","直近特別措置","申込日","市場区分","貸借区分","融資新規（株）","融資返済（株）","融資残高（株）","貸株新規（株）","貸株返済（株）","貸株残高（株）","差引残高（株）","貸借値段（円）","品貸料率（品貸日数分/円）","品貸日数","品貸料率（年率換算/％）","最高料率（品貸日数分/円）","最低料率（品貸日数分/円）","応札ランク","制限措置","臨時措置","特別措置","新株引受・権利入札"';
 
-  const result = parseTaisyakuCsv(csv, '2026-08-26', 100);
+// splitCsvLineのクォート考慮パーサ自体は、実機データ(3ヶ月・63行)ではカンマ区切りの
+// 数値を一度も観測できなかったため防御的な実装(将来カンマ区切りの列が来ても壊れない)。
+// このテストは実在パターンではなく、想定される入力形への耐性を確認するもの。
+test('splitCsvLine keeps thousands separators inside quoted fields', () => {
+  expect(splitCsvLine('"2026-08-27","1,234,567","2,000,000"')).toEqual(['2026-08-27', '1,234,567', '2,000,000']);
+});
 
-  expect(result).toEqual({
-    rightsDate: '2026-08-26',
-    totalAmount: 18.0 * 100,
-    days: 3,
-    avgRate: 18.0 / 3,
+test('parseTaisyakuCsv returns balances and the actual max rate alongside the fee', () => {
+  // 実物(9418、2026-08-27、権利付き最終日): 融資残高1,100/貸株残高2,039,300/差引残高-2,038,200
+  // (=融資残高-貸株残高。excessRatioの符号とは逆なので自前計算に使わない)/
+  // 貸借値段1,752円/品貸料率14.40円(=最高料率と一致、応札ランクA=最も逼迫)。
+  const row =
+    '"9418","","20270228","","","","20260827","東証","貸借","0","500","1100","1785200","1800","2039300","-2038200","1752.00","14.40","1","300.00","14.40","0.00","A","","","",""';
+  const csv = [HEADER, row].join('\n');
+  expect(parseTaisyakuCsv(csv, '2026-08-27', 100)).toEqual({
+    rightsDate: '2026-08-27',
+    occurred: true,
+    totalAmount: 1440,
+    days: 1,
+    avgRate: 14.4,
+    financingBalance: 1100,
+    lendingBalance: 2039300,
+    lendingPrice: 1752,
+    maxRateActual: 14.4,
+    bidRank: 'A',
+    restriction: null,
+    emergencyMeasure: null,
   });
 });
 
-test('parseTaisyakuCsv returns undefined when the matching date has no lending fee (a dash, meaning no shortage occurred)', () => {
-  const csv = ['申込日,品貸料率(品貸日数分/円),品貸日数', '2026-08-26,-,1'].join('\n');
-  expect(parseTaisyakuCsv(csv, '2026-08-26', 100)).toBeUndefined();
+test('parseTaisyakuCsv returns occurred=false with balances when the fee is a dash', () => {
+  // 実物(9418、2026-08-20、通常日): 品貸料率"-"(品薄なし)。応札ランクも"-"(=null)。
+  const row =
+    '"9418","","20270228","","","","20260820","東証","貸借","0","5300","25800","0","2000","21900","3900","1775.00","-","1","-","7.20","0.00","-","","","",""';
+  const csv = [HEADER, row].join('\n');
+  const point = parseTaisyakuCsv(csv, '2026-08-20', 100);
+  expect(point?.occurred).toBe(false);
+  expect(point?.totalAmount).toBe(0);
+  expect(point?.lendingBalance).toBe(21900);
+  expect(point?.maxRateActual).toBe(7.2);
+  expect(point?.bidRank).toBeNull();
 });
 
-test('parseTaisyakuCsv returns undefined when the rights date is not in the CSV at all', () => {
-  const csv = ['申込日,品貸料率(品貸日数分/円),品貸日数', '2026-08-20,6.00,1'].join('\n');
+test('parseTaisyakuCsv treats a non-numeric "*****" fee the same as a dash (occurred=false)', () => {
+  // 実機で発見した想定外パターン(9418、2026-08-21): 融資残高=貸株残高=26,100で差引残高が
+  // ちょうど0になる境界日にだけ、品貸料率・年率換算の両方が"-"ではなく"*****"になる
+  // (Task 0のnotes参照、63行中1行のみ観測)。Number('*****')はNaNなので、
+  // 「'-'と等しいか」ではなく「数値としてparseできるか」で判定しないとoccurred:trueに
+  // 誤判定され、totalAmount等がNaNになる。最高料率自体は通常通りの数値のまま。
+  const row =
+    '"9418","","20270228","","","","20260821","東証","貸借","16800","16500","26100","10300","6100","26100","0","1755.00","*****","1","*****","7.20","0.00","-","","","",""';
+  const csv = [HEADER, row].join('\n');
+  const point = parseTaisyakuCsv(csv, '2026-08-21', 100);
+  expect(point?.occurred).toBe(false);
+  expect(point?.totalAmount).toBe(0);
+  expect(point?.maxRateActual).toBe(7.2);
+});
+
+test('parseTaisyakuCsv still returns undefined when the rights date row is absent', () => {
+  const row =
+    '"9418","","20270228","","","","20260820","東証","貸借","0","5300","25800","0","2000","21900","3900","1775.00","-","1","-","7.20","0.00","-","","","",""';
+  const csv = [HEADER, row].join('\n');
   expect(parseTaisyakuCsv(csv, '2026-08-26', 100)).toBeUndefined();
 });
 
 // Fix 3: CSV側の日付フォーマットは未確認("YYYY / MM / DD"の可能性が高いが確定情報ではない)。
 // 内部形式("YYYY-MM-DD")と一致しなくても、数字だけを見て一致すれば拾えることを確認する。
 test('parseTaisyakuCsv matches a slash-formatted CSV date against an ISO-formatted rightsDate', () => {
-  const csv = ['申込日,品貸料率(品貸日数分/円),品貸日数', '2026 / 08 / 13,6.00,1'].join('\n');
-  const result = parseTaisyakuCsv(csv, '2026-08-13', 100);
-  expect(result).toEqual({ rightsDate: '2026-08-13', totalAmount: 600, days: 1, avgRate: 6 });
+  const row =
+    '"9418","","20270228","","","","2026 / 08 / 27","東証","貸借","0","500","1100","1785200","1800","2039300","-2038200","1752.00","6.00","1","300.00","14.40","0.00","A","","","",""';
+  const csv = [HEADER, row].join('\n');
+  const point = parseTaisyakuCsv(csv, '2026-08-27', 100);
+  expect(point?.rightsDate).toBe('2026-08-27');
+  expect(point?.occurred).toBe(true);
+  expect(point?.totalAmount).toBe(600);
+  expect(point?.days).toBe(1);
+  expect(point?.avgRate).toBe(6);
 });
 
 test('parseTaisyakuCsv also matches a plain slash date (no spaces) against an ISO rightsDate', () => {
-  const csv = ['申込日,品貸料率(品貸日数分/円),品貸日数', '2026/08/13,6.00,1'].join('\n');
-  const result = parseTaisyakuCsv(csv, '2026-08-13', 100);
-  expect(result).toEqual({ rightsDate: '2026-08-13', totalAmount: 600, days: 1, avgRate: 6 });
-});
-
-// Fix 6: taisyaku.jpが実際に返すCSVは全フィールドがダブルクォートで囲まれている
-// (例: "2026-08-26","18.00","3")。trim()だけではクォートが残ったままNumber()に渡ってしまい
-// (Number('"18.00"')はNaN)、実際に逆日歩が発生した行でも常にNaN判定→undefined(「実績なし」)
-// を返してしまうバグが実機検証で発覚した(日付一致判定は数字以外除去で偶然クォートの影響を
-// 受けなかったため、これまで気づけなかった)。
-test('parseTaisyakuCsv strips surrounding double quotes from CSV fields before parsing numbers', () => {
-  const csv = [
-    '"申込日","品貸料率(品貸日数分/円)","品貸日数"',
-    '"2026-08-25","6.00","1"',
-    '"2026-08-26","18.00","3"',
-  ].join('\n');
-
-  const result = parseTaisyakuCsv(csv, '2026-08-26', 100);
-
-  expect(result).toEqual({
-    rightsDate: '2026-08-26',
-    totalAmount: 18.0 * 100,
-    days: 3,
-    avgRate: 18.0 / 3,
-  });
+  const row =
+    '"9418","","20270228","","","","2026/08/27","東証","貸借","0","500","1100","1785200","1800","2039300","-2038200","1752.00","6.00","1","300.00","14.40","0.00","A","","","",""';
+  const csv = [HEADER, row].join('\n');
+  const point = parseTaisyakuCsv(csv, '2026-08-27', 100);
+  expect(point?.rightsDate).toBe('2026-08-27');
+  expect(point?.occurred).toBe(true);
+  expect(point?.totalAmount).toBe(600);
+  expect(point?.days).toBe(1);
+  expect(point?.avgRate).toBe(6);
 });
 
 // Fix 4-3: 融資残高等の株数列はカンマ区切りの桁区切り("1,234,567")で入ることがあり、
-// 素朴なsplit(',')だと列がずれる。列数がヘッダーと合わない行は読み違えを防ぐためスキップする。
+// 列数がヘッダーと合わない(genuinely破損した)行は読み違えを防ぐためスキップする。
 test('parseTaisyakuCsv skips a row whose column count does not match the header, logging a warning', () => {
   const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
   try {
-    const csv = [
-      '申込日,品貸料率(品貸日数分/円),品貸日数',
-      '2026-08-26,"1,234",3', // カンマを含む値のせいで列がずれた行(4列になってしまう)
-    ].join('\n');
+    const truncatedRow = '"9418","","20270228","","","","20260826","東証","貸借"'; // 27列より少ない、破損した行
+    const csv = [HEADER, truncatedRow].join('\n');
 
     const result = parseTaisyakuCsv(csv, '2026-08-26', 100, '7203');
 
@@ -154,13 +182,13 @@ describe('fetchTaisyakuCsv', () => {
 
   // Fix 4-1: 日本の金融サイトはExcel互換のためShift_JISでCSVを配信することがある。
   // response.text()は常にUTF-8としてデコードしてしまうため、arrayBuffer()を取得して
-  // Shift_JISとしてデコードし直す必要がある。既知の日本語文字列をShift_JISへ実際に
-  // エンコードしたバイト列(Python `str.encode('shift_jis')`で生成、16進文字列で埋め込み)
-  // を使って検証する。
+  // Shift_JISとしてデコードし直す必要がある。実機ヘッダー+実データ行(9418、2026-08-27)を
+  // Shift_JISへ実際にエンコードしたバイト列(.NET Encoding.GetEncoding(932)で生成、
+  // 16進文字列で埋め込み、Node のTextDecoder('shift_jis')でラウンドトリップ確認済み)を
+  // 使って検証する。
   test('decodes a Shift_JIS-encoded CSV response correctly (falls back from the Fetch spec default of UTF-8)', async () => {
-    // '申込日,品貸料率(品貸日数分/円),品貸日数\n2026-08-26,18.00,3' を shift_jis でエンコードしたバイト列
     const shiftJisHex =
-      '905c8d9e93fa2c956991dd97bf97a628956991dd93fa909495aa2f897e292c956991dd93fa90940a323032362d30382d32362c31382e30302c33';
+      '2296c195bf8352815b8368222c2296c195bf96bc222c2292bc8ce38aee8f8093fa222c2292bc8bdf90a78cc0915b9275222c2292bc8bdf97d58e9e915b9275222c2292bc8bdf93c195ca915b9275222c22905c8d9e93fa222c228e738fea8be695aa222c2291dd8ed88be695aa222c22975a8e9190568b4b81698a94816a222c22975a8e9195d48dcf81698a94816a222c22975a8e918e638d8281698a94816a222c2291dd8a9490568b4b81698a94816a222c2291dd8a9495d48dcf81698a94816a222c2291dd8a948e638d8281698a94816a222c228db788f88e638d8281698a94816a222c2291dd8ed8926c92698169897e816a222c22956991dd97bf97a68169956991dd93fa909495aa2f897e816a222c22956991dd93fa9094222c22956991dd97bf97a68169944e97a68ab78e5a2f8193816a222c228dc58d8297bf97a68169956991dd93fa909495aa2f897e816a222c228dc592e197bf97a68169956991dd93fa909495aa2f897e816a222c22899e8e4483898393834e222c2290a78cc0915b9275222c2297d58e9e915b9275222c2293c195ca915b9275222c2290568a9488f88ef381458ca0979893fc8e44220a2239343138222c22222c223230323730323238222c22222c22222c22222c223230323630383237222c22938c8fd8222c2291dd8ed8222c2230222c22353030222c2231313030222c2231373835323030222c2231383030222c2232303339333030222c222d32303338323030222c22313735322e3030222c2231342e3430222c2231222c223330302e3030222c2231342e3430222c22302e3030222c2241222c22222c22222c22222c2222';
     const shiftJisBuffer = Buffer.from(shiftJisHex, 'hex');
     const arrayBuffer = shiftJisBuffer.buffer.slice(
       shiftJisBuffer.byteOffset,
@@ -180,12 +208,25 @@ describe('fetchTaisyakuCsv', () => {
         arrayBuffer: async () => arrayBuffer,
       });
 
-    const result = await fetchTaisyakuCsv('7203', '2026-08-26', '2026-08-26');
+    const result = await fetchTaisyakuCsv('7203', '2026-08-27', '2026-08-27');
 
     expect(result).toContain('申込日');
     expect(result).toContain('品貸料率');
 
-    const point = parseTaisyakuCsv(result, '2026-08-26', 100);
-    expect(point).toEqual({ rightsDate: '2026-08-26', totalAmount: 1800, days: 3, avgRate: 6 });
+    const point = parseTaisyakuCsv(result, '2026-08-27', 100);
+    expect(point).toEqual({
+      rightsDate: '2026-08-27',
+      occurred: true,
+      totalAmount: 1440,
+      days: 1,
+      avgRate: 14.4,
+      financingBalance: 1100,
+      lendingBalance: 2039300,
+      lendingPrice: 1752,
+      maxRateActual: 14.4,
+      bidRank: 'A',
+      restriction: null,
+      emergencyMeasure: null,
+    });
   });
 });

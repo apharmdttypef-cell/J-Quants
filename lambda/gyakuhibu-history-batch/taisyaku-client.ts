@@ -1,8 +1,16 @@
 export interface GyakuhibuActualPoint {
   rightsDate: string;
+  occurred: boolean;
   totalAmount: number;
   days: number;
   avgRate: number;
+  financingBalance: number;
+  lendingBalance: number;
+  lendingPrice: number | null;
+  maxRateActual: number | null;
+  bidRank: string | null;
+  restriction: string | null;
+  emergencyMeasure: string | null;
 }
 
 export function extractCsrfToken(html: string): string {
@@ -13,11 +21,6 @@ export function extractCsrfToken(html: string): string {
   return match[1];
 }
 
-// CSVは「申込日」列で対象権利日の行を探し、「品貸料率(品貸日数分/円)」列がハイフン(実際の
-// 品薄が発生しなかった日)や空でなければ、その値と「品貸日数」列から実績を組み立てる。
-// taisyaku.jpの品貸料率・最高料率は実データで検証済みの通り1株あたり・品貸日数分の金額
-// なので、unitShares(単元株数)を掛けるだけでよい(1,000株換算は不要)。
-// tickerはログ用(省略可)。
 // taisyaku.jpの実CSVは全フィールドがダブルクォートで囲まれている(例: "2026-08-26","18.00","3")。
 // trim()だけではクォートが残り、Number()変換が常にNaNになって実績を取りこぼすため、
 // 前後の1個ずつのダブルクォートを取り除く(フィールド内部のクォートはそのまま)。
@@ -26,6 +29,57 @@ function stripQuotes(field: string): string {
   return trimmed.startsWith('"') && trimmed.endsWith('"') ? trimmed.slice(1, -1) : trimmed;
 }
 
+// クォート内カンマを区切りにしない簡易CSVパーサ。1文字ずつ走査し、`"`でinQuoteをトグルし、
+// inQuote外の`,`でのみフィールドを分割する。実機データ(3ヶ月・63行)では桁区切りカンマ
+// ("1,234,567")を一度も観測できなかったが、将来カンマ区切りの列が来ても壊れないための
+// 防御的な実装。各フィールドは最終的にstripQuotesで前後のダブルクォートを取り除く。
+export function splitCsvLine(line: string): string[] {
+  const fields: string[] = [];
+  let current = '';
+  let inQuote = false;
+
+  for (const ch of line) {
+    if (ch === '"') {
+      inQuote = !inQuote;
+      current += ch;
+    } else if (ch === ',' && !inQuote) {
+      fields.push(stripQuotes(current));
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  fields.push(stripQuotes(current));
+
+  return fields;
+}
+
+// カンマ区切り("1,234,567")にも対応した数値変換ヘルパー。
+// Number('')は0になってしまうJSの罠があるため、空文字列は先にnullとして弾く。
+// それ以外はNumber()に通し、結果がNaNならnullを返す('-'・'*****'等の非数値マーカーは
+// いずれもNumber()でNaNになるため、ここでnullに丸められる)。
+function toNumber(field: string): number | null {
+  const normalized = field.trim().replace(/,/g, '');
+  if (normalized === '') return null;
+  const value = Number(normalized);
+  return Number.isNaN(value) ? null : value;
+}
+
+// 文字列フィールド用ヘルパー: 空文字列または'-'ならnull、それ以外はそのまま返す。
+// 「応札ランク」の未実施は'-'、「制限措置」等の無しは空文字列と実機で表記が異なるため、
+// 両方をnullに丸める共通ヘルパーとして使う。
+function blankToNull(field: string): string | null {
+  const trimmed = field.trim();
+  return trimmed === '' || trimmed === '-' ? null : trimmed;
+}
+
+// CSVは「申込日」列で対象権利日の行を探し、「品貸料率(品貸日数分/円)」列が数値としてparse
+// できるかどうかでその日に実際の品薄(逆日歩)が発生したか(occurred)を判定する。'-'かどうかの
+// 直接比較はしない。実機で'*****'という別の非数値マーカーも観測されているため、NaN判定に
+// 一本化して未知のマーカーにも耐えるようにしている(docs/superpowers/notes/2026-09-05-taisyaku-csv-balance-columns.md
+// 参照)。taisyaku.jpの品貸料率・最高料率は実データで検証済みの通り1株あたり・品貸日数分の
+// 金額なので、unitShares(単元株数)を掛けるだけでよい(1,000株換算は不要)。
+// tickerはログ用(省略可)。
 export function parseTaisyakuCsv(
   csvText: string,
   rightsDate: string,
@@ -33,7 +87,8 @@ export function parseTaisyakuCsv(
   ticker?: string,
 ): GyakuhibuActualPoint | undefined {
   const lines = csvText.trim().split('\n');
-  const header = lines[0].split(',').map(stripQuotes);
+  const header = splitCsvLine(lines[0]);
+
   const dateIdx = header.findIndex((h) => h.includes('申込日'));
   const rateIdx = header.findIndex((h) => h.includes('品貸料率'));
   // 「品貸料率(品貸日数分/円)」列名自体に「品貸日数」が部分文字列として含まれるため、
@@ -43,18 +98,34 @@ export function parseTaisyakuCsv(
     throw new Error('Unexpected taisyaku.jp CSV header shape (expected 申込日/品貸料率/品貸日数 columns)');
   }
 
-  // CSV側の日付フォーマットは未確認("YYYY / MM / DD"の可能性が高いが、それ以外も
-  // ありうる)。少なくとも内部形式("YYYY-MM-DD")とは異なるため、数字以外を除去した
-  // 上で比較する(例: "2026-08-13" と "2026 / 08 / 13" はどちらも"20260813"になる)。
+  // 融資残高・貸株残高は予測ロジックの根幹(貸株超過率)に使うため、列が見つからなければ
+  // ヘッダー構造の変化に早期に気づけるよう例外にする。
+  const financingBalanceIdx = header.findIndex((h) => h.includes('融資') && h.includes('残高'));
+  const lendingBalanceIdx = header.findIndex((h) => h.includes('貸株') && h.includes('残高'));
+  if (financingBalanceIdx === -1 || lendingBalanceIdx === -1) {
+    throw new Error('Unexpected taisyaku.jp CSV header shape (expected 融資残高/貸株残高 columns)');
+  }
+
+  const lendingPriceIdx = header.findIndex((h) => h.includes('貸借値段'));
+  const maxRateIdx = header.findIndex((h) => h.includes('最高料率'));
+  const bidRankIdx = header.findIndex((h) => h.includes('応札'));
+  // 実機CSVには行ごとの実測定を表す「制限措置」「臨時措置」列とは別に、先頭寄りに
+  // 「直近制限措置」「直近臨時措置」という別サマリ列が存在する(docs/superpowers/notes/
+  // 2026-09-05-taisyaku-csv-balance-columns.md参照)。単純な部分一致(includes)だと
+  // 「直近制限措置」に「制限」が含まれるため誤ってそちらを拾ってしまうので、
+  // 行の実測定列の名前に完全一致させる。
+  const restrictionIdx = header.findIndex((h) => h === '制限措置');
+  const emergencyMeasureIdx = header.findIndex((h) => h === '臨時措置');
+
+  // CSV側の日付フォーマットは"YYYY / MM / DD"の可能性が高いが、それ以外もありうる。
+  // 少なくとも内部形式("YYYY-MM-DD")とは異なるため、数字以外を除去した上で比較する
+  // (例: "2026-08-13" と "2026 / 08 / 13" はどちらも"20260813"になる)。
   const normalizedRightsDate = rightsDate.replace(/\D/g, '');
 
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue; // 末尾の空行などをスキップ
 
-    const cols = line.split(',').map(stripQuotes);
-    // 融資残高・貸株残高等の株数列はカンマ区切りの桁区切り("1,234,567")で入っている
-    // ことがあり、素朴なsplit(',')だと列がずれる。フルRFC4180パーサまでは実装せず、
-    // 列数が壊れていないかだけ確認して、ずれていれば読み違えを防ぐためスキップする。
+    const cols = splitCsvLine(line);
     if (cols.length !== header.length) {
       console.warn(
         `taisyaku.jp CSV row column count mismatch for ${ticker ?? '(unknown ticker)'} ${rightsDate} ` +
@@ -65,14 +136,36 @@ export function parseTaisyakuCsv(
 
     if (cols[dateIdx].replace(/\D/g, '') !== normalizedRightsDate) continue;
 
-    const rateRaw = cols[rateIdx];
-    if (!rateRaw || rateRaw === '-') return undefined; // その日は実際の品薄(逆日歩)が発生しなかった
+    const fieldAt = (idx: number): string => (idx === -1 ? '' : cols[idx]);
 
-    const perShareRate = Number(rateRaw);
-    const days = Number(cols[daysIdx]);
-    if (Number.isNaN(perShareRate) || Number.isNaN(days) || days <= 0) return undefined;
+    const financingBalance = toNumber(fieldAt(financingBalanceIdx));
+    const lendingBalance = toNumber(fieldAt(lendingBalanceIdx));
+    if (financingBalance === null || lendingBalance === null) {
+      console.warn(
+        `taisyaku.jp CSV row for ${ticker ?? '(unknown ticker)'} ${rightsDate} has a non-numeric ` +
+          `financing/lending balance; skipping row: ${line}`,
+      );
+      return undefined;
+    }
 
-    return { rightsDate, totalAmount: perShareRate * unitShares, days, avgRate: perShareRate / days };
+    const perShareRate = toNumber(fieldAt(rateIdx));
+    const occurred = perShareRate !== null;
+    const days = perShareRate !== null ? (toNumber(fieldAt(daysIdx)) ?? 0) : 0;
+
+    return {
+      rightsDate,
+      occurred,
+      totalAmount: perShareRate !== null ? perShareRate * unitShares : 0,
+      days,
+      avgRate: perShareRate !== null && days > 0 ? perShareRate / days : 0,
+      financingBalance,
+      lendingBalance,
+      lendingPrice: toNumber(fieldAt(lendingPriceIdx)),
+      maxRateActual: toNumber(fieldAt(maxRateIdx)),
+      bidRank: blankToNull(fieldAt(bidRankIdx)),
+      restriction: blankToNull(fieldAt(restrictionIdx)),
+      emergencyMeasure: blankToNull(fieldAt(emergencyMeasureIdx)),
+    };
   }
 
   return undefined; // 対象の申込日がCSVに含まれていない
