@@ -52,6 +52,12 @@ EventBridge(毎日 JST18:20)
       - JQuantsYutaiMasterを全件スキャンし、銘柄ごとに逆日歩リスク(信用残の有無・前日終値ベース)を計算
       → JQuantsYutaiMaster に riskStatus/maxGyakuhibu/maxRate/days を書き戻す
 
+EventBridge(毎日 JST18:40、YutaiRiskPrecomputeBatchFunctionの20分後)
+  → GyakuhibuForecastBatchFunction(Lambda)
+      - JQuantsYutaiMaster・JQuantsGyakuhibuActual(全件)・JQuantsMarginBalance(直近値)を読み、
+        貸株超過率→充足率の実績分布(全銘柄プール+銘柄別)から次回権利日の予測逆日歩を算出
+      → JQuantsGyakuhibuForecast に upsert(銘柄行 + 全銘柄横断のプール曲線行`_POOL_`)
+
 ブラウザ
   → CloudFront(Basic認証: CloudFront Function)
       → S3(静的ホスティング、React SPA)
@@ -71,9 +77,10 @@ EventBridge(毎日 JST18:20)
 | `JQuantsWatchlist` | PK `ticker` | 取得対象銘柄の正本。フロントの「ウォッチリスト管理」画面から追加/削除 |
 | `JQuantsYutaiMaster` | PK `ticker` | 優待マスタ本体(`companyName` / `content` / `value` / `unitShares` / `rightsMonths`〔権利確定月の配列、例`[3, 9]`〕)。`YutaiMasterSyncBatchFunction`(初回・手動)がkabuyutai.comから一括バックフィルし、`YutaiTdnetWatchBatchFunction`(週次)がTDnet開示をトリガーに継続更新する。**自動投入テーブル**(旧: アプリ外から手動投入する読み取り専用テーブルだったが自動化済み) |
 | `JQuantsMarginBalance` | PK `ticker` / SK `date` | 信用残時系列(`financingBalance`融資残・`lendingBalance`貸株残・`source`=`weekly`\|`daily-alert`) |
-| `JQuantsGyakuhibuActual` | PK `ticker` / SK `rightsDate` | taisyaku.jpから取得した権利日ごとの実績逆日歩(`totalAmount` / `days` / `avgRate`)。直近3年分のみ存在しうる |
+| `JQuantsGyakuhibuActual` | PK `ticker` / SK `rightsDate` | taisyaku.jpから取得した権利日ごとの実績逆日歩(`totalAmount` / `days` / `avgRate`)。直近3年分のみ存在しうる。2026-09-05以降、逆日歩予測機能のため残高・レート・措置列(`financingBalance`/`lendingBalance`/`lendingPrice`/`maxRateActual`/`bidRank`/`restriction`/`emergencyMeasure`)と取得済みフラグ`enriched`を追加。拡張前からの既存行は`GyakuhibuHistoryBatchFunction`が`enriched`無しの行として検知し順次バックフィルする |
+| `JQuantsGyakuhibuForecast` | PK `ticker` | 逆日歩予測(貸株超過率→充足率の実績分布ベース)の日次事前計算結果。銘柄ごとの予測分布・判定(`forecastStatus`)に加え、全銘柄横断の統計曲線を持つ特殊行(`ticker`=`_POOL_`)。`GyakuhibuForecastBatchFunction`が毎日全件洗い替えする派生データ |
 
-`cdk destroy` してもこの6テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
+`cdk destroy` してもこの7テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
 
 ### シークレット
 
@@ -125,6 +132,8 @@ EventBridge(毎日 JST18:20)
 
 **権利付き最終日の4倍ルール**(`RIGHTS_DAY_RATE_MULTIPLIER`、2026-09-03追加): taisyaku.jpは「倍率適用」規定により、配当・新株引受権等の権利付銘柄について権利落日の前営業日(=権利付き最終日そのもの)の最高料率を通常の4倍に引き上げる(詳細: `docs/superpowers/notes/2026-09-03-taisyaku-rights-day-rate-multiplier.md`)。このアプリの見積りは常に権利付き最終日を評価するため、倍率は条件分岐なく常に4倍を掛ける。旧要件定義では「品貸日数を実日数で計算すれば自然に織り込まれるため4倍ルールは不要」と判断し未採用だったが、これは誤りだったとU-NEXT HD(9418)の実データ検証(2026-09-03)で判明した — 品貸日数の実日数計算と、taisyaku.jp側の倍率適用は独立した別のメカニズムであり、前者だけでは後者を捕捉できない。なお倍率適用には権利日以外の要因(注意喚起銘柄・申込制限銘柄・異常な貸株超過状態)による2倍・8倍・10倍もあるが、これらは日証金が個別銘柄ごとに随時指定するもので事前の計算式では予測不可能なため未実装(現状の見積りは実際の上限を下回る可能性が残る保守的な下限)。
 
+**逆日歩予測(貸株超過率→実績逆日歩、`/yutai/forecast`系)**: 上記の「最大逆日歩」はあくまで入札の上限であり、実際に付く金額は毎日の入札で決まる変動相場(流動性の高い銘柄では権利日でも0円のことが多い)。この機能は`GyakuhibuHistoryBatchFunction`が蓄積した権利日ごとの残高・実績逆日歩の履歴から、貸株超過率(`(貸株残高-融資残高)/融資残高`)を6段階のビン(`融資超過`/`0〜0.5`/`0.5〜1`/`1〜2`/`2〜5`/`5以上`)に分け、ビンごとの充足率(実績逆日歩÷最高料率の実値、0〜1)の経験分布を全銘柄横断で作る(`lambda/shared/gyakuhibu-forecast.ts`)。**充足率の分母はこのアプリが自前計算する最高料率ではなく、taisyaku.jp CSVの「最高料率」列の実値(倍率適用済み)を使う** — 自前計算値は権利付き最終日の4倍ルール等の例外を全て正確に再現できるとは限らないため、実際に日証金が公開した値をそのまま使う方が正確。銘柄ごとの実績(直近の権利日、件数`n_t`)と全銘柄プール(該当ビンの件数`n_p`)を`w = n_t / (n_t + 4)`(縮小推定、`SHRINKAGE_K=4`)で加重ブレンドし、発生確率・充足率の中央値/P90を求める。次回権利日の超過率シナリオは「同銘柄・同月の直近実績」→「同銘柄の直近実績(月不問)」→「東証信用残(`JQuantsMarginBalance`)ベース、参考扱い」→「実績なし」の優先順で選ぶ。予測逆日歩(P50/P90)は充足率×最大逆日歩(上限)で金額化し、優待価値と比較して`forecastStatus`(`safe`/`caution`/`danger`/`na`)を判定する(価値がP90を上回れば`safe`、P50〜P90なら`caution`、P50以下なら`danger`)。既存の`riskStatus`(最大逆日歩=上限ベースの二値判定)とは別フィールドとして共存し、既存の意味は変更しない。設計の詳細は`docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md`。
+
 ### taisyaku.jp(日本証券金融)からの実績逆日歩取得(実機で判明)
 
 過去の権利日ごとの**実績**逆日歩(上記は見積り上限であり、実際に発生した金額とは別)は、日本証券金融公式サイト(https://www.taisyaku.jp/、広告ゲート・robots.txt無し)がCSVで公開している(直近3年分のみ)。ただし要件定義段階で想定していた「単純なGETリクエストでCSVが取れる」という前提は誤りで、実際にHARキャプチャして判明した正しい手順は次の通り(`lambda/gyakuhibu-history-batch/taisyaku-client.ts`):
@@ -139,6 +148,8 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 
 実際のtaisyaku.jp CSVは全フィールドがダブルクォートで囲まれている(例: `"2026-08-26","18.00","3"`)。本番投入後に発覚したバグとして、`parseTaisyakuCsv`が空白のみtrimしてクォートを除去していなかったため、`Number('"18.00"')`が`NaN`になり実際に逆日歩が発生していた日も常に「実績なし」と誤判定していた(申込日の一致判定は数字以外を除去する実装だったためクォートの影響を受けず、この不整合には気づきにくかった)。修正済み(`stripQuotes`ヘルパーで前後のクォートを除去してから数値変換する)。
 
+2026-09-05、上記の逆日歩予測機能のため`parseTaisyakuCsv`を拡張し、残高(`融資残高`/`貸株残高`)・貸借値段・最高料率・応札ランク・制限措置・臨時措置の各列も取得するようにした。実機確認(`docs/superpowers/notes/2026-09-05-taisyaku-csv-balance-columns.md`)で、実際のCSVはヘッダーが27列(想定していた11列程度より多い)で、桁区切りカンマは観測されず、品貸料率列には`-`以外に`*****`という想定外の非数値マーカーも存在する(差引残高がちょうど0になる境界日にのみ出現)ことが判明した。`occurred`(その日に実際の品薄が発生したか)の判定は文字列`'-'`との比較ではなく「数値としてparseできるか」に一本化し、`*****`を含む未知のマーカーにも耐えるようにしている。
+
 ### Lambda
 
 | 関数 | トリガー | 役割 |
@@ -150,6 +161,7 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
 | `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert |
 | `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし逆日歩リスクを事前計算・書き戻し。`GET /yutai`一覧APIが銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため |
+| `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 9 * * ? *)` = JST 18:40 毎日) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`・`JQuantsMarginBalance`(直近値)を読み、貸株超過率のビン別充足率分布(全銘柄プール+銘柄実績の縮小推定ブレンド)から次回権利日の予測逆日歩を算出し`JQuantsGyakuhibuForecast`へupsert |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理 |
 | `AuthorizerFunction` | API GatewayのLambdaオーソライザー | `x-app-password` ヘッダーを `JQuantsAppPassword` と照合(結果は5分キャッシュ) |
 
@@ -165,6 +177,8 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待実施銘柄の一覧(各銘柄の「次回の権利日」で絞り込み)+ 前日終値・単元株数から算出したリスクバッジ(`safe`/`danger`/`na`。`na`になるのは、信用残データ無し=貸借銘柄でない場合・次回の権利日が無い場合・前日終値がまだ記録されていない場合、のいずれか)+ `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
 | `GET /yutai/{ticker}` | 優待マスタ情報 + 銘柄基本情報(前日終値・出来高・PER・決算サマリ主要項目)+ 逆日歩リスク計算結果(最高料率・最大逆日歩額・品貸日数・`riskStatus`〔`safe`/`danger`/`na`、詳細画面のバッジ表示に使用〕、次回権利日ベース)+ `rightsHistory`(過去の権利日ごとの実績逆日歩、taisyaku.jp直近3年分) |
 | `GET /yutai/{ticker}/margin-trend` | 信用残(融資残・貸株残)の時系列。直近1年分(365件)固定 |
+| `GET /yutai/forecast?rightsDateFrom=&rightsDateTo=&keyword=&forecastStatus=` | 予測付き優待銘柄一覧。`GET /yutai`と同じ絞り込みに加え、`forecastStatus`(`safe`\|`caution`\|`danger`\|`na`\|`all`、省略時`all`)でも絞り込み可能。各行に予測分布(発生確率・予測逆日歩P50/P90・判定・根拠件数)を含む |
+| `GET /yutai/{ticker}/forecast` | 銘柄別の予測詳細。予測分布・過去権利日ごとの実績(残高・超過率・充足率・応札・措置)・全銘柄プールのビン別統計・信用残トレンド直近値をまとめて返す |
 
 書き込み系(POST/PUT/DELETE)は`/yutai`系には無い(読み取り専用画面のため)。CORSの`allowOrigins`はCloudFrontの配信ドメインと`http://localhost:5173`(ローカル開発用)のみ。
 
@@ -202,6 +216,8 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 | `/watchlist` | ウォッチリスト管理(銘柄コードで追加/削除) |
 | `/yutai` | 優待クロス スクリーニング一覧(読み取り専用)。権利日範囲(デフォルト当月1日〜末日)・キーワード・リスク判定で絞り込み、当月の権利付き最終日をバナー表示 |
 | `/yutai/:ticker` | 優待クロス詳細画面。ページ上部(タイトル横)に`/tickers/:ticker`への相互リンク → 銘柄基本情報 → 優待内容 → 逆日歩リスク計算(最大逆日歩にホバーすると実績逆日歩履歴のツールチップ) → 信用残トレンドグラフ、の順 |
+| `/yutai/forecast` | 逆日歩予測 一覧(読み取り専用)。`/yutai`と同じ絞り込みに加え判定(危険/注意/安全/対象外)でも絞り込み、判定→期待値差の順でデフォルトソート |
+| `/yutai/:ticker/forecast` | 逆日歩予測 詳細。サマリカード(発生確率・予測中央値・予測P90・優待価値との差)→貸株超過率と充足率の曲線グラフ(全銘柄プール+自銘柄実績の重ね書き)→感度表→過去権利日テーブル→信用残トレンド、の順。既存の`/yutai/:ticker`から相互リンク |
 
 デザイン: 日本市場の慣例に合わせ**上昇=赤/下落=緑**(米国式とは逆)。数値は`JetBrains Mono`のtabular-numsで統一表示。
 
@@ -209,6 +225,10 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 
 - ウォッチリスト管理の「会社名検索」は、コード追加時に`/equities/master`を1回だけ呼んで会社名を保存する方式に限定。J-Quants APIに会社名での検索パラメータがなく、全銘柄(数千件)をDynamoDBに同期しない限り真の名前検索はできないため、費用対効果を考えて見送った。
 - `GET /tickers/{ticker}/summary`はバッチが一度もその銘柄の決算を取得できていない場合404を返す(データを捏造しない)。
+
+### 逆日歩予測機能のバックフィル状況(2026-09-05時点、デプロイ前)
+
+`JQuantsGyakuhibuActual`の既存行(残高列拡張前)は約5,000件と見込まれ、`MAX_GYAKUHIBU_FETCHES_PER_RUN`の既定値(200件/回)のままだと約25日かかる計算のため、デプロイ直後は一時的に800前後まで引き上げてバックフィルを加速する運用を想定している(コード変更不要、CDK環境変数のみ)。実際にバックフィルへ要した日数、`GyakuhibuForecastBatchFunction`が算出したビン別サンプル数(`_POOL_`行の`bins[].n`)の実測、`MAX_GYAKUHIBU_FETCHES_PER_RUN`を既定値へ戻した日付は、デプロイ・バックフィル完了後にこの節へ追記する。
 
 ## 主要コマンド
 
