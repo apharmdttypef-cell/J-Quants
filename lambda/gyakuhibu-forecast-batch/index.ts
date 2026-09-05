@@ -1,0 +1,168 @@
+// 逆日歩予測バッチ: 優待マスタ・逆日歩実績履歴・信用残(直近値)を組み合わせ、
+// lambda/shared/gyakuhibu-forecast.tsの純粋関数でJQuantsGyakuhibuForecastテーブルへ
+// 銘柄ごとの予測(+全銘柄横断のプール曲線 `_POOL_`)を書き込む。
+// 設計: docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { buildPool, chooseScenario, forecast, toSample, type ForecastSample, type GyakuhibuActualRow } from '../shared/gyakuhibu-forecast';
+import { nextRightsDate } from '../shared/trading-calendar';
+
+const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
+const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
+const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
+const GYAKUHIBU_FORECAST_TABLE_NAME = process.env.GYAKUHIBU_FORECAST_TABLE_NAME!;
+
+const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+interface MasterRow {
+  ticker: string;
+  value: number;
+  unitShares: number;
+  rightsMonths: number[];
+  maxGyakuhibu: number | null;
+}
+
+async function scanYutaiMaster(): Promise<MasterRow[]> {
+  const rows: MasterRow[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({ TableName: YUTAI_MASTER_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
+    );
+    for (const item of result.Items ?? []) {
+      if (typeof item.ticker === 'string' && typeof item.value === 'number' && typeof item.unitShares === 'number') {
+        rows.push({
+          ticker: item.ticker,
+          value: item.value,
+          unitShares: item.unitShares,
+          rightsMonths: Array.isArray(item.rightsMonths) ? item.rightsMonths : [],
+          maxGyakuhibu: typeof item.maxGyakuhibu === 'number' ? item.maxGyakuhibu : null,
+        });
+      }
+    }
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  return rows;
+}
+
+// 全ticker横断で逆日歩実績履歴をスキャンする(scanYutaiMasterと同じdo-whileページング)。
+async function scanGyakuhibuActual(): Promise<GyakuhibuActualRow[]> {
+  const rows: GyakuhibuActualRow[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({ TableName: GYAKUHIBU_ACTUAL_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
+    );
+    for (const item of result.Items ?? []) {
+      if (typeof item.ticker === 'string' && typeof item.rightsDate === 'string') {
+        rows.push({
+          ticker: item.ticker,
+          rightsDate: item.rightsDate,
+          financingBalance: typeof item.financingBalance === 'number' ? item.financingBalance : 0,
+          lendingBalance: typeof item.lendingBalance === 'number' ? item.lendingBalance : 0,
+          avgRate: typeof item.avgRate === 'number' ? item.avgRate : 0,
+          days: typeof item.days === 'number' ? item.days : 0,
+          maxRateActual: typeof item.maxRateActual === 'number' ? item.maxRateActual : null,
+          restriction: typeof item.restriction === 'string' ? item.restriction : null,
+          emergencyMeasure: typeof item.emergencyMeasure === 'string' ? item.emergencyMeasure : null,
+          enriched: item.enriched === true,
+          noGyakuhibu: item.noGyakuhibu === true ? true : undefined,
+        });
+      }
+    }
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  return rows;
+}
+
+// chooseScenarioの'current-tse'フォールバック用、東証信用残(mkt-margin-int/alert由来)の直近値。
+async function latestMarginBalance(ticker: string): Promise<{ financingBalance: number; lendingBalance: number } | null> {
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: MARGIN_BALANCE_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker',
+      ExpressionAttributeValues: { ':ticker': ticker },
+      ScanIndexForward: false,
+      Limit: 1,
+    }),
+  );
+  const item = result.Items?.[0];
+  if (!item || typeof item.financingBalance !== 'number' || typeof item.lendingBalance !== 'number') return null;
+  return { financingBalance: item.financingBalance, lendingBalance: item.lendingBalance };
+}
+
+function groupByTicker(samples: ForecastSample[]): Map<string, ForecastSample[]> {
+  const map = new Map<string, ForecastSample[]>();
+  for (const sample of samples) {
+    const list = map.get(sample.ticker);
+    if (list) list.push(sample);
+    else map.set(sample.ticker, [sample]);
+  }
+  return map;
+}
+
+export const handler = async (): Promise<void> => {
+  const master = await scanYutaiMaster();
+  const unitSharesByTicker = new Map(master.map((m) => [m.ticker, m.unitShares]));
+
+  const actualRows = await scanGyakuhibuActual();
+  const allSamples = actualRows
+    .map((row) => toSample(row, unitSharesByTicker.get(row.ticker) ?? 100))
+    .filter((s): s is ForecastSample => s !== null);
+
+  const samplesByTicker = groupByTicker(allSamples);
+  const pool = buildPool(allSamples);
+  const computedAt = new Date().toISOString().slice(0, 10);
+
+  // プール行は銘柄ループより先に書く(プールが無いと全銘柄naになるため、失敗時はログで目立たせる)。
+  await ddbDocClient.send(
+    new PutCommand({
+      TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
+      Item: { ticker: '_POOL_', bins: pool, computedAt },
+    }),
+  );
+
+  let written = 0;
+  for (const row of master) {
+    try {
+      const nextDate = nextRightsDate(row.rightsMonths);
+      if (!nextDate) {
+        console.warn(`${row.ticker}: no upcoming rights date, skipping`);
+        continue;
+      }
+
+      const tickerSamples = samplesByTicker.get(row.ticker) ?? [];
+      // scenario 'current-tse'用。呼び出し側で使うかどうかに関わらず毎回引く
+      // (chooseScenarioが内部で要不要を判断する)。
+      const tseLatest = await latestMarginBalance(row.ticker);
+      const nextRightsMonth = Number(nextDate.slice(5, 7));
+      const { scenario, excessRatio } = chooseScenario(tickerSamples, nextRightsMonth, tseLatest);
+
+      // poolSamplesは「ビンで絞り込まない全件」を渡す契約(forecast内部で絞り込む)。
+      const result = forecast({
+        tickerSamples,
+        poolSamples: allSamples,
+        scenario,
+        excessRatio,
+        maxGyakuhibu: row.maxGyakuhibu,
+        value: row.value,
+      });
+
+      await ddbDocClient.send(
+        new PutCommand({
+          TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
+          Item: { ticker: row.ticker, rightsDate: nextDate, ...result, computedAt },
+        }),
+      );
+      written++;
+    } catch (error) {
+      console.error(`${row.ticker}: failed to compute/write forecast`, error);
+    }
+  }
+
+  console.log(`gyakuhibu-forecast-batch: wrote ${written} of ${master.length} ticker forecasts`);
+};

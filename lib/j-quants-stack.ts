@@ -21,6 +21,7 @@ export class JQuantsStack extends cdk.Stack {
   public readonly yutaiMasterTable: dynamodb.Table;
   public readonly marginBalanceTable: dynamodb.Table;
   public readonly gyakuhibuActualTable: dynamodb.Table;
+  public readonly gyakuhibuForecastTable: dynamodb.Table;
   public readonly apiKeySecret: secretsmanager.Secret;
   public readonly api: apigwv2.HttpApi;
   public readonly frontendBucket: s3.Bucket;
@@ -89,6 +90,17 @@ export class JQuantsStack extends cdk.Stack {
       tableName: 'JQuantsGyakuhibuActual',
       partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'rightsDate', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // 逆日歩予測(gyakuhibu-forecast-batch)の日次事前計算結果。銘柄行 + 全銘柄横断の
+    // プール曲線行(ticker='_POOL_')。毎日全件再計算される派生データでRETAIN必須ではないが、
+    // JQuantsWatchlistTableと同じ理由で他テーブルと運用を揃える。
+    this.gyakuhibuForecastTable = new dynamodb.Table(this, 'JQuantsGyakuhibuForecastTable', {
+      tableName: 'JQuantsGyakuhibuForecast',
+      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
@@ -306,6 +318,32 @@ export class JQuantsStack extends cdk.Stack {
     new events.Rule(this, 'YutaiRiskPrecomputeBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '20', hour: '9' }),
       targets: [new targets.LambdaFunction(yutaiRiskPrecomputeBatchFn)],
+    });
+
+    const gyakuhibuForecastBatchFn = new nodejs.NodejsFunction(this, 'GyakuhibuForecastBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'gyakuhibu-forecast-batch', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
+        MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
+        GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName,
+      },
+    });
+
+    this.yutaiMasterTable.grantReadData(gyakuhibuForecastBatchFn);
+    this.gyakuhibuActualTable.grantReadData(gyakuhibuForecastBatchFn);
+    this.marginBalanceTable.grantReadData(gyakuhibuForecastBatchFn);
+    this.gyakuhibuForecastTable.grantWriteData(gyakuhibuForecastBatchFn);
+
+    // 逆日歩実績(GyakuhibuHistoryBatchSchedule: 毎日10:00 UTC)の後に実行する。JST 18:40 = UTC 09:40。
+    new events.Rule(this, 'GyakuhibuForecastBatchSchedule', {
+      schedule: events.Schedule.cron({ minute: '40', hour: '9' }),
+      targets: [new targets.LambdaFunction(gyakuhibuForecastBatchFn)],
     });
 
     const referenceApiFn = new nodejs.NodejsFunction(this, 'ReferenceApiFunction', {

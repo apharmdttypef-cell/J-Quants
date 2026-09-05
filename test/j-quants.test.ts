@@ -279,8 +279,9 @@ test('creates the yutai-master-sync-batch Lambda with write access to the yutai 
     (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
   );
   // yutai-master-sync-batch自体のスケジュールは存在しない。他バッチの4つのスケジュール
-  // (price/financial-summary/margin-balance/gyakuhibu-history)+tdnet-watch+yutai-risk-precomputeの6つのみ。
-  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
+  // (price/financial-summary/margin-balance/gyakuhibu-history)+tdnet-watch+yutai-risk-precompute
+  // +gyakuhibu-forecastの7つのみ。
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(7);
 });
 
 test('creates the yutai-tdnet-watch-batch Lambda on a weekly Monday schedule', () => {
@@ -355,4 +356,77 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
     });
   });
   expect(hasMarginStockReadAccess).toBe(true);
+});
+
+test('creates the JQuantsGyakuhibuForecast table (ticker only key) with RETAIN policy', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsGyakuhibuForecast',
+    KeySchema: [{ AttributeName: 'ticker', KeyType: 'HASH' }],
+    BillingMode: 'PAY_PER_REQUEST',
+  });
+  template.hasResource('AWS::DynamoDB::Table', {
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  });
+});
+
+test('creates the gyakuhibu-forecast-batch Lambda wired to master/actual/margin/forecast tables, on a daily schedule after gyakuhibu-history-batch', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Timeout: 840, // 14 minutes in seconds
+    Environment: {
+      Variables: Match.exact({
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
+        MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(),
+      }),
+    },
+  });
+
+  // GyakuhibuHistoryBatchSchedule(daily 10:00 UTC)の後、JST 18:40 = UTC 09:40。
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'cron(40 9 * * ? *)',
+    State: 'ENABLED',
+  });
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const policyEntries = Object.entries(policies);
+
+  const hasForecastWriteAccess = policyEntries.some(([name, p]) => {
+    if (!name.includes('GyakuhibuForecastBatch')) return false;
+
+    const statements = (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } }).Properties?.PolicyDocument?.Statement || [];
+    return statements.some((stmt) => {
+      const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+      const hasWriteActions = actions.some(
+        (action) => action && (action.includes('PutItem') || action.includes('UpdateItem') || action.includes('DeleteItem')),
+      );
+      const hasForecastResource = JSON.stringify(stmt.Resource || '').includes('GyakuhibuForecast');
+      return hasWriteActions && hasForecastResource;
+    });
+  });
+  expect(hasForecastWriteAccess).toBe(true);
+
+  const hasReadAccessToInputs = policyEntries.some(([name, p]) => {
+    if (!name.includes('GyakuhibuForecastBatch')) return false;
+
+    const statements = (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } }).Properties?.PolicyDocument?.Statement || [];
+    return statements.some((stmt) => {
+      const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+      const hasReadActions = actions.some(
+        (action) => action && (action.includes('GetItem') || action.includes('Query') || action.includes('Scan') || action.includes('BatchGetItem')),
+      );
+      const resourceStr = JSON.stringify(stmt.Resource || '');
+      const hasInputResource =
+        resourceStr.includes('YutaiMaster') || resourceStr.includes('GyakuhibuActual') || resourceStr.includes('MarginBalance');
+      return hasReadActions && hasInputResource;
+    });
+  });
+  expect(hasReadAccessToInputs).toBe(true);
 });
