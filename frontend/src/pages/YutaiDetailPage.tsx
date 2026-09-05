@@ -80,7 +80,12 @@ export function YutaiDetailPage() {
         </div>
       </div>
 
-      <div className="section-heading">逆日歩リスク計算</div>
+      <div className="section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <span>逆日歩リスク計算</span>
+        <Link to={`/yutai/${data.ticker}/forecast`} style={{ fontSize: '0.85rem', fontWeight: 400 }}>
+          予測を見る →
+        </Link>
+      </div>
       <div className="card">
         <div className="summary-item__label">最大逆日歩(概算・次回権利日の予測)</div>
         {data.risk.maxGyakuhibu !== null ? (

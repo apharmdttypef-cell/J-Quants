@@ -11,6 +11,7 @@ import { WatchlistPage } from './pages/WatchlistPage';
 import { YutaiListPage } from './pages/YutaiListPage';
 import { YutaiForecastListPage } from './pages/YutaiForecastListPage';
 import { YutaiDetailPage } from './pages/YutaiDetailPage';
+import { YutaiForecastDetailPage } from './pages/YutaiForecastDetailPage';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -25,6 +26,7 @@ createRoot(document.getElementById('root')!).render(
             <Route path="yutai" element={<YutaiListPage />} />
             <Route path="yutai/forecast" element={<YutaiForecastListPage />} />
             <Route path="yutai/:ticker" element={<YutaiDetailPage />} />
+            <Route path="yutai/:ticker/forecast" element={<YutaiForecastDetailPage />} />
           </Route>
         </Routes>
       </BrowserRouter>
