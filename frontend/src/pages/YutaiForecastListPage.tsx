@@ -147,19 +147,31 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
 
 const KEYWORD_DEBOUNCE_MS = 400;
 
+// keywordのstateをこの専用の子コンポーネントに閉じ込める。親(YutaiForecastListPage)に
+// keyword自体を持たせると、1文字打つたびに親全体(数百行のテーブルを含む)が再レンダー
+// され、行モデルの中身は変わらなくてもJSXツリーの再構築・差分比較コストがスマホで
+// 無視できないほど重くなる。onChangeはデバウンス後にしか呼ばれないため、親は実際に
+// 検索条件が変わった時だけ再レンダーすればよい。
+function KeywordFilterInput({ onDebouncedChange }: { onDebouncedChange: (value: string) => void }) {
+  const [value, setValue] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => onDebouncedChange(value), KEYWORD_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [value, onDebouncedChange]);
+
+  return (
+    <input className="input" value={value} onChange={(e) => setValue(e.target.value)} placeholder="会社名・優待内容" />
+  );
+}
+
 export function YutaiForecastListPage() {
   const navigate = useNavigate();
   const defaultRange = monthRange();
   const [rightsDateFrom, setRightsDateFrom] = useState(defaultRange.from);
   const [rightsDateTo, setRightsDateTo] = useState(defaultRange.to);
-  const [keyword, setKeyword] = useState('');
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
   const [forecastStatus, setForecastStatus] = useState<'all' | YutaiForecastStatus>('all');
-
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedKeyword(keyword), KEYWORD_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [keyword]);
 
   const listState = useAsync(
     () => fetchYutaiForecastList({ rightsDateFrom, rightsDateTo, keyword: debouncedKeyword || undefined, forecastStatus }),
@@ -210,13 +222,7 @@ export function YutaiForecastListPage() {
           <input type="date" className="input" value={rightsDateTo} onChange={(e) => setRightsDateTo(e.target.value)} />
         </label>
         <label>
-          キーワード:{' '}
-          <input
-            className="input"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            placeholder="会社名・優待内容"
-          />
+          キーワード: <KeywordFilterInput onDebouncedChange={setDebouncedKeyword} />
         </label>
         <label>
           判定:{' '}

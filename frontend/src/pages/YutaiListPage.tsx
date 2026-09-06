@@ -86,20 +86,31 @@ const columns: ColumnDef<YutaiListItem>[] = [
 // GET /yutai が発火し、無駄なリクエストとバックエンドの再スキャンが増えてしまう。
 const KEYWORD_DEBOUNCE_MS = 400;
 
+// keywordのstateをこの専用の子コンポーネントに閉じ込める。親(YutaiListPage)にkeyword
+// 自体を持たせると、1文字打つたびに親全体(テーブルを含む)が再レンダーされ、行モデルの
+// 中身は変わらなくてもJSXツリーの再構築・差分比較コストが検索結果の多さに応じて
+// 重くなる(逆日歩予測ページで実機のスマホで固まる不具合として顕在化した)。
+// onDebouncedChangeはデバウンス後にしか呼ばれないため、親は実際に検索条件が変わった
+// 時だけ再レンダーすればよい。
+function KeywordFilterInput({ onDebouncedChange }: { onDebouncedChange: (value: string) => void }) {
+  const [value, setValue] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => onDebouncedChange(value), KEYWORD_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [value, onDebouncedChange]);
+
+  return (
+    <input className="input" value={value} onChange={(e) => setValue(e.target.value)} placeholder="会社名・優待内容" />
+  );
+}
+
 export function YutaiListPage() {
   const defaultRange = monthRange();
   const [rightsDateFrom, setRightsDateFrom] = useState(defaultRange.from);
   const [rightsDateTo, setRightsDateTo] = useState(defaultRange.to);
-  const [keyword, setKeyword] = useState('');
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
   const [riskStatus, setRiskStatus] = useState<'all' | YutaiRiskStatus>('all');
-
-  // このアプリの規模でuseDebounceのような専用ライブラリはOverkillなので、
-  // useAsync同様に小さな手作りのuseEffectで済ませる。
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedKeyword(keyword), KEYWORD_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [keyword]);
 
   const listState = useAsync(
     () => fetchYutaiList({ rightsDateFrom, rightsDateTo, keyword: debouncedKeyword || undefined, riskStatus }),
@@ -138,13 +149,7 @@ export function YutaiListPage() {
           <input type="date" className="input" value={rightsDateTo} onChange={(e) => setRightsDateTo(e.target.value)} />
         </label>
         <label>
-          キーワード:{' '}
-          <input
-            className="input"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            placeholder="会社名・優待内容"
-          />
+          キーワード: <KeywordFilterInput onDebouncedChange={setDebouncedKeyword} />
         </label>
         <label>
           リスク判定:{' '}
