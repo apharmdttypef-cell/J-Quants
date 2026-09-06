@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable } from '@tanstack/react-table';
 import type { ColumnDef } from '@tanstack/react-table';
@@ -166,7 +166,15 @@ export function YutaiForecastListPage() {
     [rightsDateFrom, rightsDateTo, debouncedKeyword, forecastStatus],
   );
 
-  const sortedTickers = [...(listState.data?.tickers ?? [])].sort(compareByDefaultOrder);
+  // listState.dataが変わった時(=フェッチ完了時)だけ並べ替える。ここをuseMemoしないと
+  // keyword入力のたびの再レンダーで毎回新しい配列を作ってしまい、useReactTableが
+  // 「新しいdata」と見なして内部の行モデルを毎回作り直す(検索結果が多いとスマホで
+  // 固まって見えるほど重い)。既存のYutaiListPageはlistState.data?.tickersをそのまま
+  // 渡していて参照が安定しているため、この問題が起きない。
+  const sortedTickers = useMemo(
+    () => [...(listState.data?.tickers ?? [])].sort(compareByDefaultOrder),
+    [listState.data],
+  );
 
   const table = useReactTable({
     data: sortedTickers,
