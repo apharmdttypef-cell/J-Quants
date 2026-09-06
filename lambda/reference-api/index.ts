@@ -208,7 +208,7 @@ interface YutaiMasterRow {
   ticker: string;
   companyName?: string;
   content: string;
-  value: number;
+  value: number | null;
   unitShares: number;
   rightsMonths: number[];
   riskStatus: RiskStatus;

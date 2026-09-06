@@ -525,3 +525,32 @@ test('GET /yutai/{ticker}/forecast returns 404 for an unknown ticker', async () 
 
   expect((result as { statusCode: number }).statusCode).toBe(404);
 });
+
+test('GET /yutai includes a ticker whose value is null instead of dropping it', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [
+      { ticker: '9001', companyName: '東武鉄道', content: '優待乗車証（回数券：2枚～）など', value: null, unitShares: 100, rightsMonths: [8], riskStatus: 'na', maxGyakuhibu: 12400, maxRate: 124, days: 1 },
+    ],
+  });
+
+  const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
+
+  const parsed = body(result) as { tickers: Array<Record<string, unknown>> };
+  expect(parsed.tickers).toHaveLength(1);
+  expect(parsed.tickers[0]).toMatchObject({ ticker: '9001', value: null, riskStatus: 'na', maxGyakuhibu: 12400 });
+});
+
+test('GET /yutai/{ticker} returns value: null when the yutai value is unknown', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '9001', companyName: '東武鉄道', content: '優待乗車証（回数券：2枚～）など', value: null, unitShares: 100, rightsMonths: [8], riskStatus: 'na', maxGyakuhibu: 12400, maxRate: 124, days: 1 },
+    }) // yutai master get
+    .mockResolvedValueOnce({ Items: [] }) // latest price
+    .mockResolvedValueOnce({ Items: [] }) // financial summary
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actual history
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '9001' } }));
+
+  const parsed = body(result) as { value: number | null };
+  expect(parsed.value).toBeNull();
+});
