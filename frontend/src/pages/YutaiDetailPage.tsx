@@ -71,7 +71,7 @@ export function YutaiDetailPage() {
         <div className="summary-grid">
           <div className="summary-item">
             <div className="summary-item__label">優待価値</div>
-            <div className="summary-item__value">{formatFinancialYen(String(data.value))}</div>
+            <div className="summary-item__value">{data.value !== null ? formatFinancialYen(String(data.value)) : '—'}</div>
           </div>
           <div className="summary-item">
             <div className="summary-item__label">権利日</div>

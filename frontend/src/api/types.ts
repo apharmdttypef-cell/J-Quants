@@ -37,7 +37,7 @@ export interface YutaiListItem {
   ticker: string;
   companyName?: string;
   content: string;
-  value: number;
+  value: number | null;
   rightsDate: string | null;
   riskStatus: YutaiRiskStatus;
   maxGyakuhibu: number | null;
@@ -76,7 +76,7 @@ export interface YutaiDetail {
   ticker: string;
   companyName: string | null;
   content: string;
-  value: number;
+  value: number | null;
   unitShares: number;
   rightsDate: string | null;
   basicInfo: YutaiBasicInfo;
