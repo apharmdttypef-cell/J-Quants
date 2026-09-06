@@ -146,3 +146,18 @@ test('forecast returns na when maxGyakuhibu is null or there are no samples at a
   });
   expect(result2.forecastStatus).toBe('na');
 });
+
+test('forecast computes forecastP50/forecastP90 but forecastStatus na and expectedNet null when value is null (優待価値不明)', () => {
+  // poolSamplesのfill=[0, 0.5, 1.0] (既存の「forecast with no ticker samples」テストと同じ入力)。
+  const poolSamples = [0, 0.5, 1.0].map((f) => sample(f));
+  const result = forecast({
+    tickerSamples: [], poolSamples, scenario: 'last-rights', excessRatio: 1.5, maxGyakuhibu: 1000, value: null,
+  });
+  // maxGyakuhibuがあるので分布そのもの(fillP50/fillP90/forecastP50/forecastP90)は計算される。
+  expect(result.fillP50).toBeCloseTo(0.5);
+  expect(result.forecastP50).toBeCloseTo(500); // 0.5 * 1000
+  expect(result.forecastP90).toBeCloseTo(1000); // 1.0 * 1000
+  // valueが無いので優待価値との比較は不能。
+  expect(result.expectedNet).toBeNull();
+  expect(result.forecastStatus).toBe('na');
+});

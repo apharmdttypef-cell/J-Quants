@@ -227,7 +227,7 @@ export function forecast(args: {
   scenario: Scenario;
   excessRatio: number | null;
   maxGyakuhibu: number | null;
-  value: number;
+  value: number | null;
 }): ForecastResult {
   const { tickerSamples, poolSamples, scenario, excessRatio: chosenExcessRatio, maxGyakuhibu, value } = args;
 
@@ -297,8 +297,10 @@ export function forecast(args: {
     forecastP50 = fillP50 * maxGyakuhibu;
     forecastP90 = fillP90 * maxGyakuhibu;
     forecastMean = fillMean * maxGyakuhibu;
-    expectedNet = value - forecastMean;
-    status = forecastStatus(value, forecastP50, forecastP90);
+    if (value !== null) {
+      expectedNet = value - forecastMean;
+      status = forecastStatus(value, forecastP50, forecastP90);
+    }
   }
 
   return {
