@@ -72,6 +72,35 @@ test('matches a yutai-related disclosure, looks it up via a single fetchAllListi
   });
 });
 
+test('upserts a matched ticker with value: null when kabuyutai.com has no extractable value, as long as rightsMonths is present', async () => {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    text: async () =>
+      dayListHtml([{ code: '21570', name: 'コシダカホールディングス', title: '株主優待制度の一部変更に関するお知らせ' }]),
+  });
+  mockFetchAllListings.mockResolvedValueOnce([
+    {
+      ticker: '2157',
+      companyName: 'コシダカホールディングス',
+      content: '割引券（金額不明）',
+      rightsMonths: [2, 8],
+      value: undefined,
+      minInvestment: 150000,
+    },
+  ]);
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  expect(mockFetchAllListings).toHaveBeenCalledTimes(1);
+  expect(mockSend).toHaveBeenCalledTimes(1);
+  expect(mockSend.mock.calls[0][0]).toMatchObject({
+    TableName: 'JQuantsYutaiMaster',
+    Key: { ticker: '2157' },
+    ExpressionAttributeValues: { ':value': null, ':unitShares': 100, ':minInvestment': 150000, ':rightsMonths': [2, 8] },
+  });
+});
+
 test('ignores disclosures whose title has no yutai-related keyword', async () => {
   mockFetch.mockResolvedValueOnce({
     ok: true,

@@ -184,7 +184,7 @@ test('continues past a single row failure and processes the remaining rows', asy
 
 test('skips a row missing unitShares without crashing', async () => {
   mockSend.mockResolvedValueOnce({
-    Items: [{ ticker: '9999', rightsMonths: [8] }], // valueもunitSharesも欠落
+    Items: [{ ticker: '9999', rightsMonths: [8] }], // unitSharesが欠落(valueも無いが、valueだけの欠落ではスキップされない)
   });
 
   await expect(handler()).resolves.not.toThrow();

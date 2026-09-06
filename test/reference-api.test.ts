@@ -293,6 +293,17 @@ test('GET /yutai falls back to riskStatus na for a row the precompute batch has 
   expect(parsed.tickers[0]).toMatchObject({ ticker: '8888', riskStatus: 'na' });
 });
 
+test('GET /yutai returns value: null (not a missing key) for a row where the value attribute is entirely absent', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [{ ticker: '8888', companyName: '新規上場HD', content: '未計算', unitShares: 100, rightsMonths: [8] }],
+  }); // no value key at all (distinct from a stored `value: null`)
+
+  const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
+
+  const parsed = body(result) as { tickers: Array<Record<string, unknown>> };
+  expect(parsed.tickers[0]).toHaveProperty('value', null);
+});
+
 test('GET /yutai/{ticker} returns basic info, precomputed risk, and rights history', async () => {
   mockSend
     .mockResolvedValueOnce({

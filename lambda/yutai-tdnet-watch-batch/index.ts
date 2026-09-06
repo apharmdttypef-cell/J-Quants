@@ -157,8 +157,8 @@ export const handler = async (): Promise<void> => {
         }
         continue;
       }
-      if (entry.value === undefined || entry.rightsMonths.length === 0) {
-        console.warn(`${ticker}: found on kabuyutai.com but value/rightsMonths incomplete; skipping`);
+      if (entry.rightsMonths.length === 0) {
+        console.warn(`${ticker}: found on kabuyutai.com but rightsMonths incomplete; skipping`);
         continue;
       }
 
@@ -172,7 +172,7 @@ export const handler = async (): Promise<void> => {
           ExpressionAttributeValues: {
             ':companyName': entry.companyName,
             ':content': entry.content,
-            ':value': entry.value,
+            ':value': entry.value ?? null,
             ':unitShares': UNIT_SHARES,
             ':minInvestment': entry.minInvestment ?? null,
             ':rightsMonths': entry.rightsMonths,
