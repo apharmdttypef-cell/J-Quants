@@ -82,6 +82,33 @@ test('computes a forecast per ticker using its own rights history and the pool',
   });
 });
 
+test('writes a forecast row (with forecastStatus na) for a ticker whose yutai value is unknown', async () => {
+  await withFixedNow(async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '9001', unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan (valueフィールド無し)
+      .mockResolvedValueOnce({
+        Items: [
+          {
+            ticker: '9001', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
+            avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
+          },
+        ],
+      }) // gyakuhibu actual scan
+      .mockResolvedValueOnce({}) // _POOL_ put
+      .mockResolvedValueOnce({ Items: [] }) // margin balance query
+      .mockResolvedValueOnce({}); // 9001のforecast put
+
+    await handler();
+
+    const puts = putCalls();
+    expect(puts).toHaveLength(2);
+    const item = (puts[1][0] as { Item: Record<string, unknown> }).Item;
+    expect(item.ticker).toBe('9001');
+    expect(item.forecastStatus).toBe('na'); // valueが無いので判定不能
+    expect(typeof item.forecastP50).toBe('number'); // 分布自体は計算される
+  });
+});
+
 test('continues with the next ticker when one ticker throws', async () => {
   const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   try {

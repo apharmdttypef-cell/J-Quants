@@ -25,7 +25,7 @@ function finiteOrNull(value: number | null): number | null {
 
 interface MasterRow {
   ticker: string;
-  value: number;
+  value: number | null;
   unitShares: number;
   rightsMonths: number[];
   maxGyakuhibu: number | null;
@@ -40,10 +40,10 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
       new ScanCommand({ TableName: YUTAI_MASTER_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
     );
     for (const item of result.Items ?? []) {
-      if (typeof item.ticker === 'string' && typeof item.value === 'number' && typeof item.unitShares === 'number') {
+      if (typeof item.ticker === 'string' && typeof item.unitShares === 'number') {
         rows.push({
           ticker: item.ticker,
-          value: item.value,
+          value: typeof item.value === 'number' ? item.value : null,
           unitShares: item.unitShares,
           rightsMonths: Array.isArray(item.rightsMonths) ? item.rightsMonths : [],
           maxGyakuhibu: typeof item.maxGyakuhibu === 'number' ? item.maxGyakuhibu : null,
