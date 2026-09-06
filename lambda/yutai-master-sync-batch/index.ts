@@ -22,11 +22,6 @@ export const handler = async (): Promise<void> => {
   // 入っているため、同一ticker・同一内容のentryが複数回来る)。複数回upsertされても
   // 内容は同じなので実害は無い(冪等)。
   for (const entry of entries) {
-    if (entry.value === undefined) {
-      console.warn(`${entry.ticker}: could not extract value from content "${entry.content}"; skipping`);
-      skipped++;
-      continue;
-    }
     if (entry.rightsMonths.length === 0) {
       console.warn(`${entry.ticker}: could not parse rightsMonths; skipping`);
       skipped++;
@@ -44,7 +39,7 @@ export const handler = async (): Promise<void> => {
           ExpressionAttributeValues: {
             ':companyName': entry.companyName,
             ':content': entry.content,
-            ':value': entry.value,
+            ':value': entry.value ?? null,
             ':unitShares': UNIT_SHARES,
             ':minInvestment': entry.minInvestment ?? null,
             ':rightsMonths': entry.rightsMonths,

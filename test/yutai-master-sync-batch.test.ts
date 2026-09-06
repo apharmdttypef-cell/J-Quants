@@ -63,20 +63,20 @@ test('coalesces a missing minInvestment to null rather than leaving it undefined
   });
 });
 
-test('skips an entry with no extractable value, logging a warning', async () => {
-  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-  try {
-    mockFetchAllListings.mockResolvedValueOnce([
-      { ticker: '1111', companyName: 'テスト企業', content: '特典あり', rightsMonths: [3], value: undefined },
-    ]);
+test('upserts an entry with no extractable value as value: null instead of skipping it', async () => {
+  mockFetchAllListings.mockResolvedValueOnce([
+    { ticker: '9001', companyName: '東武鉄道', content: '優待乗車証（回数券：2枚～）など', rightsMonths: [3], value: undefined, minInvestment: undefined },
+  ]);
+  mockSend.mockResolvedValue({});
 
-    await handler();
+  await handler();
 
-    expect(mockSend).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1111'));
-  } finally {
-    warnSpy.mockRestore();
-  }
+  expect(mockSend).toHaveBeenCalledTimes(1);
+  expect(mockSend.mock.calls[0][0]).toMatchObject({
+    TableName: 'JQuantsYutaiMaster',
+    Key: { ticker: '9001' },
+    ExpressionAttributeValues: expect.objectContaining({ ':value': null }),
+  });
 });
 
 test('skips an entry with no rightsMonths, logging a warning', async () => {
