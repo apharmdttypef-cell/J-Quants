@@ -18,7 +18,7 @@ const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 interface MasterRow {
   ticker: string;
-  value: number;
+  value: number | null;
   unitShares: number;
   minInvestment: number | null;
   rightsMonths: number[];
@@ -33,10 +33,10 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
       new ScanCommand({ TableName: YUTAI_MASTER_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
     );
     for (const item of result.Items ?? []) {
-      if (typeof item.ticker === 'string' && typeof item.value === 'number' && typeof item.unitShares === 'number') {
+      if (typeof item.ticker === 'string' && typeof item.unitShares === 'number') {
         rows.push({
           ticker: item.ticker,
-          value: item.value,
+          value: typeof item.value === 'number' ? item.value : null,
           unitShares: item.unitShares,
           minInvestment: typeof item.minInvestment === 'number' ? item.minInvestment : null,
           rightsMonths: item.rightsMonths ?? [],
@@ -111,7 +111,7 @@ function fetchTradingCalendarCached(from: string, to: string, cache: Map<string,
 }
 
 async function calcRisk(
-  row: { ticker: string; value: number; unitShares: number; minInvestment: number | null },
+  row: { ticker: string; value: number | null; unitShares: number; minInvestment: number | null },
   rightsDate: string | undefined,
   calendarCache: Map<string, CalendarDay[]>,
 ): Promise<RiskResult> {
@@ -136,7 +136,7 @@ async function calcRisk(
   // 最高料率は無条件に4倍で見積もる(docs/superpowers/notes/2026-09-03-taisyaku-rights-day-rate-multiplier.md参照)。
   const maxRate = calcMaxRate(closePrice, unitShares) * RIGHTS_DAY_RATE_MULTIPLIER;
   const maxGyakuhibu = calcMaxGyakuhibu(closePrice, unitShares, days) * RIGHTS_DAY_RATE_MULTIPLIER;
-  const riskStatus: RiskStatus = row.value > maxGyakuhibu ? 'safe' : 'danger';
+  const riskStatus: RiskStatus = row.value === null ? 'na' : row.value > maxGyakuhibu ? 'safe' : 'danger';
   return { riskStatus, maxGyakuhibu, maxRate, days, unitShares };
 }
 

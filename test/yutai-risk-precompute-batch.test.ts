@@ -87,6 +87,23 @@ test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric
   expect(typeof values[':days']).toBe('number');
 });
 
+test('computes maxGyakuhibu/maxRate/days but writes riskStatus na when value is null (優待価値が抽出できない銘柄)', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '9001', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan (valueフィールド無し = 東武鉄道のような銘柄)
+    .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-10' }] }) // margin balance presence: yes
+    .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-12', close: 500 }] }); // latest close
+
+  await handler();
+
+  const calls = updateCalls();
+  expect(calls).toHaveLength(1);
+  const values = (calls[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
+  expect(values[':riskStatus']).toBe('na'); // valueが無いので比較できずna
+  expect(typeof values[':maxGyakuhibu']).toBe('number'); // valueの有無に関わらず計算される
+  expect(typeof values[':maxRate']).toBe('number');
+  expect(typeof values[':days']).toBe('number');
+});
+
 test('derives unitShares from minInvestment÷closePrice when it implies more than the stored default (第一興商-style: 単元100株だが優待には200株必要)', async () => {
   mockSend
     .mockResolvedValueOnce({
@@ -165,7 +182,7 @@ test('continues past a single row failure and processes the remaining rows', asy
   }
 });
 
-test('skips a row missing value or unitShares without crashing', async () => {
+test('skips a row missing unitShares without crashing', async () => {
   mockSend.mockResolvedValueOnce({
     Items: [{ ticker: '9999', rightsMonths: [8] }], // valueもunitSharesも欠落
   });
