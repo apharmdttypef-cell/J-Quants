@@ -4,7 +4,7 @@ const NAV_ITEMS = [
   { to: '/', label: '銘柄一覧', end: true },
   { to: '/screening', label: 'スクリーニング' },
   { to: '/watchlist', label: 'ウォッチリスト管理' },
-  { to: '/yutai', label: '優待クロス' },
+  { to: '/yutai', label: '優待クロス', end: true },
   { to: '/yutai/forecast', label: '逆日歩予測' },
 ];
 
