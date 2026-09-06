@@ -67,7 +67,15 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
     accessorKey: 'value',
     header: '優待価値',
     sortDescFirst: false,
-    cell: ({ row }) => formatFinancialYen(String(row.original.value)),
+    sortingFn: (rowA, rowB) => {
+      const a = rowA.original.value;
+      const b = rowB.original.value;
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return a - b;
+    },
+    cell: ({ row }) => (row.original.value !== null ? formatFinancialYen(String(row.original.value)) : '—'),
   },
   {
     accessorKey: 'rightsDate',

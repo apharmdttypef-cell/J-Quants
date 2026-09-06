@@ -123,7 +123,7 @@ export interface YutaiForecastListItem {
   ticker: string;
   companyName?: string;
   content: string;
-  value: number;
+  value: number | null;
   rightsDate: string | null;
   riskStatus: YutaiRiskStatus;
   maxGyakuhibu: number | null;
@@ -173,7 +173,7 @@ export interface YutaiForecastDetail {
   ticker: string;
   companyName: string | null;
   content: string;
-  value: number;
+  value: number | null;
   unitShares: number;
   rightsDate: string | null;
   maxGyakuhibu: number | null;

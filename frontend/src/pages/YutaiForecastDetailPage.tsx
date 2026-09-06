@@ -101,7 +101,7 @@ export function YutaiForecastDetailPage() {
   const { data } = detailState;
   const { forecast } = data;
   const maxGyakuhibu = data.maxGyakuhibu;
-  const netP90 = forecast.forecastP90 !== null ? data.value - forecast.forecastP90 : null;
+  const netP90 = forecast.forecastP90 !== null && data.value !== null ? data.value - forecast.forecastP90 : null;
 
   const chartData = BIN_LABELS.map((label) => {
     const bin = data.poolBins.find((b) => b.label === label);
@@ -217,7 +217,7 @@ export function YutaiForecastDetailPage() {
                       <td className="num">{formatPercent(bin.pOccur)}</td>
                       <td className="num">{formatFinancialYen(String(p50))}</td>
                       <td className="num">{formatFinancialYen(String(p90))}</td>
-                      <td className="num">{formatSignedYen(data.value - p90)}</td>
+                      <td className="num">{data.value !== null ? formatSignedYen(data.value - p90) : '—'}</td>
                     </tr>
                   );
                 })}
