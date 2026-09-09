@@ -199,3 +199,130 @@ test('every PutCommand Item survives real DynamoDB marshalling (no Infinity/-Inf
     }
   });
 });
+
+function withTseEnabled(fn: () => Promise<void>): Promise<void> {
+  process.env.TSE_MARGIN_FEATURES_ENABLED = 'true';
+  return fn().finally(() => {
+    process.env.TSE_MARGIN_FEATURES_ENABLED = 'false';
+  });
+}
+
+test('writes _POOL_TSE_ after _POOL_ and a tseForecast per ticker when the flag is on', async () => {
+  await withTseEnabled(() =>
+    withFixedNow(async () => {
+      mockSend
+        .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
+        .mockResolvedValueOnce({
+          Items: [
+            {
+              ticker: '1234', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
+              avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
+            },
+          ],
+        }) // gyakuhibu actual scan
+        .mockResolvedValueOnce({
+          Items: [
+            { ticker: '1234', date: '2025-08-01', financingBalance: 100, lendingBalance: 250, source: 'weekly' }, // 権利日2025-08-27の26日前(バケット'22+'のサンプル用、超過率1.5)
+            { ticker: '1234', date: '2026-07-03', financingBalance: 100, lendingBalance: 25, source: 'weekly' }, // 4週前比の基準
+            { ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 50, source: 'weekly' }, // 直近(today=2026-08-01)
+          ],
+        }) // margin balance scan
+        .mockResolvedValueOnce({}) // _POOL_ put
+        .mockResolvedValueOnce({}) // _POOL_TSE_ put
+        .mockResolvedValueOnce({}); // 1234のforecast put
+
+      await handler();
+
+      const puts = putCalls();
+      expect(puts.map((c) => (c[0] as { Item: { ticker: string } }).Item.ticker)).toEqual(['_POOL_', '_POOL_TSE_', '1234']);
+
+      const pool = (puts[1][0] as { Item: { buckets: Record<string, unknown[]> } }).Item;
+      expect(Object.keys(pool.buckets).sort()).toEqual(['0-7', '22+', '8-21']);
+      expect(pool.buckets['22+']).toHaveLength(6);
+
+      const tse = (puts[2][0] as { Item: { tseForecast: Record<string, unknown> } }).Item.tseForecast;
+      // 直近スナップショット2026-07-31 → 次回権利日2026-08-27 まで27日 → バケット'22+'。
+      expect(tse.snapshotDate).toBe('2026-07-31');
+      expect(tse.lagDays).toBe(27);
+      expect(tse.lagBucket).toBe('22+');
+      expect(tse.scenario).toBe('current-tse');
+      // 超過率 (50-100)/100 = -0.5 → 融資超過ビン。プールに同ビンのサンプルは無く、自銘柄の
+      // '22+'サンプル(2025-08-01時点の超過率1.5、充足率1)だけで w=1 → forecastP50 = 1×5000。
+      expect(tse.bin).toBe('融資超過');
+      expect(tse.forecastP50).toBe(5000);
+      expect(tse.forecastStatus).toBe('danger'); // value 1000 <= P50 5000
+      expect(tse.lendingGrowth4w).toBeCloseTo(2); // 50 / 25
+    }),
+  );
+});
+
+test('skips the TSE step entirely when the flag is off (no margin scan, no _POOL_TSE_, no tseForecast attribute)', async () => {
+  await withFixedNow(async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
+      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
+      .mockResolvedValueOnce({}) // _POOL_ put
+      .mockResolvedValueOnce({}); // 1234のforecast put
+
+    await handler();
+
+    const puts = putCalls();
+    expect(puts).toHaveLength(2);
+    const item = (puts[1][0] as { Item: Record<string, unknown> }).Item;
+    expect('tseForecast' in item).toBe(false);
+    // ScanCommandはmaster/actualの2回のみ(margin balance scanは無い)
+    const scans = mockSend.mock.calls.filter(([cmd]) => !('Item' in (cmd as Record<string, unknown>)));
+    expect(scans).toHaveLength(2);
+  });
+});
+
+test('writes tseForecast: null when the ticker has no fresh margin snapshot', async () => {
+  await withTseEnabled(() =>
+    withFixedNow(async () => {
+      mockSend
+        .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
+        .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
+        .mockResolvedValueOnce({
+          Items: [{ ticker: '1234', date: '2026-06-01', financingBalance: 100, lendingBalance: 50, source: 'weekly' }], // 61日前 → 鮮度切れ
+        }) // margin balance scan
+        .mockResolvedValueOnce({}) // _POOL_ put
+        .mockResolvedValueOnce({}) // _POOL_TSE_ put
+        .mockResolvedValueOnce({}); // 1234のforecast put
+
+      await handler();
+
+      const item = (putCalls()[2][0] as { Item: Record<string, unknown> }).Item;
+      expect(item.tseForecast).toBeNull();
+    }),
+  );
+});
+
+test('TSE items survive real DynamoDB marshalling when the current snapshot has financingBalance 0 (excessRatio Infinity)', async () => {
+  await withTseEnabled(() =>
+    withFixedNow(async () => {
+      mockSend
+        .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
+        .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
+        .mockResolvedValueOnce({
+          Items: [
+            { ticker: '1234', date: '2026-07-03', financingBalance: 0, lendingBalance: 0, source: 'weekly' }, // 4週前比の分母0 → null
+            { ticker: '1234', date: '2026-07-31', financingBalance: 0, lendingBalance: 250, source: 'weekly' }, // excessRatio = Infinity
+          ],
+        }) // margin balance scan
+        .mockResolvedValueOnce({}) // _POOL_ put
+        .mockResolvedValueOnce({}) // _POOL_TSE_ put
+        .mockResolvedValueOnce({}); // 1234のforecast put
+
+      await handler();
+
+      for (const [cmd] of putCalls()) {
+        const { Item } = cmd as { Item: Record<string, unknown> };
+        expect(() => marshall(Item)).not.toThrow();
+      }
+      const tse = (putCalls()[2][0] as { Item: { tseForecast: Record<string, unknown> } }).Item.tseForecast;
+      expect(tse.excessRatio).toBeNull(); // Infinity → null
+      expect(tse.bin).toBe('5以上');
+      expect(tse.lendingGrowth4w).toBeNull();
+    }),
+  );
+});

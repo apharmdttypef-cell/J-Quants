@@ -1,14 +1,17 @@
 // 逆日歩予測バッチ: 優待マスタ・逆日歩実績履歴を組み合わせ、
 // lambda/shared/gyakuhibu-forecast.tsの純粋関数でJQuantsGyakuhibuForecastテーブルへ
 // 銘柄ごとの予測(+全銘柄横断のプール曲線 `_POOL_`)を書き込む。
+// フラグ(TSE_MARGIN_FEATURES_ENABLED)有効時は、東証信用残ベースの現在需給予測(tse-forecast.ts)も同じ行のtseForecast属性と_POOL_TSE_行へ書く。
 // 設計: docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { buildPool, chooseScenario, forecast, toSample, type ForecastSample, type GyakuhibuActualRow } from '../shared/gyakuhibu-forecast';
 import { nextRightsDate } from '../shared/trading-calendar';
+import { buildTsePools, buildTseSamples, computeTseForecast, scanMarginSnapshots, type TsePools } from './tse-forecast';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
+const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const GYAKUHIBU_FORECAST_TABLE_NAME = process.env.GYAKUHIBU_FORECAST_TABLE_NAME!;
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -20,6 +23,20 @@ const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 // 非有限値はnullに変換する。
 function finiteOrNull(value: number | null): number | null {
   return value !== null && Number.isFinite(value) ? value : null;
+}
+
+// スタンダードプラン依存の現在需給ベース予測を実行するか。テストで切り替えられるよう
+// 呼び出しごとに環境変数を読む。
+function tseMarginFeaturesEnabled(): boolean {
+  return process.env.TSE_MARGIN_FEATURES_ENABLED === 'true';
+}
+
+function finitePools(pools: TsePools): Record<string, unknown[]> {
+  const out: Record<string, unknown[]> = {};
+  for (const [bucket, bins] of Object.entries(pools)) {
+    out[bucket] = bins.map((bin) => ({ ...bin, lo: finiteOrNull(bin.lo), hi: finiteOrNull(bin.hi) }));
+  }
+  return out;
 }
 
 interface MasterRow {
@@ -108,6 +125,14 @@ export const handler = async (): Promise<void> => {
 
   const samplesByTicker = groupByTicker(allSamples);
   const pool = buildPool(allSamples);
+  // 現在需給ベース予測(スタンダードプラン依存)。無効時は信用残テーブルに一切触れない。
+  const tse = tseMarginFeaturesEnabled()
+    ? await (async () => {
+        const snapshots = await scanMarginSnapshots(ddbDocClient, MARGIN_BALANCE_TABLE_NAME);
+        const bucketSamples = buildTseSamples(allSamples, snapshots);
+        return { snapshots, bucketSamples, pools: buildTsePools(bucketSamples) };
+      })()
+    : null;
   const computedAt = new Date().toISOString().slice(0, 10);
 
   // プール行は銘柄ループより先に書く(プールが無いと全銘柄naになるため、失敗時はログで目立たせる)。
@@ -121,6 +146,15 @@ export const handler = async (): Promise<void> => {
       },
     }),
   );
+
+  if (tse) {
+    await ddbDocClient.send(
+      new PutCommand({
+        TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
+        Item: { ticker: '_POOL_TSE_', buckets: finitePools(tse.pools), computedAt },
+      }),
+    );
+  }
 
   let written = 0;
   for (const row of master) {
@@ -147,12 +181,33 @@ export const handler = async (): Promise<void> => {
         value: row.value,
       });
 
-      await ddbDocClient.send(
-        new PutCommand({
-          TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
-          Item: { ticker: row.ticker, rightsDate: nextDate, ...result, excessRatio: finiteOrNull(result.excessRatio), computedAt },
-        }),
-      );
+      const item: Record<string, unknown> = {
+        ticker: row.ticker,
+        rightsDate: nextDate,
+        ...result,
+        excessRatio: finiteOrNull(result.excessRatio),
+        computedAt,
+      };
+      if (tse) {
+        const tseForecast = computeTseForecast({
+          ticker: row.ticker,
+          today: computedAt,
+          nextRightsDate: nextDate,
+          snapshots: tse.snapshots,
+          bucketSamples: tse.bucketSamples,
+          maxGyakuhibu: row.maxGyakuhibu,
+          value: row.value,
+        });
+        item.tseForecast = tseForecast
+          ? {
+              ...tseForecast,
+              excessRatio: finiteOrNull(tseForecast.excessRatio),
+              lendingGrowth4w: finiteOrNull(tseForecast.lendingGrowth4w),
+            }
+          : null;
+      }
+
+      await ddbDocClient.send(new PutCommand({ TableName: GYAKUHIBU_FORECAST_TABLE_NAME, Item: item }));
       written++;
     } catch (error) {
       console.error(`${row.ticker}: failed to compute/write forecast`, error);
