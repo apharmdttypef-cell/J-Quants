@@ -64,34 +64,6 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
     header: '優待内容',
   },
   {
-    accessorKey: 'value',
-    header: '優待価値',
-    sortDescFirst: false,
-    sortingFn: (rowA, rowB) => {
-      const a = rowA.original.value;
-      const b = rowB.original.value;
-      if (a === null && b === null) return 0;
-      if (a === null) return 1;
-      if (b === null) return -1;
-      return a - b;
-    },
-    cell: ({ row }) => (row.original.value !== null ? formatFinancialYen(String(row.original.value)) : '—'),
-  },
-  {
-    accessorKey: 'rightsDate',
-    header: '権利日',
-    sortDescFirst: false,
-    sortingFn: (rowA, rowB) => {
-      const a = rowA.original.rightsDate;
-      const b = rowB.original.rightsDate;
-      if (a === null && b === null) return 0;
-      if (a === null) return 1;
-      if (b === null) return -1;
-      return a.localeCompare(b);
-    },
-    cell: ({ row }) => row.original.rightsDate ?? '—',
-  },
-  {
     accessorKey: 'closePrice',
     header: '前日株価',
     sortDescFirst: false,
@@ -120,27 +92,31 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
     cell: ({ row }) => (row.original.maxGyakuhibu !== null ? formatFinancialYen(String(row.original.maxGyakuhibu)) : '—'),
   },
   {
-    id: 'pOccur',
-    header: '発生確率',
-    accessorFn: (row) => row.forecast.pOccur,
-    sortDescFirst: true,
-    cell: ({ row }) => formatPercent(row.original.forecast.pOccur),
-  },
-  {
     id: 'forecastP50',
     header: '想定逆日歩',
     accessorFn: (row) => row.forecast.forecastP50,
     sortDescFirst: true,
     cell: ({ row }) =>
-      row.original.forecast.forecastP50 !== null ? formatFinancialYen(String(row.original.forecast.forecastP50)) : '—',
+      row.original.forecast.forecastP50 !== null
+        ? formatFinancialYen(String(Math.round(row.original.forecast.forecastP50)))
+        : '—',
   },
   {
     id: 'forecastP90',
-    header: '最悪想定',
+    header: '想定逆日歩(最悪)',
     accessorFn: (row) => row.forecast.forecastP90,
     sortDescFirst: true,
     cell: ({ row }) =>
-      row.original.forecast.forecastP90 !== null ? formatFinancialYen(String(row.original.forecast.forecastP90)) : '—',
+      row.original.forecast.forecastP90 !== null
+        ? formatFinancialYen(String(Math.round(row.original.forecast.forecastP90)))
+        : '—',
+  },
+  {
+    id: 'pOccur',
+    header: '発生確率',
+    accessorFn: (row) => row.forecast.pOccur,
+    sortDescFirst: true,
+    cell: ({ row }) => formatPercent(row.original.forecast.pOccur),
   },
   {
     id: 'judgment',

@@ -146,13 +146,13 @@ export function YutaiForecastDetailPage() {
           <div className="card">
             <div className="summary-item__label">想定逆日歩</div>
             <div className="summary-item__value">
-              {forecast.forecastP50 !== null ? formatFinancialYen(String(forecast.forecastP50)) : '—'}
+              {forecast.forecastP50 !== null ? formatFinancialYen(String(Math.round(forecast.forecastP50))) : '—'}
             </div>
           </div>
           <div className="card">
-            <div className="summary-item__label">最悪想定</div>
+            <div className="summary-item__label">想定逆日歩(最悪)</div>
             <div className="summary-item__value">
-              {forecast.forecastP90 !== null ? formatFinancialYen(String(forecast.forecastP90)) : '—'}
+              {forecast.forecastP90 !== null ? formatFinancialYen(String(Math.round(forecast.forecastP90))) : '—'}
             </div>
           </div>
           <div className="card">
@@ -203,7 +203,7 @@ export function YutaiForecastDetailPage() {
                   <th>超過率レンジ</th>
                   <th>発生確率</th>
                   <th>想定逆日歩</th>
-                  <th>最悪想定</th>
+                  <th>想定逆日歩(最悪)</th>
                   <th>優待価値との差</th>
                 </tr>
               </thead>
@@ -215,8 +215,8 @@ export function YutaiForecastDetailPage() {
                     <tr key={bin.label} style={bin.label === forecast.bin ? { fontWeight: 700 } : undefined}>
                       <td>{bin.label}</td>
                       <td className="num">{formatPercent(bin.pOccur)}</td>
-                      <td className="num">{formatFinancialYen(String(p50))}</td>
-                      <td className="num">{formatFinancialYen(String(p90))}</td>
+                      <td className="num">{formatFinancialYen(String(Math.round(p50)))}</td>
+                      <td className="num">{formatFinancialYen(String(Math.round(p90)))}</td>
                       <td className="num">{data.value !== null ? formatSignedYen(data.value - p90) : '—'}</td>
                     </tr>
                   );
