@@ -92,6 +92,20 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
     cell: ({ row }) => row.original.rightsDate ?? '—',
   },
   {
+    accessorKey: 'closePrice',
+    header: '前日株価',
+    sortDescFirst: false,
+    sortingFn: (rowA, rowB) => {
+      const a = rowA.original.closePrice;
+      const b = rowB.original.closePrice;
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return a - b;
+    },
+    cell: ({ row }) => (row.original.closePrice !== null ? formatFinancialYen(String(row.original.closePrice)) : '—'),
+  },
+  {
     accessorKey: 'maxGyakuhibu',
     header: '最大逆日歩',
     sortDescFirst: false,
@@ -114,7 +128,7 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
   },
   {
     id: 'forecastP50',
-    header: '予測(中央値)',
+    header: '想定逆日歩',
     accessorFn: (row) => row.forecast.forecastP50,
     sortDescFirst: true,
     cell: ({ row }) =>
@@ -122,7 +136,7 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
   },
   {
     id: 'forecastP90',
-    header: '予測(P90)',
+    header: '最悪想定',
     accessorFn: (row) => row.forecast.forecastP90,
     sortDescFirst: true,
     cell: ({ row }) =>

@@ -83,9 +83,16 @@ interface RiskResult {
   maxRate: number | null;
   days: number | null;
   unitShares: number;
+  closePrice: number | null;
 }
 
-const NA_RISK: Omit<RiskResult, 'unitShares'> = { riskStatus: 'na', maxGyakuhibu: null, maxRate: null, days: null };
+const NA_RISK: Omit<RiskResult, 'unitShares'> = {
+  riskStatus: 'na',
+  maxGyakuhibu: null,
+  maxRate: null,
+  days: null,
+  closePrice: null,
+};
 
 // kabuyutai.comの「必要投資金額」は優待を受け取るための実際の最低投資額であり、必ずしも
 // 単元株数(100株)と一致しない(例: 第一興商は単元100株だが優待の権利獲得には200株必要、
@@ -137,7 +144,7 @@ async function calcRisk(
   const maxRate = calcMaxRate(closePrice, unitShares) * RIGHTS_DAY_RATE_MULTIPLIER;
   const maxGyakuhibu = calcMaxGyakuhibu(closePrice, unitShares, days) * RIGHTS_DAY_RATE_MULTIPLIER;
   const riskStatus: RiskStatus = row.value === null ? 'na' : row.value > maxGyakuhibu ? 'safe' : 'danger';
-  return { riskStatus, maxGyakuhibu, maxRate, days, unitShares };
+  return { riskStatus, maxGyakuhibu, maxRate, days, unitShares, closePrice };
 }
 
 export const handler = async (): Promise<void> => {
@@ -155,7 +162,7 @@ export const handler = async (): Promise<void> => {
           TableName: YUTAI_MASTER_TABLE_NAME,
           Key: { ticker: row.ticker },
           UpdateExpression:
-            'SET riskStatus = :riskStatus, maxGyakuhibu = :maxGyakuhibu, maxRate = :maxRate, #days = :days, unitShares = :unitShares',
+            'SET riskStatus = :riskStatus, maxGyakuhibu = :maxGyakuhibu, maxRate = :maxRate, #days = :days, unitShares = :unitShares, closePrice = :closePrice',
           ExpressionAttributeNames: { '#days': 'days' },
           ExpressionAttributeValues: {
             ':riskStatus': risk.riskStatus,
@@ -163,6 +170,7 @@ export const handler = async (): Promise<void> => {
             ':maxRate': risk.maxRate,
             ':days': risk.days,
             ':unitShares': risk.unitShares,
+            ':closePrice': risk.closePrice,
           },
         }),
       );

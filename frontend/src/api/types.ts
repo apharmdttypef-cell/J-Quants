@@ -127,6 +127,7 @@ export interface YutaiForecastListItem {
   rightsDate: string | null;
   riskStatus: YutaiRiskStatus;
   maxGyakuhibu: number | null;
+  closePrice: number | null;
   forecast: YutaiForecast;
 }
 
@@ -177,6 +178,7 @@ export interface YutaiForecastDetail {
   unitShares: number;
   rightsDate: string | null;
   maxGyakuhibu: number | null;
+  closePrice: number | null;
   forecast: YutaiForecast;
   history: YutaiForecastHistoryPoint[];
   poolBins: PoolBin[];

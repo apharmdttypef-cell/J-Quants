@@ -427,7 +427,7 @@ test('GET /yutai/forecast joins master and forecast tables by ticker and filters
   mockSend
     .mockResolvedValueOnce({
       Items: [
-        { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 5000 },
+        { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 5000, closePrice: 480 },
         { ticker: '5678', companyName: 'B', content: 'B優待', value: 2000, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 100 },
       ],
     }) // yutai master scan
@@ -442,11 +442,12 @@ test('GET /yutai/forecast joins master and forecast tables by ticker and filters
   const result = await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: { forecastStatus: 'danger' } }));
 
   const parsed = body(result) as {
-    tickers: Array<{ ticker: string; forecast: { forecastStatus: string; forecastP90: number } }>;
+    tickers: Array<{ ticker: string; closePrice: number | null; forecast: { forecastStatus: string; forecastP90: number } }>;
     poolComputedAt: string;
   };
   expect(parsed.tickers).toHaveLength(1);
   expect(parsed.tickers[0].ticker).toBe('1234');
+  expect(parsed.tickers[0].closePrice).toBe(480); // 前日株価がリスク事前計算バッチの書き込み値からそのまま返る
   expect(parsed.tickers[0].forecast.forecastStatus).toBe('danger');
   expect(parsed.tickers[0].forecast.forecastP90).toBe(4000);
   expect(parsed.poolComputedAt).toBe('2026-08-01');
@@ -470,7 +471,7 @@ test('GET /yutai/forecast marks a ticker with no forecast row yet as forecastSta
 test('GET /yutai/{ticker}/forecast returns history including noGyakuhibu rows with excessRatio/fillRatio/occurred', async () => {
   mockSend
     .mockResolvedValueOnce({
-      Item: { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 5000 },
+      Item: { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 5000, closePrice: 480 },
     }) // master get
     .mockResolvedValueOnce({
       Item: { ticker: '1234', rightsDate: '2026-08-27', scenario: 'last-rights', forecastStatus: 'danger', forecastP50: 1000, forecastP90: 4000, tickerSamples: 1, poolSamples: 1 },
@@ -494,7 +495,8 @@ test('GET /yutai/{ticker}/forecast returns history including noGyakuhibu rows wi
 
   const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '1234' } }));
 
-  const parsed = body(result) as { history: Array<Record<string, unknown>>; poolBins: Array<Record<string, unknown>> };
+  const parsed = body(result) as { history: Array<Record<string, unknown>>; poolBins: Array<Record<string, unknown>>; closePrice: number | null };
+  expect(parsed.closePrice).toBe(480); // 前日株価がリスク事前計算バッチの書き込み値からそのまま返る
   expect(parsed.history).toHaveLength(2); // noGyakuhibu行も含めて2件(既存/yutai/{ticker}のrightsHistoryとは違い除外しない)
 
   const occurredRow = parsed.history.find((h) => h.rightsDate === '2025-08-27')!;

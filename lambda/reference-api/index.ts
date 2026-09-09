@@ -215,6 +215,7 @@ interface YutaiMasterRow {
   maxGyakuhibu: number | null;
   maxRate: number | null;
   days: number | null;
+  closePrice: number | null;
 }
 
 async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
@@ -237,6 +238,7 @@ async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
         maxGyakuhibu: item.maxGyakuhibu ?? null,
         maxRate: item.maxRate ?? null,
         days: item.days ?? null,
+        closePrice: item.closePrice ?? null,
       });
     }
     exclusiveStartKey = result.LastEvaluatedKey;
@@ -431,6 +433,7 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
       rightsDate: rightsDate ?? null,
       riskStatus: row.riskStatus,
       maxGyakuhibu: row.maxGyakuhibu,
+      closePrice: row.closePrice,
       forecast,
     });
   }
@@ -461,6 +464,7 @@ async function getYutaiMaster(ticker: string): Promise<YutaiMasterRow | undefine
     maxGyakuhibu: result.Item.maxGyakuhibu ?? null,
     maxRate: result.Item.maxRate ?? null,
     days: result.Item.days ?? null,
+    closePrice: result.Item.closePrice ?? null,
   };
 }
 
@@ -629,6 +633,7 @@ async function getYutaiForecast(ticker: string): Promise<APIGatewayProxyResultV2
     unitShares: master.unitShares,
     rightsDate: rightsDate ?? null,
     maxGyakuhibu: master.maxGyakuhibu,
+    closePrice: master.closePrice,
     forecast,
     history,
     poolBins,

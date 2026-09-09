@@ -37,7 +37,7 @@ test('writes riskStatus na when rightsMonths is empty (no upcoming rights date)'
   expect(calls[0][0]).toMatchObject({
     TableName: 'JQuantsYutaiMaster',
     Key: { ticker: '1234' },
-    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null },
+    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
   });
 });
 
@@ -51,7 +51,7 @@ test('writes riskStatus na when there is no margin balance data for the ticker',
   const calls = updateCalls();
   expect(calls).toHaveLength(1);
   expect(calls[0][0]).toMatchObject({
-    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null },
+    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
   });
 });
 
@@ -66,11 +66,11 @@ test('writes riskStatus na when there is no price data for the ticker', async ()
   const calls = updateCalls();
   expect(calls).toHaveLength(1);
   expect(calls[0][0]).toMatchObject({
-    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null },
+    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
   });
 });
 
-test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric fields', async () => {
+test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric fields, including closePrice', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10' }] }) // margin balance presence: yes
@@ -85,6 +85,7 @@ test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric
   expect(typeof values[':maxGyakuhibu']).toBe('number');
   expect(typeof values[':maxRate']).toBe('number');
   expect(typeof values[':days']).toBe('number');
+  expect(values[':closePrice']).toBe(500); // 前日株価(latestCloseの値)がそのまま書き込まれる
 });
 
 test('computes maxGyakuhibu/maxRate/days but writes riskStatus na when value is null (優待価値が抽出できない銘柄)', async () => {

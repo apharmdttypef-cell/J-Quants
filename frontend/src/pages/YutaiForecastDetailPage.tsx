@@ -144,19 +144,19 @@ export function YutaiForecastDetailPage() {
             <div className="summary-item__value">{formatPercent(forecast.pOccur)}</div>
           </div>
           <div className="card">
-            <div className="summary-item__label">予測逆日歩(中央値)</div>
+            <div className="summary-item__label">想定逆日歩</div>
             <div className="summary-item__value">
               {forecast.forecastP50 !== null ? formatFinancialYen(String(forecast.forecastP50)) : '—'}
             </div>
           </div>
           <div className="card">
-            <div className="summary-item__label">予測逆日歩(P90)</div>
+            <div className="summary-item__label">最悪想定</div>
             <div className="summary-item__value">
               {forecast.forecastP90 !== null ? formatFinancialYen(String(forecast.forecastP90)) : '—'}
             </div>
           </div>
           <div className="card">
-            <div className="summary-item__label">優待価値−P90</div>
+            <div className="summary-item__label">差額(最悪時)</div>
             <div className="summary-item__value">{formatSignedYen(netP90)}</div>
           </div>
         </div>
@@ -202,8 +202,8 @@ export function YutaiForecastDetailPage() {
                 <tr>
                   <th>超過率レンジ</th>
                   <th>発生確率</th>
-                  <th>予測P50</th>
-                  <th>予測P90</th>
+                  <th>想定逆日歩</th>
+                  <th>最悪想定</th>
                   <th>優待価値との差</th>
                 </tr>
               </thead>
