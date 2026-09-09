@@ -330,6 +330,41 @@ function buildForecast(item: Record<string, unknown> | undefined): ForecastField
   };
 }
 
+// スタンダードプラン依存機能(東証信用残ベースの現在需給予測)を応答に含めるか。ライトプラン
+// へ落とす際はCDKのtseMarginFeatures=falseでこの環境変数が'false'になり、tseForecastは常に
+// null、features.tseMarginはfalseになる(フロントはこれを見て列・カードを隠す)。
+function tseMarginEnabled(): boolean {
+  return process.env.TSE_MARGIN_FEATURES_ENABLED === 'true';
+}
+
+interface TseForecastFields extends ForecastFields {
+  snapshotDate: string;
+  lagDays: number;
+  lagBucket: string;
+  financingBalance: number;
+  lendingBalance: number;
+  lendingGrowth4w: number | null;
+}
+
+// 予測行のtseForecast属性(gyakuhibu-forecast-batch/tse-forecast.tsが書く)をAPI表現にする。
+// フラグ無効・属性無し・nullのいずれもnull。
+function buildTseForecast(item: Record<string, unknown> | undefined): TseForecastFields | null {
+  if (!tseMarginEnabled()) return null;
+  const raw = item?.tseForecast;
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.snapshotDate !== 'string' || typeof r.lagDays !== 'number' || typeof r.lagBucket !== 'string') return null;
+  return {
+    ...buildForecast(r),
+    snapshotDate: r.snapshotDate,
+    lagDays: r.lagDays,
+    lagBucket: r.lagBucket,
+    financingBalance: (r.financingBalance as number | undefined) ?? 0,
+    lendingBalance: (r.lendingBalance as number | undefined) ?? 0,
+    lendingGrowth4w: (r.lendingGrowth4w as number | null | undefined) ?? null,
+  };
+}
+
 // 当月末の最終営業日から2営業日前(受渡T+2)を「権利付き最終日」の目安として返す。
 // 月末が権利確定日の銘柄が多いため、このバナー1つを一覧全体で使い回す(銘柄ごとには計算しない)。
 function currentMonthLastTradableDate(calendar: { date: string; holDiv: string }[]): string {
@@ -435,6 +470,7 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
       maxGyakuhibu: row.maxGyakuhibu,
       closePrice: row.closePrice,
       forecast,
+      tseForecast: buildTseForecast(forecastByTicker.get(row.ticker)),
     });
   }
 
@@ -447,6 +483,7 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
     tickers: items,
     currentMonthLastTradableDate: currentMonthLastTradableDate(monthCalendar),
     poolComputedAt: (poolRow?.computedAt as string | undefined) ?? null,
+    features: { tseMargin: tseMarginEnabled() },
   });
 }
 
@@ -635,9 +672,11 @@ async function getYutaiForecast(ticker: string): Promise<APIGatewayProxyResultV2
     maxGyakuhibu: master.maxGyakuhibu,
     closePrice: master.closePrice,
     forecast,
+    tseForecast: buildTseForecast(forecastResult.Item),
     history,
     poolBins,
     marginTrend,
+    features: { tseMargin: tseMarginEnabled() },
   });
 }
 

@@ -30,6 +30,7 @@ process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'JQuantsGyakuhibuForecast';
+process.env.TSE_MARGIN_FEATURES_ENABLED = 'true';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/reference-api/index') as {
@@ -566,4 +567,83 @@ test('GET /yutai/{ticker} returns value: null when the yutai value is unknown', 
 
   const parsed = body(result) as { value: number | null };
   expect(parsed.value).toBeNull();
+});
+
+const TSE_ROW = {
+  ticker: '1234', rightsDate: '2026-08-27', scenario: 'last-rights', forecastStatus: 'safe', forecastP50: 100, forecastP90: 400,
+  tickerSamples: 3, poolSamples: 400, computedAt: '2026-08-01',
+  tseForecast: {
+    scenario: 'current-tse', excessRatio: 1.5, bin: '1〜2', pOccur: 0.9, fillP50: 0.1, fillP90: 0.5, fillMean: 0.2,
+    forecastP50: 500, forecastP90: 2500, forecastMean: 1000, expectedNet: 0, forecastStatus: 'caution',
+    tickerSamples: 2, poolSamples: 150, snapshotDate: '2026-07-31', lagDays: 27, lagBucket: '22+',
+    financingBalance: 100, lendingBalance: 250, lendingGrowth4w: 2,
+  },
+};
+
+test('GET /yutai/forecast includes tseForecast and features.tseMargin=true when the flag is on', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 5000 }],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '_POOL_', bins: [], computedAt: '2026-08-01' }, TSE_ROW] }); // forecast scan
+
+  const result = await handler(makeEvent('GET /yutai/forecast', {}));
+
+  const parsed = body(result) as { tickers: Array<{ tseForecast: Record<string, unknown> | null }>; features: { tseMargin: boolean } };
+  expect(parsed.features).toEqual({ tseMargin: true });
+  expect(parsed.tickers[0].tseForecast).toMatchObject({
+    snapshotDate: '2026-07-31', lagDays: 27, lagBucket: '22+', bin: '1〜2', forecastP50: 500, forecastStatus: 'caution', lendingGrowth4w: 2,
+  });
+});
+
+test('GET /yutai/forecast returns tseForecast: null for a ticker whose forecast row has no tseForecast', async () => {
+  const { tseForecast: _omit, ...rowWithoutTse } = TSE_ROW;
+  void _omit;
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 5000 }],
+    })
+    .mockResolvedValueOnce({ Items: [rowWithoutTse] });
+
+  const result = await handler(makeEvent('GET /yutai/forecast', {}));
+
+  const parsed = body(result) as { tickers: Array<Record<string, unknown>> };
+  expect(parsed.tickers[0]).toHaveProperty('tseForecast', null);
+});
+
+test('GET /yutai/forecast nulls tseForecast and reports features.tseMargin=false when the flag is off', async () => {
+  process.env.TSE_MARGIN_FEATURES_ENABLED = 'false';
+  try {
+    mockSend
+      .mockResolvedValueOnce({
+        Items: [{ ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 5000 }],
+      })
+      .mockResolvedValueOnce({ Items: [TSE_ROW] });
+
+    const result = await handler(makeEvent('GET /yutai/forecast', {}));
+
+    const parsed = body(result) as { tickers: Array<Record<string, unknown>>; features: { tseMargin: boolean } };
+    expect(parsed.features).toEqual({ tseMargin: false });
+    expect(parsed.tickers[0]).toHaveProperty('tseForecast', null);
+    expect(parsed.tickers[0]).toHaveProperty('forecast'); // 過去実績ベースは影響を受けない
+  } finally {
+    process.env.TSE_MARGIN_FEATURES_ENABLED = 'true';
+  }
+});
+
+test('GET /yutai/{ticker}/forecast includes tseForecast and features', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 5000 },
+    }) // master get
+    .mockResolvedValueOnce({ Item: TSE_ROW }) // forecast get
+    .mockResolvedValueOnce({}) // _POOL_ get
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual query
+    .mockResolvedValueOnce({ Items: [] }); // margin balance query
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '1234' } }));
+
+  const parsed = body(result) as { tseForecast: Record<string, unknown> | null; features: { tseMargin: boolean } };
+  expect(parsed.features).toEqual({ tseMargin: true });
+  expect(parsed.tseForecast).toMatchObject({ snapshotDate: '2026-07-31', lagBucket: '22+', forecastP90: 2500 });
 });
