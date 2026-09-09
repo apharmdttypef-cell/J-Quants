@@ -50,7 +50,7 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-test('queries every Friday within LOOKBACK_DAYS and fetches today once for daily-alert', async () => {
+test('fetches the last 14 days (newest first) from both endpoints and skips the full Friday backfill on a non-Monday', async () => {
   mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] }); // yutai master scan
   mockFetchAllWeekly.mockResolvedValueOnce([
     { code: '7203', date: '2026-08-28', financingBalance: 1, lendingBalance: 1, source: 'weekly' },
@@ -58,14 +58,48 @@ test('queries every Friday within LOOKBACK_DAYS and fetches today once for daily
 
   await handler();
 
-  // LOOKBACK_DAYS=14, today=2026-08-28 (Fri) -> Fridays: 08-28, 08-21, 08-14
-  expect(mockFetchAllWeekly).toHaveBeenCalledTimes(3);
-  const dates = mockFetchAllWeekly.mock.calls.map(([date]) => date);
-  expect(dates).toEqual(['2026-08-28', '2026-08-21', '2026-08-14']);
+  // today=2026-08-28(金) -> 08-28, 08-27, ..., 08-15 の14日分。金曜は週次バックフィルの対象外(UTC月曜ではない)。
+  const expectedDates = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(Date.UTC(2026, 7, 28 - i));
+    return d.toISOString().slice(0, 10);
+  });
+  expect(mockFetchAllWeekly.mock.calls.map(([date]) => date)).toEqual(expectedDates);
+  expect(mockFetchAllDailyAlert.mock.calls.map(([date]) => date)).toEqual(expectedDates);
   expect(mockFetchAllWeekly).toHaveBeenCalledWith('2026-08-28', 'test-api-key');
-
-  expect(mockFetchAllDailyAlert).toHaveBeenCalledTimes(1);
   expect(mockFetchAllDailyAlert).toHaveBeenCalledWith('2026-08-28', 'test-api-key');
+});
+
+test('runs the 2-year Friday backfill (LOOKBACK_DAYS) after the recent window on UTC Mondays', async () => {
+  jest.setSystemTime(new Date('2026-08-31T00:00:00Z')); // a Monday
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] });
+  mockFetchAllWeekly.mockResolvedValue([
+    { code: '7203', date: '2026-08-28', financingBalance: 1, lendingBalance: 1, source: 'weekly' },
+  ]);
+
+  await handler();
+
+  // 直近14日(08-31..08-18) + LOOKBACK_DAYS=14以内の金曜(08-28, 08-21)。
+  const dates = mockFetchAllWeekly.mock.calls.map(([date]) => date);
+  expect(dates).toHaveLength(16);
+  expect(dates.slice(14)).toEqual(['2026-08-28', '2026-08-21']);
+  expect(mockFetchAllDailyAlert).toHaveBeenCalledTimes(14);
+});
+
+test('runs the full Friday backfill on any day when FORCE_FULL_BACKFILL=true', async () => {
+  process.env.FORCE_FULL_BACKFILL = 'true';
+  try {
+    mockSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }] });
+    mockFetchAllWeekly.mockResolvedValue([
+      { code: '7203', date: '2026-08-28', financingBalance: 1, lendingBalance: 1, source: 'weekly' },
+    ]);
+
+    await handler();
+
+    // 直近14日 + 金曜(08-28, 08-21, 08-14)。
+    expect(mockFetchAllWeekly).toHaveBeenCalledTimes(17);
+  } finally {
+    delete process.env.FORCE_FULL_BACKFILL;
+  }
 });
 
 test('writes only target tickers via BatchWriteCommand, matching a 4-digit ticker to its 5-digit code', async () => {
@@ -204,7 +238,7 @@ test('throws when every weekly date and the daily-alert fetch fail', async () =>
   mockFetchAllDailyAlert.mockRejectedValue(new Error('boom-daily'));
   mockFetchAllWeekly.mockRejectedValue(new Error('boom-weekly'));
 
-  await expect(handler()).rejects.toThrow('all 4 fetch/upsert calls failed');
+  await expect(handler()).rejects.toThrow('all 28 fetch/upsert calls failed');
 });
 
 test('throws when every call succeeds but 0 tickers match across all dates', async () => {

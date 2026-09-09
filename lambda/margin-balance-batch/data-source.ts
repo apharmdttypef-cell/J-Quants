@@ -46,7 +46,8 @@ interface MarginAlertResponse {
 //
 // 全上場銘柄が対象のため、個別銘柄向けの旧codeパラメータ呼び出しでは登場しなかった
 // 値欠損レコードが混ざりうる。DynamoDBはundefinedを書き込めないため、欠損はnullにする
-// (price-batchのDailyBarと同じ number | null の扱い)。
+// (price-batchのDailyBarと同じ number | null の扱い)。保存時の`source: 'weekly'`は
+// 「margin-interest由来」の意味で、日次配信化後もこの値のまま。
 export async function fetchAllWeeklyBalancesForDate(date: string, apiKey: string): Promise<MarginBalancePoint[]> {
   const points: MarginBalancePoint[] = [];
   let paginationKey: string | undefined;
@@ -81,8 +82,8 @@ export async function fetchAllWeeklyBalancesForDate(date: string, apiKey: string
 // 対象で、mkt-margin-intとは別の独立したデータソース。codeを付けずdateのみ指定すると、
 // その日に公表された全銘柄分が1回のリクエストで返る。dateパラメータは公表日ベースだが、
 // レスポンスのAppDate(申込日、残高が示す基準日)をMarginBalancePoint.dateとして使い、
-// fetchAllWeeklyBalancesForDateのDateと意味を揃える。常にtodayの1日分のみ呼ばれる想定
-// (履歴バックフィルはしない)。
+// fetchAllWeeklyBalancesForDateのDateと意味を揃える。直近14日の各日付で呼ばれる
+// (index.tsのRECENT_WINDOW_DAYS)。
 export async function fetchAllDailyAlertBalancesForDate(date: string, apiKey: string): Promise<MarginBalancePoint[]> {
   const points: MarginBalancePoint[] = [];
   let paginationKey: string | undefined;
