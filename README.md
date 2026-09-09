@@ -22,10 +22,9 @@ EventBridge(毎週月曜 JST20:00)
       - 決算サマリは四半期ごとにしか更新されないため週次で十分
       → JQuantsFinancialSummary に upsert
 
-EventBridge(毎週月曜 JST18:30)
+EventBridge(毎営業日 JST17:30、直近14日分を取り直す。2026-09-28からmargin-interestも日次配信。`tseMarginFeatures`無効時はスケジュール無し)
   → MarginBalanceBatchFunction(Lambda)
       - JQuantsYutaiMasterの全銘柄の信用残を取得(mkt-margin-int/mkt-margin-alert、下記参照)
-      - 信用残は本来週次更新のため週次で十分
       → JQuantsMarginBalance に upsert
 
 EventBridge(毎日 JST19:00)
@@ -52,11 +51,11 @@ EventBridge(毎日 JST18:20)
       - JQuantsYutaiMasterを全件スキャンし、銘柄ごとに逆日歩リスク(信用残の有無・前日終値ベース)を計算
       → JQuantsYutaiMaster に riskStatus/maxGyakuhibu/maxRate/days を書き戻す
 
-EventBridge(毎日 JST18:40、YutaiRiskPrecomputeBatchFunctionの20分後)
+EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
   → GyakuhibuForecastBatchFunction(Lambda)
       - JQuantsYutaiMaster・JQuantsGyakuhibuActual(全件)・JQuantsMarginBalance(直近値)を読み、
         貸株超過率→充足率の実績分布(全銘柄プール+銘柄別)から次回権利日の予測逆日歩を算出
-      → JQuantsGyakuhibuForecast に upsert(銘柄行 + 全銘柄横断のプール曲線行`_POOL_`)
+      → JQuantsGyakuhibuForecast に upsert(銘柄行 + 全銘柄横断のプール曲線行`_POOL_`、`tseMarginFeatures`有効時は東証超過率ベースの`tseForecast`行`_POOL_TSE_`も追加)
 
 ブラウザ
   → CloudFront(Basic認証: CloudFront Function)
@@ -132,7 +131,9 @@ EventBridge(毎日 JST18:40、YutaiRiskPrecomputeBatchFunctionの20分後)
 
 **権利付き最終日の4倍ルール**(`RIGHTS_DAY_RATE_MULTIPLIER`、2026-09-03追加): taisyaku.jpは「倍率適用」規定により、配当・新株引受権等の権利付銘柄について権利落日の前営業日(=権利付き最終日そのもの)の最高料率を通常の4倍に引き上げる(詳細: `docs/superpowers/notes/2026-09-03-taisyaku-rights-day-rate-multiplier.md`)。このアプリの見積りは常に権利付き最終日を評価するため、倍率は条件分岐なく常に4倍を掛ける。旧要件定義では「品貸日数を実日数で計算すれば自然に織り込まれるため4倍ルールは不要」と判断し未採用だったが、これは誤りだったとU-NEXT HD(9418)の実データ検証(2026-09-03)で判明した — 品貸日数の実日数計算と、taisyaku.jp側の倍率適用は独立した別のメカニズムであり、前者だけでは後者を捕捉できない。なお倍率適用には権利日以外の要因(注意喚起銘柄・申込制限銘柄・異常な貸株超過状態)による2倍・8倍・10倍もあるが、これらは日証金が個別銘柄ごとに随時指定するもので事前の計算式では予測不可能なため未実装(現状の見積りは実際の上限を下回る可能性が残る保守的な下限)。
 
-**逆日歩予測(貸株超過率→実績逆日歩、`/yutai/forecast`系)**: 上記の「最大逆日歩」はあくまで入札の上限であり、実際に付く金額は毎日の入札で決まる変動相場(流動性の高い銘柄では権利日でも0円のことが多い)。この機能は`GyakuhibuHistoryBatchFunction`が蓄積した権利日ごとの残高・実績逆日歩の履歴から、貸株超過率(`(貸株残高-融資残高)/融資残高`)を6段階のビン(`融資超過`/`0〜0.5`/`0.5〜1`/`1〜2`/`2〜5`/`5以上`)に分け、ビンごとの充足率(実績逆日歩÷最高料率の実値、0〜1)の経験分布を全銘柄横断で作る(`lambda/shared/gyakuhibu-forecast.ts`)。**充足率の分母はこのアプリが自前計算する最高料率ではなく、taisyaku.jp CSVの「最高料率」列の実値(倍率適用済み)を使う** — 自前計算値は権利付き最終日の4倍ルール等の例外を全て正確に再現できるとは限らないため、実際に日証金が公開した値をそのまま使う方が正確。銘柄ごとの実績(直近の権利日、件数`n_t`)と全銘柄プール(該当ビンの件数`n_p`)を`w = n_t / (n_t + 4)`(縮小推定、`SHRINKAGE_K=4`)で加重ブレンドし、発生確率・充足率の中央値/P90を求める。次回権利日の超過率シナリオは「同銘柄・同月の直近実績」→「同銘柄の直近実績(月不問)」→「東証信用残(`JQuantsMarginBalance`)ベース、参考扱い」→「実績なし」の優先順で選ぶ。予測逆日歩(P50/P90)は充足率×最大逆日歩(上限)で金額化し、優待価値と比較して`forecastStatus`(`safe`/`caution`/`danger`/`na`)を判定する(価値がP90を上回れば`safe`、P50〜P90なら`caution`、P50以下なら`danger`)。既存の`riskStatus`(最大逆日歩=上限ベースの二値判定)とは別フィールドとして共存し、既存の意味は変更しない。設計の詳細は`docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md`。
+**逆日歩予測(貸株超過率→実績逆日歩、`/yutai/forecast`系)**: 上記の「最大逆日歩」はあくまで入札の上限であり、実際に付く金額は毎日の入札で決まる変動相場(流動性の高い銘柄では権利日でも0円のことが多い)。この機能は`GyakuhibuHistoryBatchFunction`が蓄積した権利日ごとの残高・実績逆日歩の履歴から、貸株超過率(`(貸株残高-融資残高)/融資残高`)を6段階のビン(`融資超過`/`0〜0.5`/`0.5〜1`/`1〜2`/`2〜5`/`5以上`)に分け、ビンごとの充足率(実績逆日歩÷最高料率の実値、0〜1)の経験分布を全銘柄横断で作る(`lambda/shared/gyakuhibu-forecast.ts`)。**充足率の分母はこのアプリが自前計算する最高料率ではなく、taisyaku.jp CSVの「最高料率」列の実値(倍率適用済み)を使う** — 自前計算値は権利付き最終日の4倍ルール等の例外を全て正確に再現できるとは限らないため、実際に日証金が公開した値をそのまま使う方が正確。銘柄ごとの実績(直近の権利日、件数`n_t`)と全銘柄プール(該当ビンの件数`n_p`)を`w = n_t / (n_t + 4)`(縮小推定、`SHRINKAGE_K=4`)で加重ブレンドし、発生確率・充足率の中央値/P90を求める。次回権利日の超過率シナリオは「同銘柄・同月の直近実績」→「同銘柄の直近実績(月不問)」→「実績なし(対象外)」の優先順で選ぶ(2026-09-09に東証信用残フォールバックを撤去。東証超過率でtaisyaku.jp基準のビン表を引くとリスクを過小評価するため — `docs/superpowers/notes/2026-09-09-tse-margin-balance-backtest.md`)。予測逆日歩(P50/P90)は充足率×最大逆日歩(上限)で金額化し、優待価値と比較して`forecastStatus`(`safe`/`caution`/`danger`/`na`)を判定する(価値がP90を上回れば`safe`、P50〜P90なら`caution`、P50以下なら`danger`)。既存の`riskStatus`(最大逆日歩=上限ベースの二値判定)とは別フィールドとして共存し、既存の意味は変更しない。設計の詳細は`docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md`。
+
+**現在需給ベース予測(東証信用残、スタンダードプラン依存)**: 上記とは別に、直近の東証信用残(`JQuantsMarginBalance`)から求めた貸株超過率で同じ統計モデルを走らせた予測を`tseForecast`として並列に持つ。プールは東証超過率で別途キャリブレーションし(`_POOL_TSE_`行)、スナップショット日→権利日の日数で`0-7`/`8-21`/`22+`日の3バケットに分ける(直前ほど予測力が高く、4週前では融資超過でも54%が発生するため)。貸株残の4週前比(`lendingGrowth4w`)も併せて保存する。一覧の「想定逆日歩(現在需給)」「貸株残(4週前比)」列と詳細の「現在需給ベース」カードに表示し、判定・デフォルトソートは過去実績ベースのまま。設計は`docs/superpowers/specs/2026-09-09-tse-margin-forecast-design.md`。
 
 ### taisyaku.jp(日本証券金融)からの実績逆日歩取得(実機で判明)
 
@@ -156,12 +157,12 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 |---|---|---|
 | `PriceBatchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の四本値を取得し`JQuantsStockPrices`へupsert |
 | `FinancialSummaryBatchFunction` | EventBridge(`cron(0 11 ? * MON *)` = 毎週月曜 JST 20:00) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の決算サマリを取得し`JQuantsFinancialSummary`へupsert。四半期ごとの更新なので週次取得で十分 |
-| `MarginBalanceBatchFunction` | EventBridge(`cron(30 9 ? * MON *)` = 毎週月曜 JST 18:30) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を取得し`JQuantsMarginBalance`へupsert。本来週次更新のため週次取得で十分。`data-source.ts`が`mkt-margin-int`/`mkt-margin-alert`を呼び出す(上記「優待クロス逆日歩リスク可視化」参照) |
+| `MarginBalanceBatchFunction` | EventBridge(`cron(30 8 ? * MON-FRI *)` = JST平日 17:30、`tseMarginFeatures`有効時のみ) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を、直近14日分の各日付について`mkt-margin-int`/`mkt-margin-alert`両方から取得し`JQuantsMarginBalance`へupsert(冪等)。2年分の金曜バックフィルはUTC月曜、または環境変数`FORCE_FULL_BACKFILL=true`のときのみ。`source`は`weekly`(=margin-interest由来、日次配信化後も同じ値)と`daily-alert` |
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
 | `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert |
 | `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし逆日歩リスクを事前計算・書き戻し。`GET /yutai`一覧APIが銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため |
-| `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 9 * * ? *)` = JST 18:40 毎日) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`・`JQuantsMarginBalance`(直近値)を読み、貸株超過率のビン別充足率分布(全銘柄プール+銘柄実績の縮小推定ブレンド)から次回権利日の予測逆日歩を算出し`JQuantsGyakuhibuForecast`へupsert |
+| `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 10 * * ? *)` = JST 19:40 毎日、逆日歩実績・信用残バッチの後) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`を読み、貸株超過率のビン別充足率分布から次回権利日の予測逆日歩(過去実績ベース)を算出し`JQuantsGyakuhibuForecast`へupsert。`TSE_MARGIN_FEATURES_ENABLED=true`のときは`JQuantsMarginBalance`も読み、東証信用残ベースの現在需給予測(`tseForecast`属性・`_POOL_TSE_`行)も併せて書く |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理 |
 | `AuthorizerFunction` | API GatewayのLambdaオーソライザー | `x-app-password` ヘッダーを `JQuantsAppPassword` と照合(結果は5分キャッシュ) |
 
@@ -177,8 +178,8 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待実施銘柄の一覧(各銘柄の「次回の権利日」で絞り込み)+ 前日終値・単元株数から算出したリスクバッジ(`safe`/`danger`/`na`。`na`になるのは、信用残データ無し=貸借銘柄でない場合・次回の権利日が無い場合・前日終値がまだ記録されていない場合、のいずれか)+ `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
 | `GET /yutai/{ticker}` | 優待マスタ情報 + 銘柄基本情報(前日終値・出来高・PER・決算サマリ主要項目)+ 逆日歩リスク計算結果(最高料率・最大逆日歩額・品貸日数・`riskStatus`〔`safe`/`danger`/`na`、詳細画面のバッジ表示に使用〕、次回権利日ベース)+ `rightsHistory`(過去の権利日ごとの実績逆日歩、taisyaku.jp直近3年分) |
 | `GET /yutai/{ticker}/margin-trend` | 信用残(融資残・貸株残)の時系列。直近1年分(365件)固定 |
-| `GET /yutai/forecast?rightsDateFrom=&rightsDateTo=&keyword=&forecastStatus=` | 予測付き優待銘柄一覧。`GET /yutai`と同じ絞り込みに加え、`forecastStatus`(`safe`\|`caution`\|`danger`\|`na`\|`all`、省略時`all`)でも絞り込み可能。各行に予測分布(発生確率・予測逆日歩P50/P90・判定・根拠件数)を含む |
-| `GET /yutai/{ticker}/forecast` | 銘柄別の予測詳細。予測分布・過去権利日ごとの実績(残高・超過率・充足率・応札・措置)・全銘柄プールのビン別統計・信用残トレンド直近値をまとめて返す |
+| `GET /yutai/forecast?rightsDateFrom=&rightsDateTo=&keyword=&forecastStatus=` | 予測付き優待銘柄一覧。`GET /yutai`と同じ絞り込みに加え、`forecastStatus`(`safe`\|`caution`\|`danger`\|`na`\|`all`、省略時`all`)でも絞り込み可能。各行に予測分布(発生確率・予測逆日歩P50/P90・判定・根拠件数)を含む。各アイテムに`tseForecast`(現在需給ベース予測、フラグ無効時null)、レスポンスに`features.tseMargin` |
+| `GET /yutai/{ticker}/forecast` | 銘柄別の予測詳細。予測分布・過去権利日ごとの実績(残高・超過率・充足率・応札・措置)・全銘柄プールのビン別統計・信用残トレンド直近値をまとめて返す。`tseForecast`と`features`を含む |
 
 書き込み系(POST/PUT/DELETE)は`/yutai`系には無い(読み取り専用画面のため)。CORSの`allowOrigins`はCloudFrontの配信ドメインと`http://localhost:5173`(ローカル開発用)のみ。
 
@@ -216,8 +217,8 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 | `/watchlist` | ウォッチリスト管理(銘柄コードで追加/削除) |
 | `/yutai` | 優待クロス スクリーニング一覧(読み取り専用)。権利日範囲(デフォルト当月1日〜末日)・キーワード・リスク判定で絞り込み、当月の権利付き最終日をバナー表示 |
 | `/yutai/:ticker` | 優待クロス詳細画面。ページ上部(タイトル横)に`/tickers/:ticker`への相互リンク → 銘柄基本情報 → 優待内容 → 逆日歩リスク計算(最大逆日歩にホバーすると実績逆日歩履歴のツールチップ) → 信用残トレンドグラフ、の順 |
-| `/yutai/forecast` | 逆日歩予測 一覧(読み取り専用)。`/yutai`と同じ絞り込みに加え判定(危険/注意/安全/対象外)でも絞り込み、判定→期待値差の順でデフォルトソート |
-| `/yutai/:ticker/forecast` | 逆日歩予測 詳細。サマリカード(発生確率・予測中央値・予測P90・優待価値との差)→貸株超過率と充足率の曲線グラフ(全銘柄プール+自銘柄実績の重ね書き)→感度表→過去権利日テーブル→信用残トレンド、の順。既存の`/yutai/:ticker`から相互リンク |
+| `/yutai/forecast` | 逆日歩予測 一覧(読み取り専用)。`/yutai`と同じ絞り込みに加え判定(危険/注意/安全/対象外)でも絞り込み、判定→期待値差の順でデフォルトソート。`features.tseMargin`が有効なら「想定逆日歩(現在需給)」(過去実績より悪化していれば↑)と「貸株残(4週前比)」の列を表示 |
+| `/yutai/:ticker/forecast` | 逆日歩予測 詳細。サマリカード(発生確率・予測中央値・予測P90・優待価値との差)→貸株超過率と充足率の曲線グラフ(全銘柄プール+自銘柄実績の重ね書き)→感度表→過去権利日テーブル→信用残トレンド、の順。最大逆日歩カードの後に「現在需給ベース」カード群(フラグ有効かつ予測ありのとき)。信用残トレンドはフラグ有効時のみ。既存の`/yutai/:ticker`から相互リンク |
 
 デザイン: 日本市場の慣例に合わせ**上昇=赤/下落=緑**(米国式とは逆)。数値は`JetBrains Mono`のtabular-numsで統一表示。
 
@@ -258,6 +259,18 @@ aws cloudfront create-invalidation --distribution-id <DistributionId> --paths '/
 ```
 
 `FrontendBucketName` / `DistributionId` / `ApiEndpoint` / `FrontendUrl` は `cdk deploy` の出力(CfnOutput)で確認できる。
+
+### スタンダードプラン依存機能のON/OFF(`tseMarginFeatures`)
+
+J-Quantsの`mkt-margin-int`/`mkt-margin-alert`はスタンダードプラン以上でしか使えない。これらに依存する機能(信用残バッチ・現在需給ベース予測・一覧の現在需給列・詳細の現在需給カードと信用残トレンド)はCDKコンテキスト値`tseMarginFeatures`(`cdk.json`で既定`true`)でまとめて切り替える。
+
+ライトプラン等へ落とす場合:
+
+```
+APP_PASSWORD=xxxxx npx cdk deploy -c tseMarginFeatures=false
+```
+
+この1回で、`MarginBalanceBatchSchedule`が削除され(Lambdaは残る)、`GyakuhibuForecastBatchFunction`は現在需給予測をスキップし、`ReferenceApiFunction`は`features.tseMargin: false`と`tseForecast: null`を返し、フロントはそれを見て列・カード・信用残トレンドを非表示にする(フロントの再ビルドは不要)。テーブルとデータは残るので、`-c tseMarginFeatures=true`(または指定なし)で再デプロイすれば元に戻る。過去実績ベース予測(判定・想定逆日歩)はこのフラグの影響を受けない。
 
 ## コスト目安
 
