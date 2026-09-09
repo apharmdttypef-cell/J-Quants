@@ -119,6 +119,22 @@ export interface YutaiForecast {
   poolSamples: number;
 }
 
+export type YutaiTseLagBucket = '0-7' | '8-21' | '22+';
+
+// 東証信用残ベースの現在需給予測(スタンダードプラン依存)。APIはフラグ無効時にnullを返す。
+export interface YutaiTseForecast extends YutaiForecast {
+  snapshotDate: string;
+  lagDays: number;
+  lagBucket: YutaiTseLagBucket;
+  financingBalance: number;
+  lendingBalance: number;
+  lendingGrowth4w: number | null;
+}
+
+export interface YutaiFeatures {
+  tseMargin: boolean;
+}
+
 export interface YutaiForecastListItem {
   ticker: string;
   companyName?: string;
@@ -129,12 +145,14 @@ export interface YutaiForecastListItem {
   maxGyakuhibu: number | null;
   closePrice: number | null;
   forecast: YutaiForecast;
+  tseForecast: YutaiTseForecast | null;
 }
 
 export interface YutaiForecastListResponse {
   tickers: YutaiForecastListItem[];
   currentMonthLastTradableDate: string;
   poolComputedAt: string | null;
+  features: YutaiFeatures;
 }
 
 export interface YutaiForecastHistoryPoint {
@@ -180,7 +198,9 @@ export interface YutaiForecastDetail {
   maxGyakuhibu: number | null;
   closePrice: number | null;
   forecast: YutaiForecast;
+  tseForecast: YutaiTseForecast | null;
   history: YutaiForecastHistoryPoint[];
   poolBins: PoolBin[];
   marginTrend: { latest: YutaiForecastMarginLatest | null };
+  features: YutaiFeatures;
 }

@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable } from '@tanstack/react-table';
 import type { ColumnDef } from '@tanstack/react-table';
 import * as HoverCard from '@radix-ui/react-hover-card';
 import { fetchYutaiForecastList } from '../api/client';
-import type { YutaiForecastListItem, YutaiForecastStatus } from '../api/types';
+import type { YutaiForecastListItem, YutaiForecastStatus, YutaiTseForecast } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
@@ -67,7 +67,52 @@ function formatPercent(value: number | null): string {
   return value !== null ? `${Math.round(value * 100)}%` : '—';
 }
 
-const columns: ColumnDef<YutaiForecastListItem>[] = [
+// lambda/shared/gyakuhibu-forecast.tsのBIN_EDGESと同じ6区分(順序=リスクの低い→高い)。
+// 詳細ページと同じくファイル内複製。
+const BIN_LABELS = ['融資超過', '0〜0.5', '0.5〜1', '1〜2', '2〜5', '5以上'] as const;
+
+function binIndex(label: string | null): number {
+  return label === null ? -1 : BIN_LABELS.indexOf(label as (typeof BIN_LABELS)[number]);
+}
+
+// 現在需給のビンが過去実績のビンより悪い(順序で後ろ)か、過去実績が対象外で現在需給だけ
+// 予測できている場合にtrue。一覧の「想定逆日歩(現在需給)」に↑を付ける判定。
+function tseWorseThanHistory(item: YutaiForecastListItem): boolean {
+  const tse = item.tseForecast;
+  if (!tse || tse.bin === null) return false;
+  if (item.forecast.forecastStatus === 'na' || item.forecast.bin === null) return true;
+  return binIndex(tse.bin) > binIndex(item.forecast.bin);
+}
+
+function formatGrowth(value: number | null): string {
+  return value !== null ? `${value.toFixed(1)}倍` : '—';
+}
+
+// 想定逆日歩(現在需給)セルのホバー内容。
+function TseCellHover({ tse, children }: { tse: YutaiTseForecast; children: ReactNode }) {
+  const ratio = tse.excessRatio !== null && Number.isFinite(tse.excessRatio) ? tse.excessRatio.toFixed(2) : '—';
+  return (
+    <HoverCard.Root openDelay={0}>
+      <HoverCard.Trigger asChild>
+        <span tabIndex={0} className="gyakuhibu-hover">
+          {children}
+        </span>
+      </HoverCard.Trigger>
+      <HoverCard.Portal>
+        <HoverCard.Content className="gyakuhibu-tooltip" side="bottom" sideOffset={8}>
+          <div>東証信用残 {tse.snapshotDate} 時点(権利日{tse.lagDays}日前)</div>
+          <div>貸株超過率: {ratio}(ビン: {tse.bin ?? '—'})</div>
+          <div>発生確率: {formatPercent(tse.pOccur)}</div>
+          <div>想定逆日歩(最悪): {tse.forecastP90 !== null ? formatFinancialYen(String(Math.round(tse.forecastP90))) : '—'}</div>
+          <div>現在需給の判定: {FORECAST_STATUS_LABEL[tse.forecastStatus]}</div>
+        </HoverCard.Content>
+      </HoverCard.Portal>
+    </HoverCard.Root>
+  );
+}
+
+function buildColumns(tseEnabled: boolean): ColumnDef<YutaiForecastListItem>[] {
+  const columns: ColumnDef<YutaiForecastListItem>[] = [
   {
     id: 'company',
     header: '銘柄',
@@ -169,7 +214,67 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
       </span>
     ),
   },
-];
+  ];
+
+  if (tseEnabled) {
+    const insertAt = columns.findIndex((c) => c.id === 'pOccur');
+    columns.splice(
+      insertAt,
+      0,
+      {
+        id: 'tseForecastP50',
+        header: () => (
+          <HeaderTooltip
+            label="想定逆日歩(現在需給)"
+            tooltip="直近の東証信用残(融資残・貸株残)から求めた貸株超過率をもとに、過去の類似ケースの分布から算出した逆日歩の目安。過去実績ベースよりリスクが高い区分に入っていれば↑。スタンダードプラン限定の情報です。"
+          />
+        ),
+        accessorFn: (row) => row.tseForecast?.forecastP50 ?? null,
+        sortDescFirst: true,
+        sortingFn: (rowA, rowB) => {
+          const a = rowA.original.tseForecast?.forecastP50 ?? null;
+          const b = rowB.original.tseForecast?.forecastP50 ?? null;
+          if (a === null && b === null) return 0;
+          if (a === null) return 1;
+          if (b === null) return -1;
+          return a - b;
+        },
+        cell: ({ row }) => {
+          const tse = row.original.tseForecast;
+          if (!tse || tse.forecastP50 === null) return '—';
+          return (
+            <TseCellHover tse={tse}>
+              {formatFinancialYen(String(Math.round(tse.forecastP50)))}
+              {tseWorseThanHistory(row.original) ? ' ↑' : ''}
+            </TseCellHover>
+          );
+        },
+      },
+      {
+        id: 'lendingGrowth4w',
+        header: () => (
+          <HeaderTooltip
+            label="貸株残(4週前比)"
+            tooltip="直近の東証貸株残が4週間前の何倍か。権利日に向けた空売りの積み上がりペースで、3倍以上の急増は逆日歩発生の先行シグナルです。スタンダードプラン限定の情報です。"
+          />
+        ),
+        accessorFn: (row) => row.tseForecast?.lendingGrowth4w ?? null,
+        sortDescFirst: true,
+        sortingFn: (rowA, rowB) => {
+          const a = rowA.original.tseForecast?.lendingGrowth4w ?? null;
+          const b = rowB.original.tseForecast?.lendingGrowth4w ?? null;
+          if (a === null && b === null) return 0;
+          if (a === null) return 1;
+          if (b === null) return -1;
+          return a - b;
+        },
+        cell: ({ row }) => formatGrowth(row.original.tseForecast?.lendingGrowth4w ?? null),
+      },
+    );
+  }
+
+  return columns;
+}
 
 const KEYWORD_DEBOUNCE_MS = 400;
 
@@ -233,6 +338,9 @@ export function YutaiForecastListPage() {
         .sort(compareByDefaultOrder),
     [listState.data, selectedStatuses],
   );
+
+  const tseEnabled = listState.data?.features.tseMargin ?? false;
+  const columns = useMemo(() => buildColumns(tseEnabled), [tseEnabled]);
 
   const table = useReactTable({
     data: sortedTickers,
@@ -322,7 +430,9 @@ export function YutaiForecastListPage() {
                         cell.column.id === 'rightsDate' ||
                         cell.column.id === 'pOccur' ||
                         cell.column.id === 'forecastP50' ||
-                        cell.column.id === 'forecastP90'
+                        cell.column.id === 'forecastP90' ||
+                        cell.column.id === 'tseForecastP50' ||
+                        cell.column.id === 'lendingGrowth4w'
                           ? 'num'
                           : cell.column.id === 'content'
                             ? 'cell-wrap'

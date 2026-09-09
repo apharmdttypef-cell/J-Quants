@@ -173,6 +173,54 @@ export function YutaiForecastDetailPage() {
         <p style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>{scenarioText(forecast)}</p>
       </div>
 
+      {data.features.tseMargin && data.tseForecast && (
+        <>
+          <div className="section-heading">
+            現在需給ベース(東証信用残 {data.tseForecast.snapshotDate} 時点、権利日{data.tseForecast.lagDays}日前)
+          </div>
+          <div className="forecast-cards">
+            <div className="card">
+              <div className="summary-item__label">貸株超過率</div>
+              <div className="summary-item__value">
+                {data.tseForecast.excessRatio !== null && Number.isFinite(data.tseForecast.excessRatio)
+                  ? data.tseForecast.excessRatio.toFixed(2)
+                  : '∞'}
+              </div>
+            </div>
+            <div className="card">
+              <div className="summary-item__label">発生確率</div>
+              <div className="summary-item__value">{formatPercent(data.tseForecast.pOccur)}</div>
+            </div>
+            <div className="card">
+              <div className="summary-item__label">想定逆日歩</div>
+              <div className="summary-item__value">
+                {data.tseForecast.forecastP50 !== null ? formatFinancialYen(String(Math.round(data.tseForecast.forecastP50))) : '—'}
+              </div>
+            </div>
+            <div className="card">
+              <div className="summary-item__label">想定逆日歩(最悪)</div>
+              <div className="summary-item__value">
+                {data.tseForecast.forecastP90 !== null ? formatFinancialYen(String(Math.round(data.tseForecast.forecastP90))) : '—'}
+              </div>
+            </div>
+            <div className="card">
+              <div className="summary-item__label">貸株残(4週前比)</div>
+              <div className="summary-item__value">
+                {data.tseForecast.lendingGrowth4w !== null ? `${data.tseForecast.lendingGrowth4w.toFixed(1)}倍` : '—'}
+              </div>
+            </div>
+            <div className="card">
+              <div className="summary-item__label">現在需給の判定</div>
+              <div className="summary-item__value">
+                <span className={`risk-badge risk-badge--${data.tseForecast.forecastStatus}`}>
+                  {FORECAST_STATUS_LABEL[data.tseForecast.forecastStatus]}
+                </span>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
       <div className="section-heading">貸株超過率と充足率(全銘柄プール)</div>
       <div className="card" style={{ height: 300 }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -269,28 +317,32 @@ export function YutaiForecastDetailPage() {
         </div>
       )}
 
-      <div className="section-heading">信用残トレンド(過去1年)</div>
-      {trendState.loading && <StatusNote kind="loading" message="読み込み中…" />}
-      {trendState.error && <StatusNote kind="error" message={`取得に失敗しました: ${trendState.error.message}`} />}
-      {trendState.data && trendState.data.points.length === 0 && (
-        <StatusNote kind="empty" message="まだ信用残データがありません(取得中です)。" />
-      )}
-      {trendState.data && trendState.data.points.length > 0 && (
-        <div className="card" style={{ height: 220 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={trendState.data.points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
-              <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
-              <Line type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
-              <Line type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
-              {data.history.map((h) => (
-                <ReferenceLine key={h.rightsDate} x={h.rightsDate} stroke="var(--up)" strokeDasharray="3 3" />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+      {data.features.tseMargin && (
+        <>
+          <div className="section-heading">信用残トレンド(過去1年)</div>
+          {trendState.loading && <StatusNote kind="loading" message="読み込み中…" />}
+          {trendState.error && <StatusNote kind="error" message={`取得に失敗しました: ${trendState.error.message}`} />}
+          {trendState.data && trendState.data.points.length === 0 && (
+            <StatusNote kind="empty" message="まだ信用残データがありません(取得中です)。" />
+          )}
+          {trendState.data && trendState.data.points.length > 0 && (
+            <div className="card" style={{ height: 220 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trendState.data.points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                  <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
+                  <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
+                  <Line type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
+                  <Line type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
+                  {data.history.map((h) => (
+                    <ReferenceLine key={h.rightsDate} x={h.rightsDate} stroke="var(--up)" strokeDasharray="3 3" />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </>
       )}
     </>
   );
