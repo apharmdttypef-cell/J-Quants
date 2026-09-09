@@ -187,27 +187,47 @@ function KeywordFilterInput({ onDebouncedChange }: { onDebouncedChange: (value: 
   );
 }
 
+// 実運用では「危険を除いたものを見て購入判断する」使い方になるため、危険だけ
+// デフォルトで外し、注意・安全・対象外はデフォルトで選択しておく。
+const DEFAULT_STATUSES: ReadonlySet<YutaiForecastStatus> = new Set(['caution', 'safe', 'na']);
+const ALL_STATUSES: readonly YutaiForecastStatus[] = ['danger', 'caution', 'safe', 'na'];
+
 export function YutaiForecastListPage() {
   const navigate = useNavigate();
   const defaultRange = monthRange();
   const [rightsDateFrom, setRightsDateFrom] = useState(defaultRange.from);
   const [rightsDateTo, setRightsDateTo] = useState(defaultRange.to);
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
-  const [forecastStatus, setForecastStatus] = useState<'all' | YutaiForecastStatus>('all');
+  const [selectedStatuses, setSelectedStatuses] = useState<ReadonlySet<YutaiForecastStatus>>(DEFAULT_STATUSES);
 
+  // 判定はチェックボックスでの複数選択(クライアント側フィルタ)にしたため、APIには
+  // forecastStatusを渡さず常に全件取得する。チェックボックスの切り替えはネットワーク
+  // 往復無しで即座に反映される。
   const listState = useAsync(
-    () => fetchYutaiForecastList({ rightsDateFrom, rightsDateTo, keyword: debouncedKeyword || undefined, forecastStatus }),
-    [rightsDateFrom, rightsDateTo, debouncedKeyword, forecastStatus],
+    () => fetchYutaiForecastList({ rightsDateFrom, rightsDateTo, keyword: debouncedKeyword || undefined }),
+    [rightsDateFrom, rightsDateTo, debouncedKeyword],
   );
 
-  // listState.dataが変わった時(=フェッチ完了時)だけ並べ替える。ここをuseMemoしないと
-  // keyword入力のたびの再レンダーで毎回新しい配列を作ってしまい、useReactTableが
-  // 「新しいdata」と見なして内部の行モデルを毎回作り直す(検索結果が多いとスマホで
-  // 固まって見えるほど重い)。既存のYutaiListPageはlistState.data?.tickersをそのまま
-  // 渡していて参照が安定しているため、この問題が起きない。
+  function toggleStatus(status: YutaiForecastStatus) {
+    setSelectedStatuses((prev) => {
+      const next = new Set(prev);
+      if (next.has(status)) next.delete(status);
+      else next.add(status);
+      return next;
+    });
+  }
+
+  // listState.dataまたはselectedStatusesが変わった時だけ絞り込み・並べ替える。ここを
+  // useMemoしないとkeyword入力のたびの再レンダーで毎回新しい配列を作ってしまい、
+  // useReactTableが「新しいdata」と見なして内部の行モデルを毎回作り直す(検索結果が
+  // 多いとスマホで固まって見えるほど重い)。既存のYutaiListPageはlistState.data?.tickers
+  // をそのまま渡していて参照が安定しているため、この問題が起きない。
   const sortedTickers = useMemo(
-    () => [...(listState.data?.tickers ?? [])].sort(compareByDefaultOrder),
-    [listState.data],
+    () =>
+      (listState.data?.tickers ?? [])
+        .filter((t) => selectedStatuses.has(t.forecast.forecastStatus))
+        .sort(compareByDefaultOrder),
+    [listState.data, selectedStatuses],
   );
 
   const table = useReactTable({
@@ -246,25 +266,24 @@ export function YutaiForecastListPage() {
         <label>
           キーワード: <KeywordFilterInput onDebouncedChange={setDebouncedKeyword} />
         </label>
-        <label>
-          判定:{' '}
-          <select value={forecastStatus} onChange={(e) => setForecastStatus(e.target.value as typeof forecastStatus)}>
-            <option value="all">すべて</option>
-            <option value="danger">危険</option>
-            <option value="caution">注意</option>
-            <option value="safe">安全</option>
-            <option value="na">対象外</option>
-          </select>
-        </label>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.6rem' }}>
+          判定:
+          {ALL_STATUSES.map((status) => (
+            <label key={status} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', fontWeight: 400 }}>
+              <input type="checkbox" checked={selectedStatuses.has(status)} onChange={() => toggleStatus(status)} />
+              {FORECAST_STATUS_LABEL[status]}
+            </label>
+          ))}
+        </span>
       </div>
 
       {listState.loading && <StatusNote kind="loading" message="読み込み中…" />}
       {listState.error && <StatusNote kind="error" message={`取得に失敗しました: ${listState.error.message}`} />}
-      {listState.data && listState.data.tickers.length === 0 && (
+      {listState.data && sortedTickers.length === 0 && (
         <StatusNote kind="empty" message="条件に一致する優待銘柄がありません。" />
       )}
 
-      {listState.data && listState.data.tickers.length > 0 && (
+      {listState.data && sortedTickers.length > 0 && (
         <div className="table-scroll">
           <table className="data-table">
             <thead>
