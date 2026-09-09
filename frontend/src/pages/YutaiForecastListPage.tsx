@@ -2,11 +2,31 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable } from '@tanstack/react-table';
 import type { ColumnDef } from '@tanstack/react-table';
+import * as HoverCard from '@radix-ui/react-hover-card';
 import { fetchYutaiForecastList } from '../api/client';
 import type { YutaiForecastListItem, YutaiForecastStatus } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+
+// 列見出しの意味を説明する簡易ツールチップ。YutaiDetailPage.tsxの最大逆日歩ホバーカードと
+// 同じgyakuhibu-hover/gyakuhibu-tooltipクラス(見た目・アニメーション)を再利用する。
+function HeaderTooltip({ label, tooltip }: { label: string; tooltip: string }) {
+  return (
+    <HoverCard.Root openDelay={0}>
+      <HoverCard.Trigger asChild>
+        <span tabIndex={0} className="gyakuhibu-hover">
+          {label}
+        </span>
+      </HoverCard.Trigger>
+      <HoverCard.Portal>
+        <HoverCard.Content className="gyakuhibu-tooltip" side="bottom" sideOffset={8}>
+          {tooltip}
+        </HoverCard.Content>
+      </HoverCard.Portal>
+    </HoverCard.Root>
+  );
+}
 
 function monthRange(): { from: string; to: string } {
   const now = new Date();
@@ -65,7 +85,7 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
   },
   {
     accessorKey: 'closePrice',
-    header: '前日株価',
+    header: () => <HeaderTooltip label="前日株価" tooltip="直近の終値。最大逆日歩の計算に使っています。" />,
     sortDescFirst: false,
     sortingFn: (rowA, rowB) => {
       const a = rowA.original.closePrice;
@@ -79,7 +99,12 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
   },
   {
     accessorKey: 'maxGyakuhibu',
-    header: '最大逆日歩',
+    header: () => (
+      <HeaderTooltip
+        label="最大逆日歩"
+        tooltip="理論上の上限額(入札で実際にここまで決着する確率はごく低い参考値)。株価・必要株数・品貸日数と、権利付き最終日の4倍ルールから算出しています。"
+      />
+    ),
     sortDescFirst: false,
     sortingFn: (rowA, rowB) => {
       const a = rowA.original.maxGyakuhibu;
@@ -93,7 +118,9 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
   },
   {
     id: 'forecastP50',
-    header: '想定逆日歩',
+    header: () => (
+      <HeaderTooltip label="想定逆日歩" tooltip="過去の類似ケース(同程度の貸株超過率)の分布から算出した、実際に付きそうな逆日歩の目安(中央値)。" />
+    ),
     accessorFn: (row) => row.forecast.forecastP50,
     sortDescFirst: true,
     cell: ({ row }) =>
@@ -103,7 +130,12 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
   },
   {
     id: 'forecastP90',
-    header: '想定逆日歩(最悪)',
+    header: () => (
+      <HeaderTooltip
+        label="想定逆日歩(最悪)"
+        tooltip="過去の類似ケースの中でも悪い部類(上位1割)に入った場合を想定した逆日歩額。"
+      />
+    ),
     accessorFn: (row) => row.forecast.forecastP90,
     sortDescFirst: true,
     cell: ({ row }) =>
@@ -113,14 +145,21 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
   },
   {
     id: 'pOccur',
-    header: '発生確率',
+    header: () => (
+      <HeaderTooltip label="発生確率" tooltip="貸株超過率が同程度だった過去のケースのうち、実際に逆日歩が発生した(0円ではなかった)割合。" />
+    ),
     accessorFn: (row) => row.forecast.pOccur,
     sortDescFirst: true,
     cell: ({ row }) => formatPercent(row.original.forecast.pOccur),
   },
   {
     id: 'judgment',
-    header: '判定',
+    header: () => (
+      <HeaderTooltip
+        label="判定"
+        tooltip="優待価値と想定逆日歩を比較した目安。安全=優待価値が想定逆日歩(最悪)を上回る、注意=中央値は上回るが最悪は上回らない、危険=中央値以下、対象外=判定に必要な情報が不足。"
+      />
+    ),
     accessorFn: (row) => row.forecast.forecastStatus,
     sortingFn: (rowA, rowB) =>
       FORECAST_STATUS_SORT_RANK[rowA.original.forecast.forecastStatus] - FORECAST_STATUS_SORT_RANK[rowB.original.forecast.forecastStatus],
