@@ -30,6 +30,13 @@ export class JQuantsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // スタンダードプラン依存機能(東証信用残の取得・現在需給ベース予測・信用残トレンド)の
+    // 有効/無効。ライトプランへ落とす際は `cdk deploy -c tseMarginFeatures=false` の1回で、
+    // 信用残バッチのスケジュール削除・APIのnull応答・画面非表示までまとめて切り替わる
+    // (docs/superpowers/specs/2026-09-09-tse-margin-forecast-design.md)。CLIの-cは文字列で渡る。
+    const tseMarginFeaturesContext = this.node.tryGetContext('tseMarginFeatures');
+    const tseMarginFeatures = tseMarginFeaturesContext !== false && tseMarginFeaturesContext !== 'false';
+
     // J-Quants Freeプランは過去2年分を12週間遅延で配信する(直近12週間分は取得不可)。
     // 蓄積データはスタック destroy 時も残す(RETAIN + PITR)。
     this.stockPricesTable = new dynamodb.Table(this, 'JQuantsStockPricesTable', {
@@ -228,13 +235,16 @@ export class JQuantsStack extends cdk.Stack {
     this.marginBalanceTable.grantReadWriteData(marginBalanceBatchFn);
     this.apiKeySecret.grantRead(marginBalanceBatchFn);
 
-    // 信用残は本来週次更新のデータ(日々公表銘柄の日次例外は別途対応、
-    // docs/superpowers/specs/2026-08-18-yutai-batch-freshness-split-design.mdのスコープ外)。
-    // JST 月曜18:30 = UTC 月曜09:30。
-    new events.Rule(this, 'MarginBalanceBatchSchedule', {
-      schedule: events.Schedule.cron({ minute: '30', hour: '9', weekDay: 'MON' }),
-      targets: [new targets.LambdaFunction(marginBalanceBatchFn)],
-    });
+    // 信用残はJ-Quants側で毎営業日16:30頃に更新される(margin-alertは以前から日次、
+    // margin-interestは2026-09-28から日次)。JST平日17:30 = UTC 08:30。
+    // スタンダードプラン依存のため、tseMarginFeaturesが無効ならスケジュール自体を作らない
+    // (Lambdaは残すので手動実行は可能)。
+    if (tseMarginFeatures) {
+      new events.Rule(this, 'MarginBalanceBatchSchedule', {
+        schedule: events.Schedule.cron({ minute: '30', hour: '8', weekDay: 'MON-FRI' }),
+        targets: [new targets.LambdaFunction(marginBalanceBatchFn)],
+      });
+    }
 
     const gyakuhibuHistoryBatchFn = new nodejs.NodejsFunction(this, 'GyakuhibuHistoryBatchFunction', {
       entry: path.join(__dirname, '..', 'lambda', 'gyakuhibu-history-batch', 'index.ts'),
@@ -332,6 +342,7 @@ export class JQuantsStack extends cdk.Stack {
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName,
+        TSE_MARGIN_FEATURES_ENABLED: String(tseMarginFeatures),
       },
     });
 
@@ -340,9 +351,10 @@ export class JQuantsStack extends cdk.Stack {
     this.marginBalanceTable.grantReadData(gyakuhibuForecastBatchFn);
     this.gyakuhibuForecastTable.grantWriteData(gyakuhibuForecastBatchFn);
 
-    // 逆日歩実績(GyakuhibuHistoryBatchSchedule: 毎日10:00 UTC)の後に実行する。JST 18:40 = UTC 09:40。
+    // 逆日歩実績(GyakuhibuHistoryBatchSchedule: 毎日10:00 UTC)と信用残(MarginBalanceBatchSchedule:
+    // 平日08:30 UTC)の後に実行する。JST 19:40 = UTC 10:40。
     new events.Rule(this, 'GyakuhibuForecastBatchSchedule', {
-      schedule: events.Schedule.cron({ minute: '40', hour: '9' }),
+      schedule: events.Schedule.cron({ minute: '40', hour: '10' }),
       targets: [new targets.LambdaFunction(gyakuhibuForecastBatchFn)],
     });
 
@@ -362,6 +374,7 @@ export class JQuantsStack extends cdk.Stack {
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
         GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName,
+        TSE_MARGIN_FEATURES_ENABLED: String(tseMarginFeatures),
       },
     });
 

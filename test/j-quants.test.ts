@@ -212,7 +212,7 @@ test('creates the JQuantsGyakuhibuActual table with ticker/rightsDate key', () =
   });
 });
 
-test('creates the margin balance batch Lambda wired to the yutai and margin tables, on a weekly schedule', () => {
+test('creates the margin balance batch Lambda wired to the yutai and margin tables, on a weekday daily schedule', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -225,7 +225,7 @@ test('creates the margin balance batch Lambda wired to the yutai and margin tabl
     },
   });
   template.hasResourceProperties('AWS::Events::Rule', {
-    ScheduleExpression: 'cron(30 9 ? * MON *)',
+    ScheduleExpression: 'cron(30 8 ? * MON-FRI *)',
     State: 'ENABLED',
   });
 });
@@ -387,13 +387,14 @@ test('creates the gyakuhibu-forecast-batch Lambda wired to master/actual/margin/
         GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
         MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
         GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(),
+        TSE_MARGIN_FEATURES_ENABLED: 'true',
       }),
     },
   });
 
-  // GyakuhibuHistoryBatchSchedule(daily 10:00 UTC)の後、JST 18:40 = UTC 09:40。
+  // GyakuhibuHistoryBatchSchedule(daily 10:00 UTC)の後、JST 19:40 = UTC 10:40。
   template.hasResourceProperties('AWS::Events::Rule', {
-    ScheduleExpression: 'cron(40 9 * * ? *)',
+    ScheduleExpression: 'cron(40 10 * * ? *)',
     State: 'ENABLED',
   });
 
@@ -431,4 +432,55 @@ test('creates the gyakuhibu-forecast-batch Lambda wired to master/actual/margin/
     });
   });
   expect(hasReadAccessToInputs).toBe(true);
+});
+
+test('passes TSE_MARGIN_FEATURES_ENABLED=true to the reference API by default', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Environment: {
+      Variables: Match.objectLike({
+        GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(),
+        WATCHLIST_TABLE_NAME: Match.anyValue(),
+        TSE_MARGIN_FEATURES_ENABLED: 'true',
+      }),
+    },
+  });
+});
+
+test('tseMarginFeatures=false drops the margin balance schedule and flips the env var to false', () => {
+  const app = new cdk.App({ context: { tseMarginFeatures: false } });
+  const template = Template.fromStack(new JQuantsStack(app, 'TestStack'));
+
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  expect(scheduleExpressions).not.toContain('cron(30 8 ? * MON-FRI *)');
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6); // 既定の7つから信用残バッチ分が減る
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Environment: {
+      Variables: Match.exact({
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
+        MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(),
+        TSE_MARGIN_FEATURES_ENABLED: 'false',
+      }),
+    },
+  });
+});
+
+test('tseMarginFeatures passed as the string "false" (as the CLI -c flag does) is treated as disabled', () => {
+  const app = new cdk.App({ context: { tseMarginFeatures: 'false' } });
+  const template = Template.fromStack(new JQuantsStack(app, 'TestStack'));
+
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
 });
