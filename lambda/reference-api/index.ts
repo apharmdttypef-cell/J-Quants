@@ -590,6 +590,7 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
       days: master.days,
     },
     rightsHistory: history,
+    features: { tseMargin: tseMarginEnabled() },
   });
 }
 

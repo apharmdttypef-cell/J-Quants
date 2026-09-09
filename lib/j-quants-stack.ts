@@ -335,7 +335,7 @@ export class JQuantsStack extends cdk.Stack {
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.minutes(14),
-      memorySize: 256,
+      memorySize: 1024,
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,

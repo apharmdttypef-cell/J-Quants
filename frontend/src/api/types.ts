@@ -82,6 +82,7 @@ export interface YutaiDetail {
   basicInfo: YutaiBasicInfo;
   risk: YutaiRiskInfo;
   rightsHistory: YutaiRightsHistoryPoint[];
+  features: YutaiFeatures;
 }
 
 export interface MarginTrendPoint {

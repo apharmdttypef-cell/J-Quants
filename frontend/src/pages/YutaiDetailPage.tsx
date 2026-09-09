@@ -133,27 +133,31 @@ export function YutaiDetailPage() {
         <span className={`risk-badge risk-badge--${data.risk.riskStatus}`}>{riskLabel}</span>
       </div>
 
-      <div className="section-heading">信用残トレンド(過去1年)</div>
-      {trendState.loading && <StatusNote kind="loading" message="読み込み中…" />}
-      {trendState.error && (
-        <StatusNote kind="error" message={`取得に失敗しました: ${trendState.error.message}`} />
-      )}
-      {trendState.data && trendState.data.points.length === 0 && (
-        <StatusNote kind="empty" message="まだ信用残データがありません(取得中です)。" />
-      )}
-      {trendState.data && trendState.data.points.length > 0 && (
-        <div className="card" style={{ height: 220 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={trendState.data.points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
-              <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
-              <Line type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
-              <Line type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+      {data.features.tseMargin && (
+        <>
+          <div className="section-heading">信用残トレンド(過去1年)</div>
+          {trendState.loading && <StatusNote kind="loading" message="読み込み中…" />}
+          {trendState.error && (
+            <StatusNote kind="error" message={`取得に失敗しました: ${trendState.error.message}`} />
+          )}
+          {trendState.data && trendState.data.points.length === 0 && (
+            <StatusNote kind="empty" message="まだ信用残データがありません(取得中です)。" />
+          )}
+          {trendState.data && trendState.data.points.length > 0 && (
+            <div className="card" style={{ height: 220 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trendState.data.points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                  <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
+                  <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
+                  <Line type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
+                  <Line type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </>
       )}
     </>
   );
