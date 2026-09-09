@@ -130,17 +130,6 @@ const columns: ColumnDef<YutaiForecastListItem>[] = [
       </span>
     ),
   },
-  {
-    id: 'basis',
-    header: '根拠',
-    accessorFn: (row) => row.forecast.tickerSamples + row.forecast.poolSamples,
-    cell: ({ row }) => (
-      <>
-        銘柄{row.original.forecast.tickerSamples}件＋市場{row.original.forecast.poolSamples}件
-        {row.original.forecast.scenario === 'current-tse' && <span className="basis-badge">参考</span>}
-      </>
-    ),
-  },
 ];
 
 const KEYWORD_DEBOUNCE_MS = 400;
