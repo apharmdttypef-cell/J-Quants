@@ -229,14 +229,15 @@ function buildColumns(tseEnabled: boolean): ColumnDef<YutaiForecastListItem>[] {
             tooltip="直近の東証信用残(融資残・貸株残)から求めた貸株超過率をもとに、過去の類似ケースの分布から算出した逆日歩の目安。過去実績ベースよりリスクが高い区分に入っていれば↑。スタンダードプラン限定の情報です。"
           />
         ),
-        accessorFn: (row) => row.tseForecast?.forecastP50 ?? null,
+        // accessorFnはundefinedを返す(nullではなく) — sortUndefined: 'last'が
+        // 昇順・降順どちらでも欠損値を末尾に固定してくれる(TanStack Tableは
+        // desc反転の前にsortUndefined分岐を評価するため、符号反転の影響を受けない)。
+        accessorFn: (row) => row.tseForecast?.forecastP50 ?? undefined,
         sortDescFirst: true,
+        sortUndefined: 'last',
         sortingFn: (rowA, rowB) => {
-          const a = rowA.original.tseForecast?.forecastP50 ?? null;
-          const b = rowB.original.tseForecast?.forecastP50 ?? null;
-          if (a === null && b === null) return 0;
-          if (a === null) return 1;
-          if (b === null) return -1;
+          const a = rowA.original.tseForecast?.forecastP50 ?? 0;
+          const b = rowB.original.tseForecast?.forecastP50 ?? 0;
           return a - b;
         },
         cell: ({ row }) => {
@@ -258,14 +259,12 @@ function buildColumns(tseEnabled: boolean): ColumnDef<YutaiForecastListItem>[] {
             tooltip="直近の東証貸株残が4週間前の何倍か。権利日に向けた空売りの積み上がりペースで、3倍以上の急増は逆日歩発生の先行シグナルです。スタンダードプラン限定の情報です。"
           />
         ),
-        accessorFn: (row) => row.tseForecast?.lendingGrowth4w ?? null,
+        accessorFn: (row) => row.tseForecast?.lendingGrowth4w ?? undefined,
         sortDescFirst: true,
+        sortUndefined: 'last',
         sortingFn: (rowA, rowB) => {
-          const a = rowA.original.tseForecast?.lendingGrowth4w ?? null;
-          const b = rowB.original.tseForecast?.lendingGrowth4w ?? null;
-          if (a === null && b === null) return 0;
-          if (a === null) return 1;
-          if (b === null) return -1;
+          const a = rowA.original.tseForecast?.lendingGrowth4w ?? 0;
+          const b = rowB.original.tseForecast?.lendingGrowth4w ?? 0;
           return a - b;
         },
         cell: ({ row }) => formatGrowth(row.original.tseForecast?.lendingGrowth4w ?? null),
