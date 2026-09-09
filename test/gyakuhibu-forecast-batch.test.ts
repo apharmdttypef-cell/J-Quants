@@ -14,6 +14,7 @@ process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'JQuantsGyakuhibuForecast';
+process.env.TSE_MARGIN_FEATURES_ENABLED = 'false';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/gyakuhibu-forecast-batch/index') as { handler: () => Promise<void> };
@@ -39,7 +40,6 @@ test('writes the _POOL_ row before any ticker row', async () => {
       .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
       .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan (履歴なし)
       .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({ Items: [] }) // 1234のmargin balance query
       .mockResolvedValueOnce({}); // 1234のforecast put
 
     await handler();
@@ -48,6 +48,24 @@ test('writes the _POOL_ row before any ticker row', async () => {
     expect(puts).toHaveLength(2);
     expect((puts[0][0] as { Item: { ticker: string } }).Item.ticker).toBe('_POOL_');
     expect((puts[1][0] as { Item: { ticker: string } }).Item.ticker).toBe('1234');
+  });
+});
+
+test('does not fall back to current-tse: a ticker with no history gets scenario none and never queries the margin table', async () => {
+  await withFixedNow(async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
+      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan (履歴なし)
+      .mockResolvedValueOnce({}) // _POOL_ put
+      .mockResolvedValueOnce({}); // 1234のforecast put
+
+    await handler();
+
+    const item = (putCalls()[1][0] as { Item: Record<string, unknown> }).Item;
+    expect(item.scenario).toBe('none');
+    expect(item.forecastStatus).toBe('na');
+    // 銘柄ごとのQueryCommand(旧latestMarginBalance)は発行されない
+    expect(mockSend.mock.calls.some(([cmd]) => 'KeyConditionExpression' in (cmd as Record<string, unknown>))).toBe(false);
   });
 });
 
@@ -64,7 +82,6 @@ test('computes a forecast per ticker using its own rights history and the pool',
         ],
       }) // gyakuhibu actual scan(同銘柄・同月の権利日履歴が1件)
       .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({ Items: [] }) // margin balance query(銘柄自身の履歴があるので使われないはず)
       .mockResolvedValueOnce({}); // 1234のforecast put
 
     await handler();
@@ -95,7 +112,6 @@ test('writes a forecast row (with forecastStatus na) for a ticker whose yutai va
         ],
       }) // gyakuhibu actual scan
       .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({ Items: [] }) // margin balance query
       .mockResolvedValueOnce({}); // 9001のforecast put
 
     await handler();
@@ -122,15 +138,13 @@ test('continues with the next ticker when one ticker throws', async () => {
         }) // yutai master scan
         .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
         .mockResolvedValueOnce({}) // _POOL_ put
-        .mockRejectedValueOnce(new Error('DynamoDB error')) // 1111のmargin balance queryが失敗
-        .mockResolvedValueOnce({ Items: [] }) // 2222のmargin balance query
+        .mockRejectedValueOnce(new Error('DynamoDB error')) // 1111のforecast putが失敗
         .mockResolvedValueOnce({}); // 2222のforecast put
 
       await handler();
 
       const tickerPuts = putCalls().filter((c) => (c[0] as { Item: { ticker: string } }).Item.ticker !== '_POOL_');
-      expect(tickerPuts).toHaveLength(1);
-      expect((tickerPuts[0][0] as { Item: { ticker: string } }).Item.ticker).toBe('2222');
+      expect(tickerPuts.map((c) => (c[0] as { Item: { ticker: string } }).Item.ticker)).toEqual(['1111', '2222']);
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('1111'), expect.any(Error));
     });
   } finally {
@@ -151,7 +165,6 @@ test('marks tickers without maxGyakuhibu as na even when sample history exists',
         ],
       }) // 履歴自体はある(n_t=1) -- naの原因がサンプル不足ではなくmaxGyakuhibu欠落そのものであることを分離するため
       .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({ Items: [] }) // margin balance query
       .mockResolvedValueOnce({}); // 1234のforecast put
 
     await handler();
@@ -176,7 +189,6 @@ test('every PutCommand Item survives real DynamoDB marshalling (no Infinity/-Inf
         ],
       }) // financingBalance:0, lendingBalance>0 -> excessRatio = Infinity (実在しうる状態)
       .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({ Items: [] }) // margin balance query
       .mockResolvedValueOnce({}); // 1234のforecast put
 
     await handler();

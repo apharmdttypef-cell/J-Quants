@@ -1,15 +1,14 @@
-// 逆日歩予測バッチ: 優待マスタ・逆日歩実績履歴・信用残(直近値)を組み合わせ、
+// 逆日歩予測バッチ: 優待マスタ・逆日歩実績履歴を組み合わせ、
 // lambda/shared/gyakuhibu-forecast.tsの純粋関数でJQuantsGyakuhibuForecastテーブルへ
 // 銘柄ごとの予測(+全銘柄横断のプール曲線 `_POOL_`)を書き込む。
 // 設計: docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { buildPool, chooseScenario, forecast, toSample, type ForecastSample, type GyakuhibuActualRow } from '../shared/gyakuhibu-forecast';
 import { nextRightsDate } from '../shared/trading-calendar';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
-const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const GYAKUHIBU_FORECAST_TABLE_NAME = process.env.GYAKUHIBU_FORECAST_TABLE_NAME!;
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -88,22 +87,6 @@ async function scanGyakuhibuActual(): Promise<GyakuhibuActualRow[]> {
   return rows;
 }
 
-// chooseScenarioの'current-tse'フォールバック用、東証信用残(mkt-margin-int/alert由来)の直近値。
-async function latestMarginBalance(ticker: string): Promise<{ financingBalance: number; lendingBalance: number } | null> {
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: MARGIN_BALANCE_TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker',
-      ExpressionAttributeValues: { ':ticker': ticker },
-      ScanIndexForward: false,
-      Limit: 1,
-    }),
-  );
-  const item = result.Items?.[0];
-  if (!item || typeof item.financingBalance !== 'number' || typeof item.lendingBalance !== 'number') return null;
-  return { financingBalance: item.financingBalance, lendingBalance: item.lendingBalance };
-}
-
 function groupByTicker(samples: ForecastSample[]): Map<string, ForecastSample[]> {
   const map = new Map<string, ForecastSample[]>();
   for (const sample of samples) {
@@ -149,11 +132,10 @@ export const handler = async (): Promise<void> => {
       }
 
       const tickerSamples = samplesByTicker.get(row.ticker) ?? [];
-      // scenario 'current-tse'用。呼び出し側で使うかどうかに関わらず毎回引く
-      // (chooseScenarioが内部で要不要を判断する)。
-      const tseLatest = await latestMarginBalance(row.ticker);
+      // 過去実績ベース予測は東証信用残(スタンダードプラン依存)を使わない。実績が無い銘柄は
+      // 'none'(対象外)になり、現在需給ベース予測(tse-forecast.ts)側が補う。
       const nextRightsMonth = Number(nextDate.slice(5, 7));
-      const { scenario, excessRatio } = chooseScenario(tickerSamples, nextRightsMonth, tseLatest);
+      const { scenario, excessRatio } = chooseScenario(tickerSamples, nextRightsMonth, null);
 
       // poolSamplesは「ビンで絞り込まない全件」を渡す契約(forecast内部で絞り込む)。
       const result = forecast({
