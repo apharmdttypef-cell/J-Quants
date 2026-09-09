@@ -60,6 +60,17 @@ export interface ForecastResult {
   poolSamples: number;
 }
 
+// 現在需給ベース予測の結果。ForecastResultのexcessRatio/binは東証スナップショット由来、
+// scenarioは常に'current-tse'。
+export interface TseForecast extends ForecastResult {
+  snapshotDate: string;
+  lagDays: number;
+  lagBucket: LagBucket;
+  financingBalance: number;
+  lendingBalance: number;
+  lendingGrowth4w: number | null;
+}
+
 // 貸株超過率の固定6ビン。hiはexclusive(未満)、最上位ビンだけhi=Infinityで
 // r>=5(+Infinity含む)を受け持つ。境界は設計書どおり定数化しておく
 // (実測分布を見て見直す可能性があるため; docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md参照)。
@@ -74,6 +85,63 @@ export const BIN_EDGES: ReadonlyArray<{ label: string; lo: number; hi: number }>
 
 // 縮小推定の強さ。銘柄実績がK件あればプールと重み半々になる(w = n_t/(n_t+K))。
 export const SHRINKAGE_K = 4;
+
+// --- 東証信用残(J-Quants margin-interest / margin-alert)ベースの「現在需給」予測用 ---
+// 設計: docs/superpowers/specs/2026-09-09-tse-margin-forecast-design.md
+
+// スナップショット日→権利日の暦日数でキャリブレーションを分ける3バケット。
+// バックテスト(docs/superpowers/notes/2026-09-09-tse-margin-balance-backtest.md)で、
+// 東証で「融資超過」でも発生率が権利日直前36%→4週前54%と大きく変わることが分かったため。
+export type LagBucket = '0-7' | '8-21' | '22+';
+export const LAG_BUCKETS: ReadonlyArray<{ key: LagBucket; minLagDays: number }> = [
+  { key: '0-7', minLagDays: 0 },
+  { key: '8-21', minLagDays: 8 },
+  { key: '22+', minLagDays: 22 },
+];
+// 基準日からこれより古いスナップショットは「鮮度切れ」として使わない(週次データの
+// 取得漏れ1〜2回分までは許容し、それ以上古い残高で判断しないための上限)。
+export const SNAPSHOT_MAX_AGE_DAYS = 21;
+
+export interface MarginSnapshot {
+  date: string;
+  financingBalance: number;
+  lendingBalance: number;
+}
+
+export function lagBucketFor(lagDays: number): LagBucket {
+  if (lagDays <= 7) return '0-7';
+  if (lagDays <= 21) return '8-21';
+  return '22+';
+}
+
+// "YYYY-MM-DD"をdays日ずらす(UTCのミリ秒演算なので月またぎでも正しい)。
+export function shiftIsoDate(iso: string, days: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// 日付昇順のpointsから、targetDate以前で最新の点を返す。ただし
+// targetDate - SNAPSHOT_MAX_AGE_DAYS より古い点しか無ければ鮮度切れとしてnull。
+export function snapshotAtOrBefore(points: MarginSnapshot[], targetDate: string): MarginSnapshot | null {
+  let found: MarginSnapshot | null = null;
+  for (const p of points) {
+    if (p.date <= targetDate) found = p;
+    else break;
+  }
+  if (found === null) return null;
+  if (found.date < shiftIsoDate(targetDate, -SNAPSHOT_MAX_AGE_DAYS)) return null;
+  return found;
+}
+
+// 貸株残の4週前比 = 直近スナップショットの貸株残 ÷ 28日前以前で最新の点の貸株残。
+// 基準点が無い(鮮度切れ含む)、または基準点の貸株残が0ならnull。
+export function lendingGrowth4w(points: MarginSnapshot[], snapshotDate: string): number | null {
+  const current = snapshotAtOrBefore(points, snapshotDate);
+  const base = snapshotAtOrBefore(points, shiftIsoDate(snapshotDate, -28));
+  if (current === null || base === null || base.lendingBalance === 0) return null;
+  return current.lendingBalance / base.lendingBalance;
+}
 
 // 貸株超過率 = (貸株残高 - 融資残高) / 融資残高。
 // 融資残高が0で貸株残高>0なら無限大に張り付いている状態として+Infinity(最上位ビン行き)、
@@ -174,6 +242,8 @@ export function buildPool(samples: ForecastSample[]): PoolBin[] {
 //   1. 同銘柄の過去権利日サンプルのうち、次回と同じ月があれば直近(rightsDateが新しい方)
 //   2. 同月が無ければ、同銘柄の全サンプル中で最も新しい権利日
 //   3. 銘柄サンプルが1件も無ければ、東証信用残(mkt-margin-int)の直近値から計算(参考値)
+// ※ 2026-09-09以降、過去実績ベース予測はtseLatestにnullを渡し('current-tse'を使わない)、
+//    東証信用残は現在需給ベース予測(gyakuhibu-forecast-batch/tse-forecast.ts)側でのみ使う。
 //   4. どちらも無ければ'none'(超過率なし)
 // 同銘柄のサンプルは超過率で条件付けしない(件数が少なく、同銘柄・同月の季節性のほうが
 // 強いため)。

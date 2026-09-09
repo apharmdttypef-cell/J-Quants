@@ -8,6 +8,10 @@ import {
   chooseScenario,
   forecastStatus,
   ForecastSample,
+  lagBucketFor,
+  snapshotAtOrBefore,
+  lendingGrowth4w,
+  shiftIsoDate,
 } from '../lambda/shared/gyakuhibu-forecast';
 
 test('excessRatio: positive when lending exceeds financing, Infinity when financing is 0 and lending > 0, null when both 0', () => {
@@ -160,4 +164,43 @@ test('forecast computes forecastP50/forecastP90 but forecastStatus na and expect
   // valueが無いので優待価値との比較は不能。
   expect(result.expectedNet).toBeNull();
   expect(result.forecastStatus).toBe('na');
+});
+
+test('lagBucketFor splits at 7/8 and 21/22 days', () => {
+  expect(lagBucketFor(0)).toBe('0-7');
+  expect(lagBucketFor(7)).toBe('0-7');
+  expect(lagBucketFor(8)).toBe('8-21');
+  expect(lagBucketFor(21)).toBe('8-21');
+  expect(lagBucketFor(22)).toBe('22+');
+  expect(lagBucketFor(60)).toBe('22+');
+});
+
+test('shiftIsoDate moves an ISO date by calendar days across month boundaries', () => {
+  expect(shiftIsoDate('2026-08-28', -28)).toBe('2026-07-31');
+  expect(shiftIsoDate('2026-08-28', 4)).toBe('2026-09-01');
+});
+
+test('snapshotAtOrBefore returns the latest point on/before the target, ignoring points older than 21 days', () => {
+  const points = [
+    { date: '2026-08-07', financingBalance: 100, lendingBalance: 10 },
+    { date: '2026-08-14', financingBalance: 100, lendingBalance: 20 },
+    { date: '2026-08-28', financingBalance: 100, lendingBalance: 30 },
+  ];
+  expect(snapshotAtOrBefore(points, '2026-08-28')?.lendingBalance).toBe(30);
+  expect(snapshotAtOrBefore(points, '2026-08-20')?.lendingBalance).toBe(20);
+  expect(snapshotAtOrBefore(points, '2026-08-06')).toBeNull(); // 以前の点が無い
+  expect(snapshotAtOrBefore(points, '2026-09-18')?.lendingBalance).toBe(30); // ちょうど21日前は有効
+  expect(snapshotAtOrBefore(points, '2026-09-19')).toBeNull(); // 最新点(08-28)が22日前で鮮度切れ
+});
+
+test('lendingGrowth4w divides the current lending balance by the one 4 weeks earlier, null when the base is missing or 0', () => {
+  const points = [
+    { date: '2026-07-31', financingBalance: 100, lendingBalance: 10 },
+    { date: '2026-08-28', financingBalance: 100, lendingBalance: 25 },
+  ];
+  expect(lendingGrowth4w(points, '2026-08-28')).toBeCloseTo(2.5);
+  expect(lendingGrowth4w(points, '2026-07-31')).toBeNull(); // 4週前の点が無い
+  expect(
+    lendingGrowth4w([{ date: '2026-07-31', financingBalance: 100, lendingBalance: 0 }, points[1]], '2026-08-28'),
+  ).toBeNull(); // 分母0
 });
