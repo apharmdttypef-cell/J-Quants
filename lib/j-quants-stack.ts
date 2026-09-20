@@ -22,6 +22,7 @@ export class JQuantsStack extends cdk.Stack {
   public readonly marginBalanceTable: dynamodb.Table;
   public readonly gyakuhibuActualTable: dynamodb.Table;
   public readonly gyakuhibuForecastTable: dynamodb.Table;
+  public readonly yutaiTdnetEventTable: dynamodb.Table;
   public readonly apiKeySecret: secretsmanager.Secret;
   public readonly api: apigwv2.HttpApi;
   public readonly frontendBucket: s3.Bucket;
@@ -108,6 +109,19 @@ export class JQuantsStack extends cdk.Stack {
     this.gyakuhibuForecastTable = new dynamodb.Table(this, 'JQuantsGyakuhibuForecastTable', {
       tableName: 'JQuantsGyakuhibuForecast',
       partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // TDnet監視バッチ(yutai-tdnet-watch-batch)が検知した優待関連イベント(開始/変更/廃止)の記録。
+    // 全件を1パーティションにまとめ(pk固定値'ALL')、eventId(ソートキー)の先頭に開示日を
+    // 埋め込むことで、Query+ScanIndexForward:falseだけで日付降順の一覧が取れるようにする
+    // (docs/superpowers/specs/2026-09-20-yutai-tdnet-event-design.md)。
+    this.yutaiTdnetEventTable = new dynamodb.Table(this, 'JQuantsYutaiTdnetEventTable', {
+      tableName: 'JQuantsYutaiTdnetEvent',
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
@@ -292,10 +306,15 @@ export class JQuantsStack extends cdk.Stack {
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        YUTAI_TDNET_EVENT_TABLE_NAME: this.yutaiTdnetEventTable.tableName,
       },
     });
 
     this.yutaiMasterTable.grantWriteData(yutaiTdnetWatchBatchFn);
+    // 新規登録(start) vs 既存更新(update)の判定にJQuantsYutaiMasterの既存有無を読むため、
+    // write専用だったこのLambdaにread権限も追加する。
+    this.yutaiMasterTable.grantReadData(yutaiTdnetWatchBatchFn);
+    this.yutaiTdnetEventTable.grantWriteData(yutaiTdnetWatchBatchFn);
 
     // TDnetの直近開示から株主優待関連の新設・変更・廃止を検知する。既存の週次バッチ
     // (FinancialSummaryBatchSchedule: 月11:00 UTC、MarginBalanceBatchSchedule: 月9:30 UTC)
@@ -375,6 +394,7 @@ export class JQuantsStack extends cdk.Stack {
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
         GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName,
         TSE_MARGIN_FEATURES_ENABLED: String(tseMarginFeatures),
+        YUTAI_TDNET_EVENT_TABLE_NAME: this.yutaiTdnetEventTable.tableName,
       },
     });
 
@@ -386,6 +406,7 @@ export class JQuantsStack extends cdk.Stack {
     this.marginBalanceTable.grantReadData(referenceApiFn);
     this.gyakuhibuActualTable.grantReadData(referenceApiFn);
     this.gyakuhibuForecastTable.grantReadData(referenceApiFn);
+    this.yutaiTdnetEventTable.grantReadData(referenceApiFn);
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 
@@ -470,6 +491,11 @@ function handler(event) {
     });
     this.api.addRoutes({
       path: '/yutai',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: referenceApiIntegration,
+    });
+    this.api.addRoutes({
+      path: '/yutai/tdnet-events',
       methods: [apigwv2.HttpMethod.GET],
       integration: referenceApiIntegration,
     });

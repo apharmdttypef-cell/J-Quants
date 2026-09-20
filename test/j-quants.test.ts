@@ -140,6 +140,7 @@ test('creates the HTTP API with tickers CRUD and the price/summary routes', () =
     'GET /yutai/{ticker}/margin-trend',
     'GET /yutai/forecast',
     'GET /yutai/{ticker}/forecast',
+    'GET /yutai/tdnet-events',
   ];
   for (const routeKey of routeKeys) {
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: routeKey });
@@ -483,4 +484,91 @@ test('tseMarginFeatures passed as the string "false" (as the CLI -c flag does) i
     (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
   );
   expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
+});
+
+test('creates the JQuantsYutaiTdnetEvent table with pk/eventId key and RETAIN policy', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', {
+    TableName: 'JQuantsYutaiTdnetEvent',
+    KeySchema: [
+      { AttributeName: 'pk', KeyType: 'HASH' },
+      { AttributeName: 'eventId', KeyType: 'RANGE' },
+    ],
+    BillingMode: 'PAY_PER_REQUEST',
+  });
+});
+
+test('yutai-tdnet-watch-batch has read access to the yutai master table and write access to the tdnet event table', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Environment: {
+      Variables: Match.objectLike({
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        YUTAI_TDNET_EVENT_TABLE_NAME: Match.anyValue(),
+      }),
+    },
+  });
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const policyEntries = Object.entries(policies);
+
+  const hasMasterReadAccess = policyEntries.some(([name, p]) => {
+    if (!name.includes('YutaiTdnetWatchBatch')) return false;
+    const statements =
+      (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } })
+        .Properties?.PolicyDocument?.Statement || [];
+    return statements.some((stmt) => {
+      const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+      const hasReadActions = actions.some((action) => action && (action.includes('GetItem') || action.includes('Query')));
+      const hasMasterResource = JSON.stringify(stmt.Resource || '').includes('YutaiMaster');
+      return hasReadActions && hasMasterResource;
+    });
+  });
+  expect(hasMasterReadAccess).toBe(true);
+
+  const hasEventWriteAccess = policyEntries.some(([name, p]) => {
+    if (!name.includes('YutaiTdnetWatchBatch')) return false;
+    const statements =
+      (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } })
+        .Properties?.PolicyDocument?.Statement || [];
+    return statements.some((stmt) => {
+      const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+      const hasWriteActions = actions.some((action) => action && action.includes('PutItem'));
+      const hasEventResource = JSON.stringify(stmt.Resource || '').includes('YutaiTdnetEvent');
+      return hasWriteActions && hasEventResource;
+    });
+  });
+  expect(hasEventWriteAccess).toBe(true);
+});
+
+test('reference-api has read access to the tdnet event table', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Environment: {
+      Variables: Match.objectLike({
+        YUTAI_TDNET_EVENT_TABLE_NAME: Match.anyValue(),
+        WATCHLIST_TABLE_NAME: Match.anyValue(),
+      }),
+    },
+  });
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const hasEventReadAccess = Object.entries(policies).some(([name, p]) => {
+    if (!name.includes('ReferenceApi')) return false;
+    const statements =
+      (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } })
+        .Properties?.PolicyDocument?.Statement || [];
+    return statements.some((stmt) => {
+      const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+      const hasReadActions = actions.some((action) => action && (action.includes('GetItem') || action.includes('Query')));
+      const hasEventResource = JSON.stringify(stmt.Resource || '').includes('YutaiTdnetEvent');
+      return hasReadActions && hasEventResource;
+    });
+  });
+  expect(hasEventReadAccess).toBe(true);
 });
