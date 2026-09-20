@@ -1,8 +1,10 @@
+import { createHash } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DeleteCommand, DynamoDBDocumentClient, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { fetchAllListings, KabuyutaiEntry } from '../shared/kabuyutai-client';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
+const YUTAI_TDNET_EVENT_TABLE_NAME = process.env.YUTAI_TDNET_EVENT_TABLE_NAME!;
 const UNIT_SHARES = 100;
 const TDNET_BASE_URL = 'https://www.release.tdnet.info';
 const USER_AGENT = 'Mozilla/5.0 (compatible; JQuantsYutaiBot/1.0)';
@@ -28,10 +30,16 @@ interface Disclosure {
   code: string;
   companyName: string;
   title: string;
+  disclosedAt: string;
 }
 
 function formatDate(date: Date): string {
   return date.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+// "YYYYMMDD" -> "YYYY-MM-DD"(イベントのdisclosedAt・eventId生成用)。
+function toIsoDate(yyyymmdd: string): string {
+  return `${yyyymmdd.slice(0, 4)}-${yyyymmdd.slice(4, 6)}-${yyyymmdd.slice(6, 8)}`;
 }
 
 // TDnetの証券コードは5桁(末尾0付き)で出現する。JQuantsYutaiMasterの4桁tickerとは
@@ -41,7 +49,7 @@ function toTicker(tdnetCode: string): string {
   return tdnetCode.slice(0, 4);
 }
 
-function parseDayPage(html: string): Disclosure[] {
+function parseDayPage(html: string, disclosedAt: string): Disclosure[] {
   const disclosures: Disclosure[] = [];
   for (const rowMatch of html.matchAll(/<tr>([\s\S]*?)<\/tr>/g)) {
     const row = rowMatch[1];
@@ -50,7 +58,7 @@ function parseDayPage(html: string): Disclosure[] {
     const titleMatch = row.match(/class="[^"]*kjTitle[^"]*"[^>]*><a[^>]*>([^<]+)</);
     if (!codeMatch || !nameMatch || !titleMatch) continue;
 
-    disclosures.push({ code: codeMatch[1], companyName: nameMatch[1].trim(), title: titleMatch[1].trim() });
+    disclosures.push({ code: codeMatch[1], companyName: nameMatch[1].trim(), title: titleMatch[1].trim(), disclosedAt });
   }
   return disclosures;
 }
@@ -83,7 +91,7 @@ async function fetchDayDisclosures(dateStr: string): Promise<Disclosure[]> {
     throw new Error(`TDnet error ${firstResponse.status} fetching ${firstUrl}`);
   }
   const firstHtml = await firstResponse.text();
-  const disclosures = parseDayPage(firstHtml);
+  const disclosures = parseDayPage(firstHtml, toIsoDate(dateStr));
   const totalPages = totalPagesFor(firstHtml);
 
   for (let page = 2; page <= totalPages; page++) {
@@ -93,16 +101,16 @@ async function fetchDayDisclosures(dateStr: string): Promise<Disclosure[]> {
     if (!response.ok) {
       throw new Error(`TDnet error ${response.status} fetching ${url}`);
     }
-    disclosures.push(...parseDayPage(await response.text()));
+    disclosures.push(...parseDayPage(await response.text(), toIsoDate(dateStr)));
   }
 
   return disclosures;
 }
 
 export const handler = async (): Promise<void> => {
-  // ticker -> その銘柄にマッチした開示のうち、廃止キーワードを含むものが1件でもあったか
-  // (同一tickerに複数の開示がヒットし得るため、どれか1つでもtrueならtrueのまま保持する)。
-  const matchedTickers = new Map<string, boolean>();
+  // ticker -> その銘柄にマッチした開示の配列(1つの開示につき1イベントとして記録するため、
+  // 集約時点でtitle/日付を捨てずに保持する)。
+  const matchedTickers = new Map<string, Disclosure[]>();
   let failedDays = 0;
 
   for (let daysAgo = 0; daysAgo < LOOKBACK_DAYS; daysAgo++) {
@@ -115,8 +123,9 @@ export const handler = async (): Promise<void> => {
       for (const disclosure of disclosures) {
         if (isYutaiRelated(disclosure.title)) {
           const ticker = toTicker(disclosure.code);
-          const sawAbolitionAlready = matchedTickers.get(ticker) ?? false;
-          matchedTickers.set(ticker, sawAbolitionAlready || isAbolitionRelated(disclosure.title));
+          const existing = matchedTickers.get(ticker) ?? [];
+          existing.push(disclosure);
+          matchedTickers.set(ticker, existing);
         }
       }
     } catch (error) {
@@ -142,16 +151,15 @@ export const handler = async (): Promise<void> => {
   const listings = await fetchAllListings();
   const listingsByTicker = new Map<string, KabuyutaiEntry>(listings.map((entry) => [entry.ticker, entry]));
 
-  for (const [ticker, sawAbolitionKeyword] of matchedTickers) {
+  for (const [ticker, disclosures] of matchedTickers) {
+    const sawAbolitionKeyword = disclosures.some((d) => isAbolitionRelated(d.title));
     try {
       const entry = listingsByTicker.get(ticker);
       if (!entry) {
         if (sawAbolitionKeyword) {
-          // 廃止を示す開示があり、かつ最新のkabuyutai.com一覧にも見当たらない
-          // (両方のシグナルが揃って初めて削除する。片方だけでは一時的な取得失敗の
-          // 可能性があるため警告に留める)。
           await ddbDocClient.send(new DeleteCommand({ TableName: YUTAI_MASTER_TABLE_NAME, Key: { ticker } }));
           console.log(`${ticker}: yutai program appears discontinued (abolition disclosure + not found on kabuyutai.com); deleted from master`);
+          await recordEvents(ticker, disclosures, 'abolition');
         } else {
           console.warn(`${ticker}: matched a yutai-related TDnet disclosure but not found on kabuyutai.com; skipping`);
         }
@@ -161,6 +169,11 @@ export const handler = async (): Promise<void> => {
         console.warn(`${ticker}: found on kabuyutai.com but rightsMonths incomplete; skipping`);
         continue;
       }
+
+      // 新規登録(start)か既存更新(update)かはJQuantsYutaiMaster(自テーブル)側の既存有無で
+      // 判定する(kabuyutai.com側の存在有無=entryとは別物)。
+      const existing = await ddbDocClient.send(new GetCommand({ TableName: YUTAI_MASTER_TABLE_NAME, Key: { ticker } }));
+      const eventType: 'start' | 'update' = existing.Item ? 'update' : 'start';
 
       await ddbDocClient.send(
         new UpdateCommand({
@@ -180,8 +193,44 @@ export const handler = async (): Promise<void> => {
         }),
       );
       console.log(`${ticker}: upserted yutai master from TDnet-triggered re-sync`);
+      await recordEvents(ticker, disclosures, eventType);
     } catch (error) {
       console.error(`${ticker}: failed to re-sync from TDnet match`, error);
     }
   }
 };
+
+// tickerにマッチした開示それぞれについて、1件ずつイベント行を書く(開示ごとに1イベント)。
+// eventIdは{disclosedAt}#{ticker}#{titleのsha256hex先頭8文字}なので、同一開示の再処理
+// (LOOKBACK_DAYSによる重複走査)では同じ行を上書きするだけで重複しない。1件の書き込み失敗が
+// 他の開示の記録を妨げないよう、開示ごとに個別にtry/catchする。
+async function recordEvents(
+  ticker: string,
+  disclosures: Disclosure[],
+  eventType: 'start' | 'update' | 'abolition',
+): Promise<void> {
+  const recordedAt = new Date().toISOString();
+  for (const disclosure of disclosures) {
+    try {
+      const hash = createHash('sha256').update(disclosure.title).digest('hex').slice(0, 8);
+      const eventId = `${disclosure.disclosedAt}#${ticker}#${hash}`;
+      await ddbDocClient.send(
+        new PutCommand({
+          TableName: YUTAI_TDNET_EVENT_TABLE_NAME,
+          Item: {
+            pk: 'ALL',
+            eventId,
+            ticker,
+            companyName: disclosure.companyName,
+            eventType,
+            disclosureTitle: disclosure.title,
+            disclosedAt: disclosure.disclosedAt,
+            recordedAt,
+          },
+        }),
+      );
+    } catch (error) {
+      console.error(`${ticker}: failed to record tdnet event`, error);
+    }
+  }
+}
