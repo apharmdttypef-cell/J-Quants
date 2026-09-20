@@ -78,8 +78,9 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
 | `JQuantsMarginBalance` | PK `ticker` / SK `date` | 信用残時系列(`financingBalance`融資残・`lendingBalance`貸株残・`source`=`weekly`\|`daily-alert`) |
 | `JQuantsGyakuhibuActual` | PK `ticker` / SK `rightsDate` | taisyaku.jpから取得した権利日ごとの実績逆日歩(`totalAmount` / `days` / `avgRate`)。直近3年分のみ存在しうる。2026-09-05以降、逆日歩予測機能のため残高・レート・措置列(`financingBalance`/`lendingBalance`/`lendingPrice`/`maxRateActual`/`bidRank`/`restriction`/`emergencyMeasure`)と取得済みフラグ`enriched`を追加。拡張前からの既存行は`GyakuhibuHistoryBatchFunction`が`enriched`無しの行として検知し順次バックフィルする |
 | `JQuantsGyakuhibuForecast` | PK `ticker` | 逆日歩予測(貸株超過率→充足率の実績分布ベース)の日次事前計算結果。銘柄ごとの予測分布・判定(`forecastStatus`)に加え、全銘柄横断の統計曲線を持つ特殊行(`ticker`=`_POOL_`)。`GyakuhibuForecastBatchFunction`が毎日全件洗い替えする派生データ |
+| `JQuantsYutaiTdnetEvent` | PK `pk` / SK `eventId` | TDnet開示から検知した優待関連イベント(新設・変更・廃止)。`YutaiTdnetWatchBatchFunction`が記録し、`GET /yutai/tdnet-events`が読み取り |
 
-`cdk destroy` してもこの7テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
+`cdk destroy` してもこの8テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
 
 ### シークレット
 
