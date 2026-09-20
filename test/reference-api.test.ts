@@ -30,6 +30,7 @@ process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'JQuantsGyakuhibuForecast';
+process.env.YUTAI_TDNET_EVENT_TABLE_NAME = 'JQuantsYutaiTdnetEvent';
 process.env.TSE_MARGIN_FEATURES_ENABLED = 'true';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -646,4 +647,49 @@ test('GET /yutai/{ticker}/forecast includes tseForecast and features', async () 
   const parsed = body(result) as { tseForecast: Record<string, unknown> | null; features: { tseMargin: boolean } };
   expect(parsed.features).toEqual({ tseMargin: true });
   expect(parsed.tseForecast).toMatchObject({ snapshotDate: '2026-07-31', lagBucket: '22+', forecastP90: 2500 });
+});
+
+test('GET /yutai/tdnet-events queries the event table by fixed pk and returns items newest-first', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [
+      {
+        pk: 'ALL',
+        eventId: '2026-09-08#2157#abcdef12',
+        ticker: '2157',
+        companyName: 'コシダカホールディングス',
+        eventType: 'update',
+        disclosureTitle: '株主優待制度の一部変更に関するお知らせ',
+        disclosedAt: '2026-09-08',
+        recordedAt: '2026-09-08T21:03:00.000Z',
+      },
+    ],
+  });
+
+  const result = await handler(makeEvent('GET /yutai/tdnet-events'));
+
+  expect(mockSend.mock.calls[0][0]).toMatchObject({
+    TableName: 'JQuantsYutaiTdnetEvent',
+    KeyConditionExpression: 'pk = :pk',
+    ExpressionAttributeValues: { ':pk': 'ALL' },
+    ScanIndexForward: false,
+  });
+  const parsed = body(result) as { events: Array<Record<string, unknown>> };
+  expect(parsed.events).toEqual([
+    {
+      ticker: '2157',
+      companyName: 'コシダカホールディングス',
+      eventType: 'update',
+      disclosureTitle: '株主優待制度の一部変更に関するお知らせ',
+      disclosedAt: '2026-09-08',
+      recordedAt: '2026-09-08T21:03:00.000Z',
+    },
+  ]);
+});
+
+test('GET /yutai/tdnet-events returns an empty array when there are no events yet', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [] });
+
+  const result = await handler(makeEvent('GET /yutai/tdnet-events'));
+
+  expect(body(result)).toEqual({ events: [] });
 });

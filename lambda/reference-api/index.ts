@@ -13,6 +13,7 @@ const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
 const GYAKUHIBU_FORECAST_TABLE_NAME = process.env.GYAKUHIBU_FORECAST_TABLE_NAME!;
+const YUTAI_TDNET_EVENT_TABLE_NAME = process.env.YUTAI_TDNET_EVENT_TABLE_NAME!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 // 日付範囲(from/to)ではなく「保存済みの最新N件」で返す方式(12週間分の営業日 ≈ 60件)。
 // 日付境界で絞るより単純で、取得が数営業日遅れても直近チャートの見た目は変わらない。
@@ -705,6 +706,26 @@ async function getMarginTrend(ticker: string): Promise<APIGatewayProxyResultV2> 
   return jsonResponse(200, { ticker, range: '1y', points });
 }
 
+async function listTdnetEvents(): Promise<APIGatewayProxyResultV2> {
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: YUTAI_TDNET_EVENT_TABLE_NAME,
+      KeyConditionExpression: 'pk = :pk',
+      ExpressionAttributeValues: { ':pk': 'ALL' },
+      ScanIndexForward: false, // eventId(SK)の先頭がdisclosedAtなので、降順=新しい開示順になる
+    }),
+  );
+  const events = (result.Items ?? []).map((item) => ({
+    ticker: item.ticker,
+    companyName: item.companyName,
+    eventType: item.eventType,
+    disclosureTitle: item.disclosureTitle,
+    disclosedAt: item.disclosedAt,
+    recordedAt: item.recordedAt,
+  }));
+  return jsonResponse(200, { events });
+}
+
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
   const ticker = event.pathParameters?.ticker;
 
@@ -723,6 +744,8 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return ticker ? await getSummary(ticker) : jsonResponse(400, { message: 'Missing ticker' });
     case 'GET /yutai':
       return listYutai(event.queryStringParameters ?? {});
+    case 'GET /yutai/tdnet-events':
+      return listTdnetEvents();
     case 'GET /yutai/{ticker}':
       return ticker ? getYutaiDetail(ticker) : jsonResponse(400, { message: 'Missing ticker' });
     case 'GET /yutai/{ticker}/margin-trend':
