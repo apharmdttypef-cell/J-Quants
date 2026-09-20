@@ -707,15 +707,23 @@ async function getMarginTrend(ticker: string): Promise<APIGatewayProxyResultV2> 
 }
 
 async function listTdnetEvents(): Promise<APIGatewayProxyResultV2> {
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: YUTAI_TDNET_EVENT_TABLE_NAME,
-      KeyConditionExpression: 'pk = :pk',
-      ExpressionAttributeValues: { ':pk': 'ALL' },
-      ScanIndexForward: false, // eventId(SK)の先頭がdisclosedAtなので、降順=新しい開示順になる
-    }),
-  );
-  const events = (result.Items ?? []).map((item) => ({
+  const items: Record<string, unknown>[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const result = await ddbDocClient.send(
+      new QueryCommand({
+        TableName: YUTAI_TDNET_EVENT_TABLE_NAME,
+        KeyConditionExpression: 'pk = :pk',
+        ExpressionAttributeValues: { ':pk': 'ALL' },
+        ScanIndexForward: false, // eventId(SK)の先頭がdisclosedAtなので、降順=新しい開示順になる
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+    items.push(...(result.Items ?? []));
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  const events = items.map((item) => ({
     ticker: item.ticker,
     companyName: item.companyName,
     eventType: item.eventType,

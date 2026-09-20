@@ -693,3 +693,32 @@ test('GET /yutai/tdnet-events returns an empty array when there are no events ye
 
   expect(body(result)).toEqual({ events: [] });
 });
+
+test('GET /yutai/tdnet-events paginates through multiple pages and returns every row', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        {
+          ticker: '1001', companyName: 'A社', eventType: 'start',
+          disclosureTitle: 'お知らせA', disclosedAt: '2026-09-01', recordedAt: '2026-09-01T00:00:00.000Z',
+        },
+      ],
+      LastEvaluatedKey: { pk: 'ALL', eventId: '2026-09-01#1001#aaaaaaaa' },
+    })
+    .mockResolvedValueOnce({
+      Items: [
+        {
+          ticker: '2002', companyName: 'B社', eventType: 'update',
+          disclosureTitle: 'お知らせB', disclosedAt: '2026-08-25', recordedAt: '2026-08-25T00:00:00.000Z',
+        },
+      ],
+    });
+
+  const result = await handler(makeEvent('GET /yutai/tdnet-events'));
+
+  expect(mockSend.mock.calls[1][0]).toMatchObject({
+    ExclusiveStartKey: { pk: 'ALL', eventId: '2026-09-01#1001#aaaaaaaa' },
+  });
+  const parsed = body(result) as { events: Array<{ ticker: string }> };
+  expect(parsed.events.map((e) => e.ticker)).toEqual(['1001', '2002']);
+});

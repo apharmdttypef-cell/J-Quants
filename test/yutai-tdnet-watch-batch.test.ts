@@ -320,3 +320,51 @@ test('computes a deterministic eventId so re-processing the same disclosure over
   const secondEventId = await runOnce();
   expect(firstEventId).toBe(secondEventId);
 });
+
+test('guards the event PutCommand with a ConditionExpression so re-processing cannot downgrade an already-recorded start event', async () => {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    text: async () =>
+      dayListHtml([{ code: '21570', name: 'コシダカホールディングス', title: '株主優待制度の新設に関するお知らせ' }]),
+  });
+  mockFetchAllListings.mockResolvedValueOnce([
+    { ticker: '2157', companyName: 'コシダカホールディングス', content: '割引券（3,000円相当～）', rightsMonths: [2, 8], value: 3000 },
+  ]);
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  const eventPut = mockSend.mock.calls
+    .map((c) => c[0] as { TableName?: string; ConditionExpression?: string; ExpressionAttributeValues?: Record<string, unknown> })
+    .find((c) => c.TableName === 'JQuantsYutaiTdnetEvent');
+  expect(eventPut?.ConditionExpression).toBe('attribute_not_exists(eventId) OR eventType <> :start');
+  expect(eventPut?.ExpressionAttributeValues).toMatchObject({ ':start': 'start' });
+});
+
+test('swallows a ConditionalCheckFailedException on the event PutCommand without throwing or logging it as an error', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: async () =>
+        dayListHtml([{ code: '21570', name: 'コシダカホールディングス', title: '株主優待制度の一部変更に関するお知らせ' }]),
+    });
+    mockFetchAllListings.mockResolvedValueOnce([
+      { ticker: '2157', companyName: 'コシダカホールディングス', content: '割引券（3,000円相当～）', rightsMonths: [2, 8], value: 3000 },
+    ]);
+    mockSend.mockImplementation((command: unknown) => {
+      const c = command as { TableName?: string };
+      if (c.TableName === 'JQuantsYutaiTdnetEvent') {
+        const error = new Error('The conditional request failed');
+        error.name = 'ConditionalCheckFailedException';
+        return Promise.reject(error);
+      }
+      return Promise.resolve({});
+    });
+
+    await expect(handler()).resolves.not.toThrow();
+    expect(errorSpy).not.toHaveBeenCalled();
+  } finally {
+    errorSpy.mockRestore();
+  }
+});

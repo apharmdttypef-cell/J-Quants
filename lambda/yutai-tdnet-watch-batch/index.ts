@@ -155,6 +155,9 @@ export const handler = async (): Promise<void> => {
     const sawAbolitionKeyword = disclosures.some((d) => isAbolitionRelated(d.title));
     try {
       const entry = listingsByTicker.get(ticker);
+      // 廃止を示す開示があり、かつ最新のkabuyutai.com一覧にも見当たらない
+      // (両方のシグナルが揃って初めて削除する。片方だけでは一時的な取得失敗の
+      //  可能性があるため警告に留める)。
       if (!entry) {
         if (sawAbolitionKeyword) {
           await ddbDocClient.send(new DeleteCommand({ TableName: YUTAI_MASTER_TABLE_NAME, Key: { ticker } }));
@@ -211,9 +214,14 @@ async function recordEvents(
 ): Promise<void> {
   const recordedAt = new Date().toISOString();
   for (const disclosure of disclosures) {
+    const hash = createHash('sha256').update(disclosure.title).digest('hex').slice(0, 8);
+    const eventId = `${disclosure.disclosedAt}#${ticker}#${hash}`;
     try {
-      const hash = createHash('sha256').update(disclosure.title).digest('hex').slice(0, 8);
-      const eventId = `${disclosure.disclosedAt}#${ticker}#${hash}`;
+      // LOOKBACK_DAYSの重なりにより同じ開示が翌週も再走査されうる。その時点では
+      // JQuantsYutaiMaster側に行が既に存在するため、eventTypeは'update'として
+      // 再判定されてしまう。既に'start'として記録済みの行をこれで上書きしないよう
+      // ガードする(ただし'update'→'abolition'への自己修正は許可: kabuyutai.com側の
+      // 反映が遅れて先週'update'扱いになった廃止開示が、翌週追いつくケースがあるため)。
       await ddbDocClient.send(
         new PutCommand({
           TableName: YUTAI_TDNET_EVENT_TABLE_NAME,
@@ -227,9 +235,15 @@ async function recordEvents(
             disclosedAt: disclosure.disclosedAt,
             recordedAt,
           },
+          ConditionExpression: 'attribute_not_exists(eventId) OR eventType <> :start',
+          ExpressionAttributeValues: { ':start': 'start' },
         }),
       );
     } catch (error) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+        console.log(`${ticker}: tdnet event ${eventId} already recorded as start; not overwriting`);
+        continue;
+      }
       console.error(`${ticker}: failed to record tdnet event`, error);
     }
   }

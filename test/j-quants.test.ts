@@ -497,6 +497,10 @@ test('creates the JQuantsYutaiTdnetEvent table with pk/eventId key and RETAIN po
     ],
     BillingMode: 'PAY_PER_REQUEST',
   });
+  template.hasResource('AWS::DynamoDB::Table', {
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  });
 });
 
 test('yutai-tdnet-watch-batch has read access to the yutai master table and write access to the tdnet event table', () => {
@@ -505,7 +509,10 @@ test('yutai-tdnet-watch-batch has read access to the yutai master table and writ
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
     Environment: {
-      Variables: Match.objectLike({
+      // Use Match.exact() to pin this to YutaiTdnetWatchBatchFunction specifically: ReferenceApiFunction
+      // also has both of these env vars (among many more), so Match.objectLike would spuriously pass
+      // even if YutaiTdnetWatchBatchFunction itself lost the env var entirely.
+      Variables: Match.exact({
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         YUTAI_TDNET_EVENT_TABLE_NAME: Match.anyValue(),
       }),
