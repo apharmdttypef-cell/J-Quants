@@ -205,3 +205,18 @@ export interface YutaiForecastDetail {
   marginTrend: { latest: YutaiForecastMarginLatest | null };
   features: YutaiFeatures;
 }
+
+export type YutaiTdnetEventType = 'start' | 'update' | 'abolition';
+
+export interface YutaiTdnetEvent {
+  ticker: string;
+  companyName: string;
+  eventType: YutaiTdnetEventType;
+  disclosureTitle: string;
+  disclosedAt: string;
+  recordedAt: string;
+}
+
+export interface YutaiTdnetEventsResponse {
+  events: YutaiTdnetEvent[];
+}
