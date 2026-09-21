@@ -262,6 +262,12 @@ a {
   word-break: break-word;
 }
 
+.data-table td.company-cell {
+  white-space: normal;
+  max-width: 8rem;
+  word-break: break-word;
+}
+
 .data-table tbody tr:hover {
   background: var(--surface-alt);
 }

@@ -435,7 +435,9 @@ export function YutaiForecastListPage() {
                           ? 'num'
                           : cell.column.id === 'content'
                             ? 'cell-wrap'
-                            : undefined
+                            : cell.column.id === 'company'
+                              ? 'company-cell'
+                              : undefined
                       }
                       style={cell.column.id === 'company' || cell.column.id === 'content' ? { textAlign: 'left' } : undefined}
                     >
