@@ -8,6 +8,7 @@ import type {
   YutaiForecastStatus,
   YutaiForecastListResponse,
   YutaiForecastDetail,
+  YutaiTdnetEventsResponse,
 } from './types';
 import { clearStoredAppPassword, getStoredAppPassword } from '../lib/appPassword';
 
@@ -98,6 +99,10 @@ export function fetchYutaiDetail(ticker: string): Promise<YutaiDetail> {
 
 export function fetchYutaiMarginTrend(ticker: string): Promise<MarginTrendResponse> {
   return request(`/yutai/${ticker}/margin-trend`);
+}
+
+export function fetchYutaiTdnetEvents(): Promise<YutaiTdnetEventsResponse> {
+  return request('/yutai/tdnet-events');
 }
 
 export interface YutaiForecastListParams extends YutaiListParams {
