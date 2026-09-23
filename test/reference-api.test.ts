@@ -1,16 +1,10 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 
 const mockSend = jest.fn();
-const mockSecretsSend = jest.fn();
 const mockFetch = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(),
-}));
-
-jest.mock('@aws-sdk/client-secrets-manager', () => ({
-  SecretsManagerClient: jest.fn(() => ({ send: mockSecretsSend })),
-  GetSecretValueCommand: jest.fn((input: unknown) => input),
 }));
 
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -24,8 +18,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 
 process.env.TABLE_NAME = 'JQuantsStockPrices';
 process.env.FINANCIAL_TABLE_NAME = 'JQuantsFinancialSummary';
-process.env.WATCHLIST_TABLE_NAME = 'JQuantsWatchlist';
-process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
@@ -51,74 +43,11 @@ function body(result: APIGatewayProxyResultV2): unknown {
 
 beforeEach(() => {
   mockSend.mockReset();
-  mockSecretsSend.mockReset();
   mockFetch.mockReset();
   (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
 });
 
-test('GET /tickers scans the watchlist table and returns it sorted', async () => {
-  mockSend.mockResolvedValueOnce({
-    Items: [
-      { ticker: '9432', companyName: 'NTT', addedAt: '2026-01-01T00:00:00.000Z' },
-      { ticker: '7203', companyName: 'トヨタ自動車', addedAt: '2026-01-02T00:00:00.000Z' },
-    ],
-  });
-
-  const result = await handler(makeEvent('GET /tickers'));
-
-  expect((result as { statusCode: number }).statusCode).toBe(200);
-  expect(body(result)).toEqual({
-    tickers: [
-      { ticker: '7203', companyName: 'トヨタ自動車', addedAt: '2026-01-02T00:00:00.000Z' },
-      { ticker: '9432', companyName: 'NTT', addedAt: '2026-01-01T00:00:00.000Z' },
-    ],
-  });
-});
-
-test('POST /tickers rejects a malformed ticker without calling J-Quants', async () => {
-  const result = await handler(makeEvent('POST /tickers', { body: JSON.stringify({ ticker: 'abc' }) }));
-
-  expect((result as { statusCode: number }).statusCode).toBe(400);
-  expect(mockFetch).not.toHaveBeenCalled();
-});
-
-test('POST /tickers looks up the company name and upserts the watchlist', async () => {
-  mockSecretsSend.mockResolvedValueOnce({ SecretString: 'test-api-key' });
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    json: async () => ({ data: [{ Code: '7203', CoName: 'トヨタ自動車' }] }),
-  });
-  mockSend.mockResolvedValueOnce({});
-
-  const result = await handler(makeEvent('POST /tickers', { body: JSON.stringify({ ticker: '7203' }) }));
-
-  expect(mockFetch).toHaveBeenCalledWith(
-    expect.stringContaining('/equities/master?code=7203'),
-    expect.objectContaining({ headers: { 'x-api-key': 'test-api-key' } }),
-  );
-  expect((result as { statusCode: number }).statusCode).toBe(201);
-  expect(body(result)).toMatchObject({ ticker: '7203', companyName: 'トヨタ自動車' });
-});
-
-test('POST /tickers returns 400 when J-Quants has no data for the code', async () => {
-  mockSecretsSend.mockResolvedValueOnce({ SecretString: 'test-api-key' });
-  mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: [] }) });
-
-  const result = await handler(makeEvent('POST /tickers', { body: JSON.stringify({ ticker: '9999' }) }));
-
-  expect((result as { statusCode: number }).statusCode).toBe(400);
-  expect(mockSend).not.toHaveBeenCalled();
-});
-
-test('DELETE /tickers/{ticker} removes the item and returns 204', async () => {
-  mockSend.mockResolvedValueOnce({});
-
-  const result = await handler(makeEvent('DELETE /tickers/{ticker}', { pathParameters: { ticker: '7203' } }));
-
-  expect((result as { statusCode: number }).statusCode).toBe(204);
-});
-
-test('GET /tickers/{ticker}/prices returns 404 for an unwatched ticker', async () => {
+test('GET /tickers/{ticker}/prices returns 404 for a ticker not in JQuantsYutaiMaster', async () => {
   mockSend.mockResolvedValueOnce({ Item: undefined });
 
   const result = await handler(makeEvent('GET /tickers/{ticker}/prices', { pathParameters: { ticker: '9999' } }));
@@ -164,7 +93,7 @@ test('GET /tickers/{ticker}/prices queries the most recent stored rows regardles
   expect(mockSend.mock.calls[1][0]).toMatchObject({ ScanIndexForward: false, Limit: 60 });
 });
 
-test('GET /tickers/{ticker}/summary returns 404 for an unwatched ticker', async () => {
+test('GET /tickers/{ticker}/summary returns 404 for a ticker not in JQuantsYutaiMaster', async () => {
   mockSend.mockResolvedValueOnce({ Item: undefined });
 
   const result = await handler(makeEvent('GET /tickers/{ticker}/summary', { pathParameters: { ticker: '9999' } }));
