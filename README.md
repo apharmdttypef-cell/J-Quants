@@ -8,7 +8,7 @@ CDK(TypeScript)でインフラを定義し、フロントはVite + React + TypeS
 ```
 EventBridge(毎日 JST18:00)
   → PriceBatchFunction(Lambda)
-      - JQuantsWatchlist ∪ JQuantsYutaiMasterテーブルを読んで対象銘柄を取得
+      - JQuantsYutaiMasterテーブルを読んで対象銘柄を取得
       - J-Quants API(x-api-keyヘッダー認証)から、日付ごとに東証全銘柄分の四本値を1回で取得し
         (対象銘柄でフィルタしてupsert)、5req/分のレート制限を守るため呼び出しごとに13秒待機
       - 株価は日次更新が適切
@@ -16,7 +16,7 @@ EventBridge(毎日 JST18:00)
 
 EventBridge(毎週月曜 JST20:00)
   → FinancialSummaryBatchFunction(Lambda)
-      - JQuantsWatchlist ∪ JQuantsYutaiMasterテーブルを読んで対象銘柄を取得
+      - JQuantsYutaiMasterテーブルを読んで対象銘柄を取得
       - J-Quants API(x-api-keyヘッダー認証)から決算サマリを取得
         (5req/分のレート制限を守るため呼び出しごとに13秒待機)
       - 決算サマリは四半期ごとにしか更新されないため週次で十分
@@ -73,14 +73,13 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
 |---|---|---|
 | `JQuantsStockPrices` | PK `ticker` / SK `date` | 四本値・出来高 |
 | `JQuantsFinancialSummary` | PK `ticker` / SK `discDate` | 決算サマリ(売上・利益・EPS等) |
-| `JQuantsWatchlist` | PK `ticker` | 取得対象銘柄の正本。フロントの「ウォッチリスト管理」画面から追加/削除 |
 | `JQuantsYutaiMaster` | PK `ticker` | 優待マスタ本体(`companyName` / `content` / `value` / `unitShares` / `rightsMonths`〔権利確定月の配列、例`[3, 9]`〕)。`YutaiMasterSyncBatchFunction`(初回・手動)がkabuyutai.comから一括バックフィルし、`YutaiTdnetWatchBatchFunction`(週次)がTDnet開示をトリガーに継続更新する。**自動投入テーブル**(旧: アプリ外から手動投入する読み取り専用テーブルだったが自動化済み) |
 | `JQuantsMarginBalance` | PK `ticker` / SK `date` | 信用残時系列(`financingBalance`融資残・`lendingBalance`貸株残・`source`=`weekly`\|`daily-alert`) |
 | `JQuantsGyakuhibuActual` | PK `ticker` / SK `rightsDate` | taisyaku.jpから取得した権利日ごとの実績逆日歩(`totalAmount` / `days` / `avgRate`)。直近3年分のみ存在しうる。2026-09-05以降、逆日歩予測機能のため残高・レート・措置列(`financingBalance`/`lendingBalance`/`lendingPrice`/`maxRateActual`/`bidRank`/`restriction`/`emergencyMeasure`)と取得済みフラグ`enriched`を追加。拡張前からの既存行は`GyakuhibuHistoryBatchFunction`が`enriched`無しの行として検知し順次バックフィルする |
 | `JQuantsGyakuhibuForecast` | PK `ticker` | 逆日歩予測(貸株超過率→充足率の実績分布ベース)の日次事前計算結果。銘柄ごとの予測分布・判定(`forecastStatus`)に加え、全銘柄横断の統計曲線を持つ特殊行(`ticker`=`_POOL_`)。`GyakuhibuForecastBatchFunction`が毎日全件洗い替えする派生データ |
 | `JQuantsYutaiTdnetEvent` | PK `pk` / SK `eventId` | TDnet開示から検知した優待関連イベント(新設・変更・廃止)。`YutaiTdnetWatchBatchFunction`が記録し、`GET /yutai/tdnet-events`が読み取り |
 
-`cdk destroy` してもこの8テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
+`cdk destroy` してもこの7テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
 
 ### シークレット
 
@@ -156,8 +155,8 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 
 | 関数 | トリガー | 役割 |
 |---|---|---|
-| `PriceBatchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の四本値を取得し`JQuantsStockPrices`へupsert |
-| `FinancialSummaryBatchFunction` | EventBridge(`cron(0 11 ? * MON *)` = 毎週月曜 JST 20:00) | 対象銘柄(`JQuantsWatchlist` ∪ `JQuantsYutaiMaster`、重複排除)の決算サマリを取得し`JQuantsFinancialSummary`へupsert。四半期ごとの更新なので週次取得で十分 |
+| `PriceBatchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsYutaiMaster`)の四本値を取得し`JQuantsStockPrices`へupsert |
+| `FinancialSummaryBatchFunction` | EventBridge(`cron(0 11 ? * MON *)` = 毎週月曜 JST 20:00) | 対象銘柄(`JQuantsYutaiMaster`)の決算サマリを取得し`JQuantsFinancialSummary`へupsert。四半期ごとの更新なので週次取得で十分 |
 | `MarginBalanceBatchFunction` | EventBridge(`cron(30 8 ? * MON-FRI *)` = JST平日 17:30、`tseMarginFeatures`有効時のみ) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を、直近14日分の各日付について`mkt-margin-int`/`mkt-margin-alert`両方から取得し`JQuantsMarginBalance`へupsert(冪等)。2年分の金曜バックフィルはUTC月曜、または環境変数`FORCE_FULL_BACKFILL=true`のときのみ。`source`は`weekly`(=margin-interest由来、日次配信化後も同じ値)と`daily-alert` |
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
@@ -171,9 +170,6 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 
 | メソッド/パス | 内容 |
 |---|---|
-| `GET /tickers` | ウォッチリスト一覧 |
-| `POST /tickers` | 銘柄コードを追加(`/equities/master`で会社名を1回だけ引き当てて保存) |
-| `DELETE /tickers/{ticker}` | ウォッチリストから削除(価格・財務の蓄積データ自体は残る) |
 | `GET /tickers/{ticker}/prices?range=12w` | 保存済みデータのうち直近12週間分(≈60営業日)の四本値・出来高。日付フィルタではなく最新N件取得なので、配信遅延で古い日付になっていても正しく返る |
 | `GET /tickers/{ticker}/summary` | 直近の決算サマリ。バッチが1度も取得していなければ404 |
 | `GET /yutai?rightsDateFrom=&rightsDateTo=&keyword=&riskStatus=` | 優待実施銘柄の一覧(各銘柄の「次回の権利日」で絞り込み)+ 前日終値・単元株数から算出したリスクバッジ(`safe`/`danger`/`na`。`na`になるのは、信用残データ無し=貸借銘柄でない場合・次回の権利日が無い場合・前日終値がまだ記録されていない場合、のいずれか)+ `currentMonthLastTradableDate`(当月の権利付き最終日、一覧全体で1つ)。`keyword`は会社名・優待内容の部分一致、`riskStatus`は`safe`\|`danger`\|`na`\|`all`(省略時`all`) |
@@ -213,10 +209,8 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 
 | パス | 画面 |
 |---|---|
-| `/` | 銘柄一覧(カード表示、直近終値・12週騰落率・出来高スパークライン) |
+| `/` | `/yutai/forecast`へリダイレクト |
 | `/tickers/:ticker` | 個別銘柄詳細(ローソク足・出来高棒グラフ・決算サマリ) |
-| `/screening` | 簡易スクリーニング(騰落率ソート・出来高急増フィルタ) |
-| `/watchlist` | ウォッチリスト管理(銘柄コードで追加/削除) |
 | `/yutai` | 優待クロス スクリーニング一覧(読み取り専用)。権利日範囲(デフォルト当月1日〜末日)・キーワード・リスク判定で絞り込み、当月の権利付き最終日をバナー表示 |
 | `/yutai/:ticker` | 優待クロス詳細画面。ページ上部(タイトル横)に`/tickers/:ticker`への相互リンク → 銘柄基本情報 → 優待内容 → 逆日歩リスク計算(最大逆日歩にホバーすると実績逆日歩履歴のツールチップ) → 信用残トレンドグラフ、の順 |
 | `/yutai/forecast` | 逆日歩予測 一覧(読み取り専用)。`/yutai`と同じ絞り込みに加え判定(危険/注意/安全/対象外)でも絞り込み、判定→期待値差の順でデフォルトソート。`features.tseMargin`が有効なら「想定逆日歩(現在需給)」(過去実績より悪化していれば↑)と「貸株残(4週前比)」の列を表示 |
@@ -227,7 +221,6 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 
 ### スコープを絞った点
 
-- ウォッチリスト管理の「会社名検索」は、コード追加時に`/equities/master`を1回だけ呼んで会社名を保存する方式に限定。J-Quants APIに会社名での検索パラメータがなく、全銘柄(数千件)をDynamoDBに同期しない限り真の名前検索はできないため、費用対効果を考えて見送った。
 - `GET /tickers/{ticker}/summary`はバッチが一度もその銘柄の決算を取得できていない場合404を返す(データを捏造しない)。
 
 ### 逆日歩予測機能のバックフィル状況(2026-09-05時点、デプロイ前)
