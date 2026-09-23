@@ -17,7 +17,6 @@ import { Construct } from 'constructs';
 export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
   public readonly financialSummaryTable: dynamodb.Table;
-  public readonly watchlistTable: dynamodb.Table;
   public readonly yutaiMasterTable: dynamodb.Table;
   public readonly marginBalanceTable: dynamodb.Table;
   public readonly gyakuhibuActualTable: dynamodb.Table;
@@ -60,17 +59,6 @@ export class JQuantsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // ウォッチリスト管理画面から追加/削除される、取得対象銘柄の正本。
-    // 消えても銘柄コードを打ち直せば復旧できるためRETAINは必須ではないが、
-    // 他テーブルと運用を揃えるため同じ方針にする。
-    this.watchlistTable = new dynamodb.Table(this, 'JQuantsWatchlistTable', {
-      tableName: 'JQuantsWatchlist',
-      partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
     // 優待マスタ本体(権利日以外)。書き込みはアプリ外(別途スクリプト等でDynamoDB
     // へ直接投入)で行う前提。アプリのUIからは読み取り専用。
     this.yutaiMasterTable = new dynamodb.Table(this, 'JQuantsYutaiMasterTable', {
@@ -105,7 +93,7 @@ export class JQuantsStack extends cdk.Stack {
 
     // 逆日歩予測(gyakuhibu-forecast-batch)の日次事前計算結果。銘柄行 + 全銘柄横断の
     // プール曲線行(ticker='_POOL_')。毎日全件再計算される派生データでRETAIN必須ではないが、
-    // JQuantsWatchlistTableと同じ理由で他テーブルと運用を揃える。
+    // 他テーブルと運用を揃える。
     this.gyakuhibuForecastTable = new dynamodb.Table(this, 'JQuantsGyakuhibuForecastTable', {
       tableName: 'JQuantsGyakuhibuForecast',
       partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
@@ -174,21 +162,19 @@ export class JQuantsStack extends cdk.Stack {
       // 日付ごとに東証全銘柄分を1リクエストで取得する方式(LOOKBACK_DAYS+1回)に切り替え済み。
       // 13秒間隔(5req/分制限)は日付単位のリクエストにのみかかるため、対象銘柄数が増えても
       // API呼び出し回数は変わらない。ただし対象銘柄が増えるとDynamoDBへのupsert件数が
-      // 増えるため、その分の余裕は引き続き必要(ウォッチリストが大幅に増える場合は要見直し)。
+      // 増えるため、その分の余裕は引き続き必要。
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
       // AWS SDK v3はNode.js 20系ランタイムに同梱されているためバンドルしない
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
-        WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
 
     this.stockPricesTable.grantWriteData(priceBatchFn);
-    this.watchlistTable.grantReadData(priceBatchFn);
     this.yutaiMasterTable.grantReadData(priceBatchFn);
     this.apiKeySecret.grantRead(priceBatchFn);
 
@@ -212,7 +198,6 @@ export class JQuantsStack extends cdk.Stack {
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
-        WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         SECRET_ARN: this.apiKeySecret.secretArn,
       },
@@ -220,7 +205,6 @@ export class JQuantsStack extends cdk.Stack {
 
     this.financialSummaryTable.grantWriteData(financialSummaryBatchFn);
     this.financialSummaryTable.grantReadData(financialSummaryBatchFn);
-    this.watchlistTable.grantReadData(financialSummaryBatchFn);
     this.yutaiMasterTable.grantReadData(financialSummaryBatchFn);
     this.apiKeySecret.grantRead(financialSummaryBatchFn);
 
@@ -387,8 +371,6 @@ export class JQuantsStack extends cdk.Stack {
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
         FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
-        WATCHLIST_TABLE_NAME: this.watchlistTable.tableName,
-        SECRET_ARN: this.apiKeySecret.secretArn,
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
@@ -400,8 +382,6 @@ export class JQuantsStack extends cdk.Stack {
 
     this.stockPricesTable.grantReadData(referenceApiFn);
     this.financialSummaryTable.grantReadData(referenceApiFn);
-    this.watchlistTable.grantReadWriteData(referenceApiFn);
-    this.apiKeySecret.grantRead(referenceApiFn);
     this.yutaiMasterTable.grantReadData(referenceApiFn);
     this.marginBalanceTable.grantReadData(referenceApiFn);
     this.gyakuhibuActualTable.grantReadData(referenceApiFn);
@@ -464,21 +444,11 @@ function handler(event) {
       defaultAuthorizer: apiAuthorizer,
       corsPreflight: {
         allowOrigins: [`https://${this.distribution.distributionDomainName}`, 'http://localhost:5173'],
-        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.DELETE],
+        allowMethods: [apigwv2.CorsHttpMethod.GET],
         allowHeaders: ['Content-Type', 'x-app-password'],
       },
     });
 
-    this.api.addRoutes({
-      path: '/tickers',
-      methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
-      integration: referenceApiIntegration,
-    });
-    this.api.addRoutes({
-      path: '/tickers/{ticker}',
-      methods: [apigwv2.HttpMethod.DELETE],
-      integration: referenceApiIntegration,
-    });
     this.api.addRoutes({
       path: '/tickers/{ticker}/prices',
       methods: [apigwv2.HttpMethod.GET],

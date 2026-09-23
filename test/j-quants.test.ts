@@ -60,14 +60,12 @@ test('creates a private S3 bucket and CloudFront distribution for the frontend, 
   });
 });
 
-test('creates the JQuantsWatchlist table (ticker only key) with RETAIN policy', () => {
+test('does not create a JQuantsWatchlist table (watchlist feature removed)', () => {
   const template = synth();
 
-  template.hasResourceProperties('AWS::DynamoDB::Table', {
-    TableName: 'JQuantsWatchlist',
-    KeySchema: [{ AttributeName: 'ticker', KeyType: 'HASH' }],
-    BillingMode: 'PAY_PER_REQUEST',
-  });
+  const resources = template.findResources('AWS::DynamoDB::Table');
+  const tableNames = Object.values(resources).map((r) => (r as { Properties: { TableName: string } }).Properties.TableName);
+  expect(tableNames).not.toContain('JQuantsWatchlist');
 });
 
 test('creates the J-Quants API key secret without an inline value', () => {
@@ -78,7 +76,7 @@ test('creates the J-Quants API key secret without an inline value', () => {
   });
 });
 
-test('creates the price batch Lambda wired to the price/watchlist/yutai tables (not financial) and a daily schedule', () => {
+test('creates the price batch Lambda wired to the price/yutai tables (not financial) and a daily schedule', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -87,10 +85,10 @@ test('creates the price batch Lambda wired to the price/watchlist/yutai tables (
     Environment: {
       Variables: Match.objectLike({
         TABLE_NAME: Match.anyValue(),
-        WATCHLIST_TABLE_NAME: Match.anyValue(),
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         SECRET_ARN: Match.anyValue(),
         FINANCIAL_TABLE_NAME: Match.absent(),
+        WATCHLIST_TABLE_NAME: Match.absent(),
       }),
     },
   });
@@ -100,7 +98,7 @@ test('creates the price batch Lambda wired to the price/watchlist/yutai tables (
   });
 });
 
-test('creates the financial summary batch Lambda wired to the financial/watchlist/yutai tables (not price) and a weekly schedule', () => {
+test('creates the financial summary batch Lambda wired to the financial/yutai tables (not price) and a weekly schedule', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -109,10 +107,10 @@ test('creates the financial summary batch Lambda wired to the financial/watchlis
     Environment: {
       Variables: Match.objectLike({
         FINANCIAL_TABLE_NAME: Match.anyValue(),
-        WATCHLIST_TABLE_NAME: Match.anyValue(),
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         SECRET_ARN: Match.anyValue(),
         TABLE_NAME: Match.absent(),
+        WATCHLIST_TABLE_NAME: Match.absent(),
       }),
     },
   });
@@ -122,7 +120,7 @@ test('creates the financial summary batch Lambda wired to the financial/watchlis
   });
 });
 
-test('creates the HTTP API with tickers CRUD and the price/summary routes', () => {
+test('creates the HTTP API with the price/summary and yutai routes', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
@@ -130,9 +128,6 @@ test('creates the HTTP API with tickers CRUD and the price/summary routes', () =
   });
 
   const routeKeys = [
-    'GET /tickers',
-    'POST /tickers',
-    'DELETE /tickers/{ticker}',
     'GET /tickers/{ticker}/prices',
     'GET /tickers/{ticker}/summary',
     'GET /yutai',
@@ -145,6 +140,12 @@ test('creates the HTTP API with tickers CRUD and the price/summary routes', () =
   for (const routeKey of routeKeys) {
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: routeKey });
   }
+
+  const routes = template.findResources('AWS::ApiGatewayV2::Route');
+  const actualRouteKeys = Object.values(routes).map((r) => (r as { Properties: { RouteKey: string } }).Properties.RouteKey);
+  expect(actualRouteKeys).not.toContain('GET /tickers');
+  expect(actualRouteKeys).not.toContain('POST /tickers');
+  expect(actualRouteKeys).not.toContain('DELETE /tickers/{ticker}');
 });
 
 test('protects every route with the shared-password Lambda authorizer', () => {
@@ -443,7 +444,7 @@ test('passes TSE_MARGIN_FEATURES_ENABLED=true to the reference API by default', 
     Environment: {
       Variables: Match.objectLike({
         GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(),
-        WATCHLIST_TABLE_NAME: Match.anyValue(),
+        YUTAI_TDNET_EVENT_TABLE_NAME: Match.anyValue(),
         TSE_MARGIN_FEATURES_ENABLED: 'true',
       }),
     },
@@ -559,7 +560,7 @@ test('reference-api has read access to the tdnet event table', () => {
     Environment: {
       Variables: Match.objectLike({
         YUTAI_TDNET_EVENT_TABLE_NAME: Match.anyValue(),
-        WATCHLIST_TABLE_NAME: Match.anyValue(),
+        TABLE_NAME: Match.anyValue(),
       }),
     },
   });
