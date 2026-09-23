@@ -1,6 +1,6 @@
 import { useParams } from 'react-router-dom';
 import { Bar, BarChart, CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { ApiError, fetchPrices, fetchSummary, fetchTickers } from '../api/client';
+import { ApiError, fetchPrices, fetchSummary } from '../api/client';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen, formatPrice, formatVolume } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
@@ -37,8 +37,7 @@ export function TickerDetailPage() {
 
   const detailState = useAsync(async () => {
     if (!ticker) throw new Error('ticker is missing');
-    const [{ tickers }, prices] = await Promise.all([fetchTickers(), fetchPrices(ticker)]);
-    return { meta: tickers.find((t) => t.ticker === ticker), prices };
+    return await fetchPrices(ticker);
   }, [ticker]);
 
   const summaryState = useAsync(async () => {
@@ -55,16 +54,14 @@ export function TickerDetailPage() {
   if (detailState.error) return <StatusNote kind="error" message={`取得に失敗しました: ${detailState.error.message}`} />;
   if (!detailState.data) return null;
 
-  const { meta, prices } = detailState.data;
+  const prices = detailState.data;
   const chartData = prices.prices
     .filter((p) => p.open !== null && p.high !== null && p.low !== null && p.close !== null)
     .map((p) => ({ date: p.date.slice(5), open: p.open!, high: p.high!, low: p.low!, close: p.close!, volume: p.volume }));
 
   return (
     <>
-      <h1 className="page-title">
-        {meta?.companyName ?? ticker} <span className="ticker-card__code">{ticker}</span>
-      </h1>
+      <h1 className="page-title">{ticker}</h1>
       <p className="page-subtitle">直近12週間の値動きと直近決算のサマリです。</p>
 
       {chartData.length === 0 ? (

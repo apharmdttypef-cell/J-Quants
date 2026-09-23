@@ -2,7 +2,6 @@ import type {
   FinancialSummary,
   MarginTrendResponse,
   PricesResponse,
-  WatchlistTicker,
   YutaiDetail,
   YutaiListResponse,
   YutaiForecastStatus,
@@ -57,24 +56,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function fetchTickers(): Promise<{ tickers: WatchlistTicker[] }> {
-  return request('/tickers');
-}
-
 export function fetchPrices(ticker: string): Promise<PricesResponse> {
   return request(`/tickers/${ticker}/prices?range=12w`);
 }
 
 export function fetchSummary(ticker: string): Promise<FinancialSummary> {
   return request(`/tickers/${ticker}/summary`);
-}
-
-export function addTicker(ticker: string): Promise<WatchlistTicker> {
-  return request('/tickers', { method: 'POST', body: JSON.stringify({ ticker }) });
-}
-
-export function removeTicker(ticker: string): Promise<void> {
-  return request(`/tickers/${ticker}`, { method: 'DELETE' });
 }
 
 export interface YutaiListParams {

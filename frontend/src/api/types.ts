@@ -1,9 +1,3 @@
-export interface WatchlistTicker {
-  ticker: string;
-  companyName?: string;
-  addedAt?: string;
-}
-
 export interface PricePoint {
   date: string;
   open: number | null;

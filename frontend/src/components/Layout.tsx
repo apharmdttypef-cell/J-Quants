@@ -1,9 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom';
 
 const NAV_ITEMS = [
-  { to: '/', label: '銘柄一覧', end: true },
-  { to: '/screening', label: 'スクリーニング' },
-  { to: '/watchlist', label: 'ウォッチリスト管理' },
   { to: '/yutai', label: '優待クロス', end: true },
   { to: '/yutai/forecast', label: '逆日歩予測' },
   { to: '/yutai/tdnet-events', label: '優待変更履歴' },
