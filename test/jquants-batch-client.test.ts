@@ -16,7 +16,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   ScanCommand: jest.fn((input: unknown) => input),
 }));
 
-import { getTargetTickers, fetchWithRetry, formatDate, normalizeDate } from '../lambda/shared/jquants-batch-client';
+import { scanTickerColumn, fetchWithRetry, formatDate, normalizeDate } from '../lambda/shared/jquants-batch-client';
 
 type BatchClientModule = typeof import('../lambda/shared/jquants-batch-client');
 
@@ -58,13 +58,11 @@ describe('getApiKey', () => {
   });
 });
 
-describe('getTargetTickers', () => {
-  test('returns the union of watchlist and yutai-master tickers, deduped', async () => {
-    mockDdbSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '7203' }] })
-      .mockResolvedValueOnce({ Items: [{ ticker: '7203' }, { ticker: '9999' }] });
+describe('scanTickerColumn', () => {
+  test('returns ticker values from a table scan', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Items: [{ ticker: '7203' }, { ticker: '9999' }] });
 
-    const tickers = await getTargetTickers('JQuantsWatchlist', 'JQuantsYutaiMaster');
+    const tickers = await scanTickerColumn('JQuantsYutaiMaster');
 
     expect(tickers.sort()).toEqual(['7203', '9999']);
   });
@@ -72,10 +70,9 @@ describe('getTargetTickers', () => {
   test('paginates through ScanCommand results using LastEvaluatedKey', async () => {
     mockDdbSend
       .mockResolvedValueOnce({ Items: [{ ticker: '1111' }], LastEvaluatedKey: { ticker: '1111' } })
-      .mockResolvedValueOnce({ Items: [{ ticker: '2222' }] })
-      .mockResolvedValueOnce({ Items: [] });
+      .mockResolvedValueOnce({ Items: [{ ticker: '2222' }] });
 
-    const tickers = await getTargetTickers('JQuantsWatchlist', 'JQuantsYutaiMaster');
+    const tickers = await scanTickerColumn('JQuantsYutaiMaster');
 
     expect(tickers.sort()).toEqual(['1111', '2222']);
   });

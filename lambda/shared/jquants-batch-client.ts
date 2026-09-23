@@ -17,7 +17,7 @@ export async function getApiKey(secretArn: string): Promise<string> {
   return cachedApiKey;
 }
 
-async function scanTickerColumn(tableName: string): Promise<string[]> {
+export async function scanTickerColumn(tableName: string): Promise<string[]> {
   const tickers: string[] = [];
   let exclusiveStartKey: Record<string, unknown> | undefined;
 
@@ -32,16 +32,6 @@ async function scanTickerColumn(tableName: string): Promise<string[]> {
   } while (exclusiveStartKey);
 
   return tickers;
-}
-
-// 優待クロス対象銘柄は必ずしも個人のウォッチリストに入っているとは限らないため、
-// 両テーブルの和集合(重複排除)を対象にする。
-export async function getTargetTickers(watchlistTableName: string, yutaiMasterTableName: string): Promise<string[]> {
-  const [watchlistTickers, yutaiTickers] = await Promise.all([
-    scanTickerColumn(watchlistTableName),
-    scanTickerColumn(yutaiMasterTableName),
-  ]);
-  return [...new Set([...watchlistTickers, ...yutaiTickers])];
 }
 
 function sleep(ms: number): Promise<void> {

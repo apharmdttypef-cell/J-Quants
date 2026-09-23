@@ -1,6 +1,6 @@
 const mockDdbSend = jest.fn();
 const mockGetApiKey = jest.fn();
-const mockGetTargetTickers = jest.fn();
+const mockScanTickerColumn = jest.fn();
 const mockFetchWithRetry = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
@@ -14,14 +14,13 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 
 jest.mock('../lambda/shared/jquants-batch-client', () => ({
   getApiKey: (...args: unknown[]) => mockGetApiKey(...args),
-  getTargetTickers: (...args: unknown[]) => mockGetTargetTickers(...args),
+  scanTickerColumn: (...args: unknown[]) => mockScanTickerColumn(...args),
   fetchWithRetry: (...args: unknown[]) => mockFetchWithRetry(...args),
   normalizeDate: (raw: string) => (raw.includes('-') ? raw : `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`),
   formatDate: (date: Date) => date.toISOString().slice(0, 10).replace(/-/g, ''),
 }));
 
 process.env.TABLE_NAME = 'JQuantsStockPrices';
-process.env.WATCHLIST_TABLE_NAME = 'JQuantsWatchlist';
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
 // 3日分(offset+2〜offsetの3日)のループになるようにし、日付ごとに1回fetchWithRetryが
@@ -35,12 +34,12 @@ const { handler } = require('../lambda/price-batch/index') as { handler: () => P
 beforeEach(() => {
   mockDdbSend.mockReset();
   mockGetApiKey.mockReset();
-  mockGetTargetTickers.mockReset();
+  mockScanTickerColumn.mockReset();
   mockFetchWithRetry.mockReset();
 });
 
 test('does nothing when there are no target tickers', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce([]);
+  mockScanTickerColumn.mockResolvedValueOnce([]);
 
   await handler();
 
@@ -49,7 +48,7 @@ test('does nothing when there are no target tickers', async () => {
 });
 
 test('queries once per day in the lookback window, by date only (no code parameter)', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry.mockResolvedValue({ json: async () => ({ data: [] }) });
 
@@ -65,7 +64,7 @@ test('queries once per day in the lookback window, by date only (no code paramet
 });
 
 test('upserts only bars for tickers in the target set, ignoring the rest of the market snapshot', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry.mockResolvedValue({
     json: async () => ({
@@ -87,7 +86,7 @@ test('upserts only bars for tickers in the target set, ignoring the rest of the 
 });
 
 test('prefers the common-stock record (5th digit 0) when a ticker has multiple share classes listed', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['1301']);
+  mockScanTickerColumn.mockResolvedValueOnce(['1301']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry.mockResolvedValue({
     json: async () => ({
@@ -108,7 +107,7 @@ test('prefers the common-stock record (5th digit 0) when a ticker has multiple s
 });
 
 test('prefers the common-stock record even when it appears first (the ordering J-Quants actually returns)', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['1301']);
+  mockScanTickerColumn.mockResolvedValueOnce(['1301']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry.mockResolvedValue({
     json: async () => ({
@@ -129,7 +128,7 @@ test('prefers the common-stock record even when it appears first (the ordering J
 });
 
 test('matches a 5-digit watchlist ticker by exact Code, not the truncated 4-digit prefix', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['72030']);
+  mockScanTickerColumn.mockResolvedValueOnce(['72030']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry.mockResolvedValue({
     json: async () => ({
@@ -147,7 +146,7 @@ test('matches a 5-digit watchlist ticker by exact Code, not the truncated 4-digi
 });
 
 test('follows pagination_key when a single date response is paginated', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry
     .mockResolvedValueOnce({
@@ -166,7 +165,7 @@ test('follows pagination_key when a single date response is paginated', async ()
 });
 
 test('queries by date only regardless of how many target tickers exist', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203', '1301']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203', '1301']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry.mockResolvedValue({
     json: async () => ({

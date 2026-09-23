@@ -1,6 +1,6 @@
 const mockDdbSend = jest.fn();
 const mockGetApiKey = jest.fn();
-const mockGetTargetTickers = jest.fn();
+const mockScanTickerColumn = jest.fn();
 const mockFetchWithRetry = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
@@ -15,13 +15,12 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 
 jest.mock('../lambda/shared/jquants-batch-client', () => ({
   getApiKey: (...args: unknown[]) => mockGetApiKey(...args),
-  getTargetTickers: (...args: unknown[]) => mockGetTargetTickers(...args),
+  scanTickerColumn: (...args: unknown[]) => mockScanTickerColumn(...args),
   fetchWithRetry: (...args: unknown[]) => mockFetchWithRetry(...args),
   normalizeDate: (raw: string) => (raw.includes('-') ? raw : `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`),
 }));
 
 process.env.FINANCIAL_TABLE_NAME = 'JQuantsFinancialSummary';
-process.env.WATCHLIST_TABLE_NAME = 'JQuantsWatchlist';
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
 process.env.LOOKBACK_DAYS = '3';
@@ -42,7 +41,7 @@ function putItems(): Record<string, unknown>[] {
 beforeEach(() => {
   mockDdbSend.mockReset();
   mockGetApiKey.mockReset();
-  mockGetTargetTickers.mockReset();
+  mockScanTickerColumn.mockReset();
   mockFetchWithRetry.mockReset();
 
   mockDdbSend.mockResolvedValue({}); // default: Query -> no existing item, BatchWrite -> success
@@ -51,7 +50,7 @@ beforeEach(() => {
 });
 
 test('does nothing when there are no target tickers', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce([]);
+  mockScanTickerColumn.mockResolvedValueOnce([]);
 
   await handler();
 
@@ -60,7 +59,7 @@ test('does nothing when there are no target tickers', async () => {
 });
 
 test('backfills a new ticker (no existing summary) using a code-only full-history fetch', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
     if (cmd.__type === 'Query') return Promise.resolve({ Items: [] }); // no existing summary -> new ticker
     return Promise.resolve({});
@@ -98,7 +97,7 @@ test('backfills a new ticker (no existing summary) using a code-only full-histor
 });
 
 test('does not backfill an existing ticker (already has a summary)', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
     if (cmd.__type === 'Query') return Promise.resolve({ Items: [{ ticker: '7203', discDate: '2026-02-01' }] });
     return Promise.resolve({});
@@ -111,7 +110,7 @@ test('does not backfill an existing ticker (already has a summary)', async () =>
 });
 
 test('checks LOOKBACK_DAYS+1 recent dates with date-only bulk fetch (no code param)', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
 
   await handler();
 
@@ -123,7 +122,7 @@ test('checks LOOKBACK_DAYS+1 recent dates with date-only bulk fetch (no code par
 });
 
 test('writes only target tickers from a date-bulk response, matching a 4-digit ticker to its 5-digit code', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   mockFetchWithRetry.mockImplementation((url: string) => {
     if (url.includes('date=')) {
       return Promise.resolve({
@@ -167,7 +166,7 @@ test('writes only target tickers from a date-bulk response, matching a 4-digit t
 
 test('defers new-ticker backfills beyond the per-run cap, but still checks recent dates for everyone', async () => {
   const manyNewTickers = Array.from({ length: 151 }, (_, i) => `T${String(i).padStart(4, '0')}`);
-  mockGetTargetTickers.mockResolvedValueOnce(manyNewTickers);
+  mockScanTickerColumn.mockResolvedValueOnce(manyNewTickers);
   mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
     if (cmd.__type === 'Query') return Promise.resolve({ Items: [] }); // all are new
     return Promise.resolve({});
@@ -182,7 +181,7 @@ test('defers new-ticker backfills beyond the per-run cap, but still checks recen
 });
 
 test('continues past a single ticker backfill failure and a single date fetch failure', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203', '9999']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203', '9999']);
   mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
     if (cmd.__type === 'Query') return Promise.resolve({ Items: [] });
     return Promise.resolve({});
@@ -210,7 +209,7 @@ test('continues past a single ticker backfill failure and a single date fetch fa
 });
 
 test('checks discDate against a lookback cutoff, not just row existence, when classifying a ticker as new-vs-existing', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
     if (cmd.__type === 'Query') return Promise.resolve({ Items: [] });
     return Promise.resolve({});
@@ -226,7 +225,7 @@ test('checks discDate against a lookback cutoff, not just row existence, when cl
 });
 
 test('dedupes same-ticker same-discDate backfill items before writing (keeps the last one)', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
     if (cmd.__type === 'Query') return Promise.resolve({ Items: [] });
     return Promise.resolve({});
@@ -274,7 +273,7 @@ test('dedupes same-ticker same-discDate backfill items before writing (keeps the
 
 test('counts failed backfill attempts against the cap, not just successes', async () => {
   const manyNewTickers = Array.from({ length: 151 }, (_, i) => `T${String(i).padStart(4, '0')}`);
-  mockGetTargetTickers.mockResolvedValueOnce(manyNewTickers);
+  mockScanTickerColumn.mockResolvedValueOnce(manyNewTickers);
   mockDdbSend.mockImplementation((cmd: Record<string, unknown>) => {
     if (cmd.__type === 'Query') return Promise.resolve({ Items: [] });
     return Promise.resolve({});
@@ -296,7 +295,7 @@ test('counts failed backfill attempts against the cap, not just successes', asyn
 });
 
 test('throws when every date fetch/upsert fails (so a broken run alarms instead of reporting success)', async () => {
-  mockGetTargetTickers.mockResolvedValueOnce(['7203']);
+  mockScanTickerColumn.mockResolvedValueOnce(['7203']);
   const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   try {
     mockFetchWithRetry.mockImplementation((url: string) => {

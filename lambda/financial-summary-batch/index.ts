@@ -1,10 +1,9 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { getApiKey, getTargetTickers, fetchWithRetry, normalizeDate } from '../shared/jquants-batch-client';
+import { getApiKey, scanTickerColumn, fetchWithRetry, normalizeDate } from '../shared/jquants-batch-client';
 import { batchUpsert } from '../shared/dynamodb-batch';
 
 const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
-const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
@@ -160,9 +159,9 @@ function listRecentDates(lookbackDays: number, now: number): string[] {
 }
 
 export const handler = async (): Promise<void> => {
-  const tickers = await getTargetTickers(WATCHLIST_TABLE_NAME, YUTAI_MASTER_TABLE_NAME);
+  const tickers = await scanTickerColumn(YUTAI_MASTER_TABLE_NAME);
   if (tickers.length === 0) {
-    console.warn('No target tickers (watchlist and yutai master are both empty); nothing to fetch');
+    console.warn('No target tickers (yutai master is empty); nothing to fetch');
     return;
   }
   const targetTickers = new Set(tickers);

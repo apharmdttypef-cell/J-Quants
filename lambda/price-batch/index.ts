@@ -1,9 +1,8 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { getApiKey, getTargetTickers, fetchWithRetry, normalizeDate, formatDate } from '../shared/jquants-batch-client';
+import { getApiKey, scanTickerColumn, fetchWithRetry, normalizeDate, formatDate } from '../shared/jquants-batch-client';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
-const WATCHLIST_TABLE_NAME = process.env.WATCHLIST_TABLE_NAME!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
@@ -109,9 +108,9 @@ async function upsertBar(ticker: string, bar: DailyBar): Promise<void> {
 }
 
 export const handler = async (): Promise<void> => {
-  const tickers = await getTargetTickers(WATCHLIST_TABLE_NAME, YUTAI_MASTER_TABLE_NAME);
+  const tickers = await scanTickerColumn(YUTAI_MASTER_TABLE_NAME);
   if (tickers.length === 0) {
-    console.warn('No target tickers (watchlist and yutai master are both empty); nothing to fetch');
+    console.warn('No target tickers (yutai master is empty); nothing to fetch');
     return;
   }
   const targetTickers = new Set(tickers);
