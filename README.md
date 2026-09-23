@@ -80,6 +80,7 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
 | `JQuantsYutaiTdnetEvent` | PK `pk` / SK `eventId` | TDnet開示から検知した優待関連イベント(新設・変更・廃止)。`YutaiTdnetWatchBatchFunction`が記録し、`GET /yutai/tdnet-events`が読み取り |
 
 `cdk destroy` してもこの7テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
+なお、本節に挙げた7テーブルとは別に、廃止した`JQuantsWatchlist`テーブルの実体はCDK管理外のままAWSアカウント内に残っている(`RemovalPolicy.RETAIN`のため)。不要であれば`aws dynamodb delete-table --table-name JQuantsWatchlist`で手動削除できる。
 
 ### シークレット
 
@@ -102,7 +103,7 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
 
 `PriceBatchFunction`は当初、Freeプランの5req/分制限を前提にした銘柄ごとの直列取得(呼び出しごとに13秒待機)だったため、優待実施銘柄が1,000件規模まで増えると14分のLambdaタイムアウト内に収まらなくなる問題があったが、`date`のみ指定すると東証全銘柄分を1リクエストで取得できることが判明し、この方式に切り替えたことで解消済み(2026-08-24、`docs/superpowers/specs/2026-08-24-price-batch-bulk-fetch-design.md`参照)。レート制限の観点では`PriceBatchFunction`単体としてStandardプランへの移行は不要だったが、別途`DELIVERY_DELAY_DAYS`(Freeプランの配信12週間遅延を回避するための固定オフセット、デフォルト85日)がハードコードされたままだと、Standardプラン移行後もダミーの遅延で株価が85日古いまま取得され続ける問題があった(2026-09-03発見、実際に`/ticker/{code}`の前日終値が3か月前の値のままになっていた)。株価四本値は当日16:30頃に配信されるため、Standardプラン移行後は`DELIVERY_DELAY_DAYS=0`に変更し、当日分をそのまま取得するようにした。
 
-`FinancialSummaryBatchFunction`は今回のPriceBatchFunctionの変更の対象外で、引き続き銘柄ごとの直列取得のままである。当初は「Standardプラン移行時に`REQUEST_INTERVAL_MS`を短くするだけで対応でき、コード変更は不要」と想定していたが、これは誤りだった。銘柄数が1,700件超に増えた2026-09-04時点で**実際に本番でタイムアウトしていることを確認した**(直近実行: 840秒でタイムアウト、189銘柄のみ処理、残りは未処理のまま)。`getTargetTickers()`の返す順序が実行のたびに大きく変わらないため、同じ先頭銘柄群だけが毎回更新され、後方の銘柄群が実質的に取り残されているおそれがある(margin-balance-batchで踏んだのと同じstarvationパターン)。`/fins/summary`にも`code`省略+`date`指定で全上場銘柄の指定日開示分を一括取得できるモードがあることを確認済みで、修正方針の詳細は[GitHub Issue #2](https://github.com/apharmdttypef-cell/J-Quants/issues/2)に記録している(決算データは価格・信用残高と違い企業ごと不定期開示のため、新規銘柄の初回バックフィルと既存銘柄の継続更新を分けて設計する必要があり、単純な置き換えでは済まない)。
+`FinancialSummaryBatchFunction`は今回のPriceBatchFunctionの変更の対象外で、引き続き銘柄ごとの直列取得のままである。当初は「Standardプラン移行時に`REQUEST_INTERVAL_MS`を短くするだけで対応でき、コード変更は不要」と想定していたが、これは誤りだった。銘柄数が1,700件超に増えた2026-09-04時点で**実際に本番でタイムアウトしていることを確認した**(直近実行: 840秒でタイムアウト、189銘柄のみ処理、残りは未処理のまま)。`scanTickerColumn()`の返す順序が実行のたびに大きく変わらないため、同じ先頭銘柄群だけが毎回更新され、後方の銘柄群が実質的に取り残されているおそれがある(margin-balance-batchで踏んだのと同じstarvationパターン)。`/fins/summary`にも`code`省略+`date`指定で全上場銘柄の指定日開示分を一括取得できるモードがあることを確認済みで、修正方針の詳細は[GitHub Issue #2](https://github.com/apharmdttypef-cell/J-Quants/issues/2)に記録している(決算データは価格・信用残高と違い企業ごと不定期開示のため、新規銘柄の初回バックフィルと既存銘柄の継続更新を分けて設計する必要があり、単純な置き換えでは済まない)。
 
 ### 優待クロス逆日歩リスク可視化(`/yutai`系)
 
@@ -160,7 +161,7 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `MarginBalanceBatchFunction` | EventBridge(`cron(30 8 ? * MON-FRI *)` = JST平日 17:30、`tseMarginFeatures`有効時のみ) | `JQuantsYutaiMaster`の全銘柄の信用残(融資残・貸株残)を、直近14日分の各日付について`mkt-margin-int`/`mkt-margin-alert`両方から取得し`JQuantsMarginBalance`へupsert(冪等)。2年分の金曜バックフィルはUTC月曜、または環境変数`FORCE_FULL_BACKFILL=true`のときのみ。`source`は`weekly`(=margin-interest由来、日次配信化後も同じ値)と`daily-alert` |
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
-| `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert。開示ごとに`JQuantsYutaiTdnetEvent`へイベント(`start`/`update`/`abolition`)を記録する(マスタが実際に変わらなかった場合は記録しない) |
+| `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert。開示ごとに`JQuantsYutaiTdnetEvent`へイベント(`start`/`update`/`abolition`)を記録する(マスタが実際に変わらなかった場合は記録しない)。廃止検知による`JQuantsYutaiMaster`からの削除は、`PriceBatchFunction`/`FinancialSummaryBatchFunction`の対象銘柄取得も`ReferenceApiFunction`の`isKnownTicker`判定も同テーブルを参照する設計のため、その銘柄の株価・決算サマリ収集を止め、`GET /tickers/{ticker}/prices`・`summary`も404にする(意図した副作用だが、単一の削除操作が複数の挙動に波及する点に注意) |
 | `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし逆日歩リスクを事前計算・書き戻し。`GET /yutai`一覧APIが銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため |
 | `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 10 * * ? *)` = JST 19:40 毎日、逆日歩実績・信用残バッチの後) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`を読み、貸株超過率のビン別充足率分布から次回権利日の予測逆日歩(過去実績ベース)を算出し`JQuantsGyakuhibuForecast`へupsert。`TSE_MARGIN_FEATURES_ENABLED=true`のときは`JQuantsMarginBalance`も読み、東証信用残ベースの現在需給予測(`tseForecast`属性・`_POOL_TSE_`行)も併せて書く |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理 |
@@ -255,6 +256,8 @@ aws cloudfront create-invalidation --distribution-id <DistributionId> --paths '/
 ```
 
 `FrontendBucketName` / `DistributionId` / `ApiEndpoint` / `FrontendUrl` は `cdk deploy` の出力(CfnOutput)で確認できる。
+
+バックエンドのルート削除・改名を伴う変更(今回の`/tickers`系CRUDルート削除など)をデプロイする際は、フロント(`aws s3 sync` + CloudFront invalidation)を先に、`cdk deploy`を後に実行すること。新しいフロントのビルド成果物は削除済みルートを一切呼ばないため旧・新どちらのバックエンドに対しても安全に動作するが、逆に`cdk deploy`を先に実行すると、まだ古いフロントが配信されている間、その旧ticker一覧/screening/watchlist画面が(既に無くなった`/tickers`系CRUDルートを呼び続けて)一時的に404を受け取る。
 
 ### スタンダードプラン依存機能のON/OFF(`tseMarginFeatures`)
 

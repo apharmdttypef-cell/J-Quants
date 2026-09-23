@@ -25,10 +25,6 @@ function jsonResponse(statusCode: number, body: unknown): APIGatewayProxyResultV
   };
 }
 
-function emptyResponse(statusCode: number): APIGatewayProxyResultV2 {
-  return { statusCode };
-}
-
 async function isKnownTicker(ticker: string): Promise<boolean> {
   const result = await ddbDocClient.send(
     new GetCommand({ TableName: YUTAI_MASTER_TABLE_NAME, Key: { ticker } }),

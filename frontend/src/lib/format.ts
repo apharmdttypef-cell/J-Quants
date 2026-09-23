@@ -14,12 +14,6 @@ export function formatPercent(value: number | null): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
-// 日本市場の慣例: 上昇=赤(up)、下落=緑(down)。米国式とは逆なので注意。
-export function trendClass(value: number | null): string {
-  if (value === null || value === 0) return 'pct--flat';
-  return value > 0 ? 'pct--up' : 'pct--down';
-}
-
 // 財務サマリの値はAPIから文字列で返る(大きい桁数のため)。空文字はデータなしを表す。
 export function formatFinancialYen(raw: string | undefined): string {
   if (!raw) return '—';

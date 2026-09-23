@@ -24,6 +24,7 @@ createRoot(document.getElementById('root')!).render(
             <Route path="yutai/tdnet-events" element={<YutaiTdnetEventsPage />} />
             <Route path="yutai/:ticker" element={<YutaiDetailPage />} />
             <Route path="yutai/:ticker/forecast" element={<YutaiForecastDetailPage />} />
+            <Route path="*" element={<Navigate to="/yutai/forecast" replace />} />
           </Route>
         </Routes>
       </BrowserRouter>

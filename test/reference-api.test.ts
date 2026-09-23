@@ -1,7 +1,6 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 
 const mockSend = jest.fn();
-const mockFetch = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(),
@@ -43,8 +42,6 @@ function body(result: APIGatewayProxyResultV2): unknown {
 
 beforeEach(() => {
   mockSend.mockReset();
-  mockFetch.mockReset();
-  (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
 });
 
 test('GET /tickers/{ticker}/prices returns 404 for a ticker not in JQuantsYutaiMaster', async () => {
@@ -54,6 +51,12 @@ test('GET /tickers/{ticker}/prices returns 404 for a ticker not in JQuantsYutaiM
 
   expect((result as { statusCode: number }).statusCode).toBe(404);
   expect(mockSend).toHaveBeenCalledTimes(1);
+  // isKnownTicker must check JQuantsYutaiMaster (not the removed WATCHLIST_TABLE_NAME) —
+  // otherwise this test would pass identically against the old watchlist-based behavior.
+  expect(mockSend.mock.calls[0][0]).toMatchObject({
+    TableName: 'JQuantsYutaiMaster',
+    Key: { ticker: '9999' },
+  });
 });
 
 test('GET /tickers/{ticker}/prices rejects unsupported range values', async () => {
@@ -99,6 +102,12 @@ test('GET /tickers/{ticker}/summary returns 404 for a ticker not in JQuantsYutai
   const result = await handler(makeEvent('GET /tickers/{ticker}/summary', { pathParameters: { ticker: '9999' } }));
 
   expect((result as { statusCode: number }).statusCode).toBe(404);
+  // isKnownTicker must check JQuantsYutaiMaster (not the removed WATCHLIST_TABLE_NAME) —
+  // otherwise this test would pass identically against the old watchlist-based behavior.
+  expect(mockSend.mock.calls[0][0]).toMatchObject({
+    TableName: 'JQuantsYutaiMaster',
+    Key: { ticker: '9999' },
+  });
 });
 
 test('GET /tickers/{ticker}/summary returns 404 when no disclosure has been collected yet', async () => {

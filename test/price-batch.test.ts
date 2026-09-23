@@ -127,7 +127,7 @@ test('prefers the common-stock record even when it appears first (the ordering J
   }
 });
 
-test('matches a 5-digit watchlist ticker by exact Code, not the truncated 4-digit prefix', async () => {
+test('matches a 5-digit ticker by exact Code, not the truncated 4-digit prefix', async () => {
   mockScanTickerColumn.mockResolvedValueOnce(['72030']);
   mockGetApiKey.mockResolvedValueOnce('test-api-key');
   mockFetchWithRetry.mockResolvedValue({
