@@ -612,3 +612,76 @@ test('creates the gyakuhibu validation bucket with Object Lock (Governance, reta
     UpdateReplacePolicy: 'Retain',
   });
 });
+
+test('creates the ForecastSnapshotFunction wired to master/actual/price tables, the api secret, and the validation bucket, with no schedule of its own', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Timeout: 840, // 14 minutes in seconds
+    MemorySize: 512,
+    Environment: {
+      Variables: Match.objectLike({
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
+        STOCK_PRICES_TABLE_NAME: Match.anyValue(),
+        VALIDATION_BUCKET_NAME: Match.anyValue(),
+        SECRET_ARN: Match.anyValue(),
+      }),
+    },
+  });
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const policyEntries = Object.entries(policies);
+
+  function hasStatement(namePrefix: string, predicate: (actions: string[], resourceStr: string) => boolean): boolean {
+    return policyEntries.some(([name, p]) => {
+      if (!name.includes(namePrefix)) return false;
+      const statements =
+        (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } })
+          .Properties?.PolicyDocument?.Statement || [];
+      return statements.some((stmt) => {
+        const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+        const resourceStr = JSON.stringify(stmt.Resource || '');
+        return predicate(actions, resourceStr);
+      });
+    });
+  }
+
+  const hasReadAccess = (resourceKeyword: string) =>
+    hasStatement(
+      'ForecastSnapshotFunction',
+      (actions, resourceStr) =>
+        actions.some((a) => a.includes('GetItem') || a.includes('Query') || a.includes('Scan')) && resourceStr.includes(resourceKeyword),
+    );
+  expect(hasReadAccess('YutaiMaster')).toBe(true);
+  expect(hasReadAccess('GyakuhibuActual')).toBe(true);
+  expect(hasReadAccess('StockPrices')).toBe(true);
+
+  expect(hasStatement('ForecastSnapshotFunction', (actions) => actions.some((a) => a.includes('secretsmanager:GetSecretValue')))).toBe(
+    true,
+  );
+
+  expect(
+    hasStatement(
+      'ForecastSnapshotFunction',
+      (actions, resourceStr) => actions.some((a) => a.includes('PutObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
+    ),
+  ).toBe(true);
+  expect(
+    hasStatement(
+      'ForecastSnapshotFunction',
+      (actions, resourceStr) => actions.some((a) => a.includes('GetObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
+    ),
+  ).toBe(true);
+
+  // Task 2の時点ではスケジュールを追加しない(EventBridge SchedulerでのTask 3の対象)。
+  // 既存7スケジュール(price/financial-summary/margin-balance/gyakuhibu-history/
+  // tdnet-watch/yutai-risk-precompute/gyakuhibu-forecast)から増えていないことを確認する。
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(7);
+});

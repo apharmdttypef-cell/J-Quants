@@ -406,7 +406,32 @@ export class JQuantsStack extends cdk.Stack {
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 
-    // 検証用Lambda(ForecastSnapshotFunction)へのgrantはTask 2で追加する。
+    // 逆日歩予測の精度検証(2026-09-28権利付き最終日)用スナップショットLambda。既存の
+    // 日次予測バッチ(gyakuhibuForecastBatchFn)とは完全に独立した別系統(lambda/gyakuhibu-forecast-validation/)。
+    // taisyaku.jpへの1銘柄1秒ペースの逐次フェッチ(約303銘柄・6分強、Task 0実測)を
+    // 見込んでtimeoutは既存バッチと同じ14分に余裕を持たせる。
+    const gyakuhibuForecastSnapshotFn = new nodejs.NodejsFunction(this, 'ForecastSnapshotFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'gyakuhibu-forecast-validation', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 512,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
+        STOCK_PRICES_TABLE_NAME: this.stockPricesTable.tableName,
+        VALIDATION_BUCKET_NAME: this.gyakuhibuValidationBucket.bucketName,
+        SECRET_ARN: this.apiKeySecret.secretArn,
+      },
+    });
+
+    this.yutaiMasterTable.grantReadData(gyakuhibuForecastSnapshotFn);
+    this.gyakuhibuActualTable.grantReadData(gyakuhibuForecastSnapshotFn);
+    this.stockPricesTable.grantReadData(gyakuhibuForecastSnapshotFn);
+    this.apiKeySecret.grantRead(gyakuhibuForecastSnapshotFn);
+    this.gyakuhibuValidationBucket.grantPut(gyakuhibuForecastSnapshotFn);
+    this.gyakuhibuValidationBucket.grantRead(gyakuhibuForecastSnapshotFn);
 
     // ビルド成果物を置くだけの静的ホスティング用バケット。セーブデータ等の
     // 永続資産ではないため、他テーブルと違いdestroy時に消えて構わない。
