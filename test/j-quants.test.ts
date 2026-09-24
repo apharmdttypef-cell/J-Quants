@@ -685,3 +685,46 @@ test('creates the ForecastSnapshotFunction wired to master/actual/price tables, 
   );
   expect(scheduleExpressions.filter(Boolean)).toHaveLength(7);
 });
+
+test('schedules the two one-time forecast validation snapshots via EventBridge Scheduler at the correct JST wall-clock times', () => {
+  const template = synth();
+
+  // scheduler.ScheduleExpression.at(date, timeZone)は「dateのtoISOString()の数字」をat(...)
+  // リテラルにそのまま埋め込み、timeZoneはその数字をどのタイムゾーンの現地時刻として解釈
+  // するかを別途指定する。つまりScheduleExpressionの文字列自体はJSTの壁時計表記(20:00/15:00)
+  // のまま、Timezoneフィールドで'Asia/Tokyo'を指定して初めて正しい実時刻(UTC 11:00/06:00)に
+  // なる。この2つが揃っていることを確認しないと、UTC変換を誤って9時間ずれるバグ
+  // (実装時に発見・修正済み)を再発検知できない。
+  template.hasResourceProperties('AWS::Scheduler::Schedule', {
+    ScheduleExpression: 'at(2026-09-25T20:00:00)',
+    ScheduleExpressionTimezone: 'Asia/Tokyo',
+    Target: Match.objectLike({
+      Input: Match.serializedJson(
+        Match.objectLike({
+          rightsDate: '2026-09-28',
+          asofLabel: '2026-09-25T2000JST',
+          variant: 'final',
+          asofDate: '2026-09-24',
+        }),
+      ),
+    }),
+  });
+
+  template.hasResourceProperties('AWS::Scheduler::Schedule', {
+    ScheduleExpression: 'at(2026-09-28T15:00:00)',
+    ScheduleExpressionTimezone: 'Asia/Tokyo',
+    Target: Match.objectLike({
+      Input: Match.serializedJson(
+        Match.objectLike({
+          rightsDate: '2026-09-28',
+          asofLabel: '2026-09-28T1500JST',
+          variant: 'prelim',
+          asofDate: '2026-09-25',
+        }),
+      ),
+    }),
+  });
+
+  const schedules = template.findResources('AWS::Scheduler::Schedule');
+  expect(Object.keys(schedules)).toHaveLength(2);
+});

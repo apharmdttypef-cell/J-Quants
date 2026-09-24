@@ -6,6 +6,8 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as scheduler from 'aws-cdk-lib/aws-scheduler';
+import * as scheduler_targets from 'aws-cdk-lib/aws-scheduler-targets';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { HttpLambdaAuthorizer, HttpLambdaResponseType } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
@@ -432,6 +434,44 @@ export class JQuantsStack extends cdk.Stack {
     this.apiKeySecret.grantRead(gyakuhibuForecastSnapshotFn);
     this.gyakuhibuValidationBucket.grantPut(gyakuhibuForecastSnapshotFn);
     this.gyakuhibuValidationBucket.grantRead(gyakuhibuForecastSnapshotFn);
+
+    // scheduler.ScheduleExpression.at(date, timeZone)はdate.toISOString()の文字列(常にUTC
+    // 表記)をそのままat(...)リテラルとして使い、timeZoneは「そのリテラルの数字をどのタイム
+    // ゾーンの現地時刻として解釈するか」を別途指定する仕組み。つまりdateには「望む現地時刻の
+    // 数字をUTCとして偽装したもの」を渡す必要がある(例: JST 20:00を表すには'+09:00'ではなく
+    // 'Z'を使い、20:00という数字そのものをUTC表記に埋め込む)。'+09:00'を使うと
+    // toISOString()が実時刻のUTC変換(11:00Z)を返してしまい、そこにtimeZone: ASIA_TOKYOを
+    // 付けると「JST 11:00」に化けてしまう(意図の20:00から9時間ずれる)。実際に
+    // new Date('2026-09-25T20:00:00+09:00').toISOString()が'2026-09-25T11:00:00.000Z'に
+    // なることをnode -eで確認済み。
+    //
+    // スナップショットA(本命判断ポイント、9/25 20:00 JST)。1回限りの実行。
+    new scheduler.Schedule(this, 'ForecastSnapshotAScheduler', {
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-09-25T20:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastSnapshotFn, {
+        input: scheduler.ScheduleTargetInput.fromObject({
+          rightsDate: '2026-09-28',
+          asofLabel: '2026-09-25T2000JST',
+          runId: 'run=1',
+          variant: 'final',
+          asofDate: '2026-09-24',
+        }),
+      }),
+    });
+
+    // スナップショットB(参考上限、9/28 15:00 JST)。1回限りの実行。
+    new scheduler.Schedule(this, 'ForecastSnapshotBScheduler', {
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-09-28T15:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastSnapshotFn, {
+        input: scheduler.ScheduleTargetInput.fromObject({
+          rightsDate: '2026-09-28',
+          asofLabel: '2026-09-28T1500JST',
+          runId: 'run=1',
+          variant: 'prelim',
+          asofDate: '2026-09-25',
+        }),
+      }),
+    });
 
     // ビルド成果物を置くだけの静的ホスティング用バケット。セーブデータ等の
     // 永続資産ではないため、他テーブルと違いdestroy時に消えて構わない。
