@@ -13,6 +13,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn() }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockDdbSend })) },
   ScanCommand: jest.fn((input: unknown) => input),
+  QueryCommand: jest.fn((input: unknown) => input),
 }));
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(() => ({ send: mockS3Send })),
@@ -35,12 +36,18 @@ jest.mock('../lambda/gyakuhibu-forecast-validation/snapshot-input', () => ({
 
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
+process.env.STOCK_PRICES_TABLE_NAME = 'JQuantsStockPrices';
 process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
 process.env.VALIDATION_BUCKET_NAME = 'test-validation-bucket';
 process.env.TAISYAKU_REQUEST_INTERVAL_MS = '0'; // テストでは待機なしにする
 
 beforeEach(() => {
   mockDdbSend.mockReset();
+  // ハンドラは対象銘柄ごとにJQuantsStockPricesへの価格クエリ(fetchPricedClose)を1回追加で
+  // 呼ぶため、個別にmockResolvedValueOnceを積んでいないテストでも(先頭2件の初期スキャン分を
+  // 消費した後)必ず何かが返るようデフォルトを設定しておく。Items:[]は「価格データ無し」を
+  // 意味し、maxRatePerShare/closePriceがnullになるだけで例外は起きない。
+  mockDdbSend.mockResolvedValue({ Items: [] });
   mockS3Send.mockReset();
   mockGetApiKey.mockReset();
   mockFetchWithRetry.mockReset();
@@ -376,5 +383,100 @@ describe('handler', () => {
     expect(forecastJson.records[0].fetchStatus).toBe('fetch_error');
     const manifest = JSON.parse(puts[puts.length - 1].Body) as { tickerCounts: { byFetchStatus: Record<string, number> } };
     expect(manifest.tickerCounts.byFetchStatus).toEqual({ fetch_error: 1 });
+  });
+
+  // -----------------------------------------------------------------------
+  // 権利日(rightsDate)申込分の最高料率はJQuantsYutaiMasterの事前計算済みmaxGyakuhibuに
+  // 頼らず、このLambda自身がJQuantsStockPricesから直接取得した終値で独立に算出すること
+  // (設計書「最高料率は9/25終値で確定計算できる」/Task 2「9/25終値を取得する」)。
+  // -----------------------------------------------------------------------
+  test('computes closePrice/pricedAt/maxRatePerShare/days independently from JQuantsStockPrices rather than the stale yutai-master maxGyakuhibu field', async () => {
+    mockResolveTargetTickers.mockResolvedValueOnce([
+      // yutai-masterのmaxGyakuhibu(999999)はいつ計算されたか不明な事前計算値。
+      // 独立計算の結果がこれを使っていないことを確認する。
+      { ticker: '9418', companyName: 'U-NEXT HD', value: 3000, unitShares: 100, maxGyakuhibu: 999999, rightsMonths: [9] },
+    ]);
+    mockDdbSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '9418', unitShares: 100 }] }) // unit shares scan
+      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
+      .mockResolvedValueOnce({ Items: [{ ticker: '9418', date: '2026-09-25', close: 1800 }] }); // 価格クエリ
+    mockFetchTickerSnapshotInput.mockResolvedValueOnce({
+      ticker: '9418',
+      variant: 'final',
+      dataStatus: 'final',
+      financingBalance: 100,
+      lendingBalance: 50,
+      fetchStatus: 'ok',
+      rawCsv: 'csv',
+    });
+    mockS3Send.mockResolvedValue({});
+
+    await handler(baseEvent());
+
+    const puts = s3PutCalls();
+    const forecastJson = JSON.parse(puts[0].Body) as {
+      records: Array<{
+        closePrice: number | null;
+        pricedAt: string | null;
+        maxRatePerShare: number | null;
+        days: number;
+        forecast: { maxGyakuhibu: number | null };
+      }>;
+    };
+    const record = forecastJson.records[0];
+    expect(record.closePrice).toBe(1800);
+    expect(record.pricedAt).toBe('2026-09-25');
+    // calcMaxRate(1800, 100) = 3.6(投資単位180,000円→上限360円÷単元100株) × RIGHTS_DAY_RATE_MULTIPLIER(4) = 14.4
+    expect(record.maxRatePerShare).toBe(14.4);
+    expect(record.days).toBe(1);
+    // 14.4 × unitShares(100) × days(1) = 1440。yutai-masterの古いmaxGyakuhibu(999999)とは無関係。
+    expect(record.forecast.maxGyakuhibu).toBe(1440);
+
+    const priceQueryCall = mockDdbSend.mock.calls[2][0] as {
+      TableName: string;
+      KeyConditionExpression: string;
+      ExpressionAttributeValues: Record<string, string>;
+    };
+    expect(priceQueryCall.TableName).toBe('JQuantsStockPrices');
+    expect(priceQueryCall.KeyConditionExpression).toBe('ticker = :ticker AND #date < :beforeDate');
+    // rightsDate(9/28)より前を問い合わせる(9/28自身の終値と混同しない)。
+    expect(priceQueryCall.ExpressionAttributeValues[':beforeDate']).toBe('2026-09-28');
+  });
+
+  test('falls back to null closePrice/maxRatePerShare/maxGyakuhibu when no price row exists before rightsDate, without crashing the run', async () => {
+    mockResolveTargetTickers.mockResolvedValueOnce([
+      { ticker: '9418', companyName: 'U-NEXT HD', value: 3000, unitShares: 100, maxGyakuhibu: 999999, rightsMonths: [9] },
+    ]);
+    mockDdbSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '9418', unitShares: 100 }] })
+      .mockResolvedValueOnce({ Items: [] })
+      .mockResolvedValueOnce({ Items: [] }); // 価格データ無し
+    mockFetchTickerSnapshotInput.mockResolvedValueOnce({
+      ticker: '9418',
+      variant: 'final',
+      dataStatus: 'final',
+      financingBalance: 100,
+      lendingBalance: 50,
+      fetchStatus: 'ok',
+      rawCsv: 'csv',
+    });
+    mockS3Send.mockResolvedValue({});
+
+    await handler(baseEvent());
+
+    const puts = s3PutCalls();
+    const forecastJson = JSON.parse(puts[0].Body) as {
+      records: Array<{
+        closePrice: number | null;
+        pricedAt: string | null;
+        maxRatePerShare: number | null;
+        forecast: { maxGyakuhibu: number | null };
+      }>;
+    };
+    const record = forecastJson.records[0];
+    expect(record.closePrice).toBeNull();
+    expect(record.pricedAt).toBeNull();
+    expect(record.maxRatePerShare).toBeNull();
+    expect(record.forecast.maxGyakuhibu).toBeNull();
   });
 });

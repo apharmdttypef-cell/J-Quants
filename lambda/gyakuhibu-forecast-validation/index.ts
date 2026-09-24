@@ -15,7 +15,7 @@
 // 設計: .superpowers/sdd/2026-09-24-gyakuhibu-forecast-validation-plan/task-2-brief.md
 import { createHash } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import {
   toSample,
@@ -27,12 +27,21 @@ import {
   type ForecastSample,
   type GyakuhibuActualRow,
 } from '../shared/gyakuhibu-forecast';
+import { calcMaxRate, RIGHTS_DAY_RATE_MULTIPLIER } from '../shared/gyakuhibu-calc';
 import { resolveTargetTickers } from './target-tickers';
 import { fetchTickerSnapshotInput, type TickerSnapshotInput } from './snapshot-input';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
+const STOCK_PRICES_TABLE_NAME = process.env.STOCK_PRICES_TABLE_NAME!;
 const VALIDATION_BUCKET_NAME = process.env.VALIDATION_BUCKET_NAME!;
+// 権利付き最終日(event.rightsDate)申込分の貸借値段は、その直前の営業日の終値
+// (設計書「前提となる事実」: 「9/28申込分の貸借値段は9/25終値」)。taisyaku.jpはまだ
+// event.rightsDate分のデータを持たない(未来の権利日のため)ので、J-Quantsの株価
+// テーブルから直接取得する。品貸日数は同じ設計書の前提により2026-09-28権利日固定で
+// 1日(受渡9/30→翌営業日10/1)。このLambdaは2026-09-28権利日専用の検証実行が前提のため、
+// 取引カレンダーAPIを呼ぶ一般的な計算はせず既知の値を定数化する。
+const RIGHTS_DAY_DAYS = 1;
 // taisyaku.jpへの連続リクエストの間隔。gyakuhibu-history-batch/index.tsの
 // BETWEEN_REQUESTS_DELAY_MSと同じ考え方・同じデフォルト値(1000ms)を踏襲する
 // (Task 0の実測: 303銘柄で約6.1分、Lambdaの15分制限に十分な余裕あり)。
@@ -126,6 +135,26 @@ function groupByTicker(samples: ForecastSample[]): Map<string, ForecastSample[]>
   return map;
 }
 
+// rightsDateより前の直近営業日の終値を、JQuantsStockPrices(ticker+dateの複合キー)から
+// 直接取得する。yutai-risk-precompute-batch/index.tsのlatestClose(常に「最新」を取る)とは
+// 意図的に違い、「rightsDateより前」に限定したクエリにすることで、この検証が求める
+// 「9/25終値」を将来の日付の終値と混同しないようにする。
+async function fetchPricedClose(ticker: string, beforeDate: string): Promise<{ closePrice: number; pricedAt: string } | undefined> {
+  const result = await ddbDocClient.send(
+    new QueryCommand({
+      TableName: STOCK_PRICES_TABLE_NAME,
+      KeyConditionExpression: 'ticker = :ticker AND #date < :beforeDate',
+      ExpressionAttributeNames: { '#date': 'date' },
+      ExpressionAttributeValues: { ':ticker': ticker, ':beforeDate': beforeDate },
+      ScanIndexForward: false,
+      Limit: 1,
+    }),
+  );
+  const item = result.Items?.[0];
+  if (!item || typeof item.close !== 'number' || typeof item.date !== 'string') return undefined;
+  return { closePrice: item.close, pricedAt: item.date };
+}
+
 async function putObject(key: string, body: string, contentType: string): Promise<void> {
   await s3Client.send(
     new PutObjectCommand({ Bucket: VALIDATION_BUCKET_NAME, Key: key, Body: body, ContentType: contentType }),
@@ -202,6 +231,16 @@ export const handler = async (event: {
         ? excessRatio(input.financingBalance, input.lendingBalance)
         : null;
 
+    // event.rightsDate(9/28)申込分の最高料率は、JQuantsYutaiMasterの事前計算済みmaxGyakuhibu
+    // (yutai-risk-precompute-batchが「直近の」終値でいつ計算したか不明で、必ずしも9/25終値とは
+    // 限らない)には頼らず、このLambda自身が9/25終値を直接取得して独立に算出する(設計書
+    // Task 2「9/25終値を取得する」/前提事実「最高料率は9/25終値で確定計算できる」)。
+    const priced = await fetchPricedClose(target.ticker, event.rightsDate);
+    const maxRatePerShare = priced
+      ? finiteOrNull(calcMaxRate(priced.closePrice, target.unitShares) * RIGHTS_DAY_RATE_MULTIPLIER)
+      : null;
+    const computedMaxGyakuhibu = maxRatePerShare !== null ? maxRatePerShare * target.unitShares * RIGHTS_DAY_DAYS : null;
+
     const tickerSamples = samplesByTicker.get(target.ticker) ?? [];
     // current-tseフォールバックは使わない(2026-09-09の設計変更に合わせる。task-2-brief.md Step 3.4)。
     const { scenario, excessRatio: scenarioExcessRatio } = chooseScenario(tickerSamples, nextRightsMonth, null);
@@ -210,7 +249,7 @@ export const handler = async (event: {
       poolSamples: allSamples,
       scenario,
       excessRatio: scenarioExcessRatio,
-      maxGyakuhibu: target.maxGyakuhibu,
+      maxGyakuhibu: computedMaxGyakuhibu,
       value: target.value,
     });
 
@@ -223,7 +262,14 @@ export const handler = async (event: {
       // 優待の必要株数とunitSharesが食い違う既知のケースがあるが、この検証では単純化して
       // unitSharesで統一する(task-2-brief.md Step 3.5、task-2-report.mdに前提として明記)。
       requiredShares: target.unitShares,
-      maxGyakuhibu: target.maxGyakuhibu,
+      // closePrice/pricedAt/maxRatePerShare/daysは設計書のforecast.jsonスキーマが要求する
+      // 監査用フィールド: どの終値・どの最高料率を基準に予測したかを凍結後も追跡できるようにする
+      // (下のforecast.maxGyakuhibuはこのmaxRatePerShareから算出した値で、YutaiMasterの
+      // 事前計算値とは意図的に別物)。
+      closePrice: priced?.closePrice ?? null,
+      pricedAt: priced?.pricedAt ?? null,
+      maxRatePerShare,
+      days: RIGHTS_DAY_DAYS,
       asofDate: event.asofDate,
       variant: input.variant,
       dataStatus: input.dataStatus,
@@ -237,6 +283,7 @@ export const handler = async (event: {
       forecast: {
         scenario: result.scenario,
         excessRatio: finiteOrNull(result.excessRatio),
+        maxGyakuhibu: finiteOrNull(computedMaxGyakuhibu),
         bin: result.bin,
         pOccur: result.pOccur,
         fillP50: result.fillP50,
