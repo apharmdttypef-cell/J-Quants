@@ -445,13 +445,18 @@ export class JQuantsStack extends cdk.Stack {
     // new Date('2026-09-25T20:00:00+09:00').toISOString()が'2026-09-25T11:00:00.000Z'に
     // なることをnode -eで確認済み。
     //
-    // スナップショットA(本命判断ポイント、9/25 20:00 JST)。1回限りの実行。
+    // スナップショットA(本命判断ポイント)。設計書は9/25 20:00 JSTを想定していたが、デプロイ
+    // 自体が20:00頃になる見込みのため、デプロイとの余裕を確保して9/26 00:00 JST(=9/25の
+    // 「24:00」)に後ろ倒しした(ユーザー指示、2026-09-25)。rightsDate/variant/asofDateは
+    // 変更しない(見る対象データは9/24確報のまま、発火時刻だけをずらす)。9/25終値は
+    // Task 0実測で18:03〜18:04 JST頃に反映済みなので、この変更後もタイミング上の余裕は
+    // むしろ広がる。1回限りの実行。
     new scheduler.Schedule(this, 'ForecastSnapshotAScheduler', {
-      schedule: scheduler.ScheduleExpression.at(new Date('2026-09-25T20:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-09-26T00:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
       target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastSnapshotFn, {
         input: scheduler.ScheduleTargetInput.fromObject({
           rightsDate: '2026-09-28',
-          asofLabel: '2026-09-25T2000JST',
+          asofLabel: '2026-09-26T0000JST',
           runId: 'run=1',
           variant: 'final',
           asofDate: '2026-09-24',

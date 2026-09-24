@@ -691,18 +691,20 @@ test('schedules the two one-time forecast validation snapshots via EventBridge S
 
   // scheduler.ScheduleExpression.at(date, timeZone)は「dateのtoISOString()の数字」をat(...)
   // リテラルにそのまま埋め込み、timeZoneはその数字をどのタイムゾーンの現地時刻として解釈
-  // するかを別途指定する。つまりScheduleExpressionの文字列自体はJSTの壁時計表記(20:00/15:00)
-  // のまま、Timezoneフィールドで'Asia/Tokyo'を指定して初めて正しい実時刻(UTC 11:00/06:00)に
+  // するかを別途指定する。つまりScheduleExpressionの文字列自体はJSTの壁時計表記(00:00/15:00)
+  // のまま、Timezoneフィールドで'Asia/Tokyo'を指定して初めて正しい実時刻(UTC 15:00/06:00)に
   // なる。この2つが揃っていることを確認しないと、UTC変換を誤って9時間ずれるバグ
   // (実装時に発見・修正済み)を再発検知できない。
+  // スナップショットAは当初9/25 20:00 JST予定だったが、デプロイ自体が20:00頃になる見込みの
+  // ため9/26 00:00 JST(=9/25の「24:00」)に後ろ倒しした(ユーザー指示、2026-09-25)。
   template.hasResourceProperties('AWS::Scheduler::Schedule', {
-    ScheduleExpression: 'at(2026-09-25T20:00:00)',
+    ScheduleExpression: 'at(2026-09-26T00:00:00)',
     ScheduleExpressionTimezone: 'Asia/Tokyo',
     Target: Match.objectLike({
       Input: Match.serializedJson(
         Match.objectLike({
           rightsDate: '2026-09-28',
-          asofLabel: '2026-09-25T2000JST',
+          asofLabel: '2026-09-26T0000JST',
           variant: 'final',
           asofDate: '2026-09-24',
         }),
