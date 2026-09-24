@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { SHRINKAGE_K } from '../lambda/shared/gyakuhibu-forecast';
 
 const mockDdbSend = jest.fn();
 const mockS3Send = jest.fn();
@@ -355,9 +356,69 @@ describe('handler', () => {
     await handler(baseEvent());
 
     const puts = s3PutCalls();
-    const forecastJson = JSON.parse(puts[0].Body) as { records: Array<{ forecast: { scenario: string; forecastStatus: string } }> };
+    const forecastJson = JSON.parse(puts[0].Body) as {
+      records: Array<{ forecast: { scenario: string; forecastStatus: string; shrinkageWeight: number | null } }>;
+    };
     expect(forecastJson.records[0].forecast.scenario).toBe('none');
     expect(forecastJson.records[0].forecast.forecastStatus).toBe('na');
+    // tickerSamples=0かつpoolSamples=0(真のna)のときは、forecast()内部でも縮小重みwを
+    // 一切計算しないので、意味のある数値を捏造せずnullにする。
+    expect(forecastJson.records[0].forecast.shrinkageWeight).toBeNull();
+  });
+
+  test('records a real fractional shrinkageWeight (nT/(nT+SHRINKAGE_K)) when both ticker and pool samples exist', async () => {
+    mockResolveTargetTickers.mockResolvedValueOnce([
+      { ticker: '1111', companyName: 'A社', value: 1000, unitShares: 100, maxGyakuhibu: 5000, rightsMonths: [9] },
+    ]);
+    mockDdbSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '1111', unitShares: 100 }] }) // unit shares scan
+      .mockResolvedValueOnce({
+        // 2件とも1111自身の過去実績(nT=2)。同じビンに属するプールサンプルにもなる(nP>=2)。
+        // maxRateActualが無いとtoSample()がnull(除外)を返す(fillRatio()のガード)ため必須。
+        Items: [
+          {
+            ticker: '1111',
+            rightsDate: '2025-09-26',
+            financingBalance: 100,
+            lendingBalance: 500,
+            avgRate: 1,
+            days: 1,
+            maxRateActual: 2,
+            enriched: true,
+          },
+          {
+            ticker: '1111',
+            rightsDate: '2024-09-27',
+            financingBalance: 100,
+            lendingBalance: 500,
+            avgRate: 1,
+            days: 1,
+            maxRateActual: 2,
+            enriched: true,
+          },
+        ],
+      });
+    mockFetchTickerSnapshotInput.mockResolvedValueOnce({
+      ticker: '1111',
+      variant: 'final',
+      dataStatus: 'final',
+      financingBalance: 100,
+      lendingBalance: 500,
+      fetchStatus: 'ok',
+      rawCsv: 'csv',
+    });
+    mockS3Send.mockResolvedValue({});
+
+    await handler(baseEvent());
+
+    const puts = s3PutCalls();
+    const forecastJson = JSON.parse(puts[0].Body) as {
+      records: Array<{ forecast: { tickerSamples: number; poolSamples: number; shrinkageWeight: number } }>;
+    };
+    const record = forecastJson.records[0].forecast;
+    expect(record.tickerSamples).toBeGreaterThan(0);
+    const expectedWeight = record.tickerSamples / (record.tickerSamples + SHRINKAGE_K);
+    expect(record.shrinkageWeight).toBeCloseTo(expectedWeight, 10);
   });
 
   test('an unexpected exception from fetchTickerSnapshotInput is caught and treated as fetch_error rather than aborting the run', async () => {

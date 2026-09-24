@@ -296,6 +296,20 @@ export const handler = async (event: {
         forecastStatus: result.forecastStatus,
         tickerSamples: result.tickerSamples,
         poolSamples: result.poolSamples,
+        // 設計書のforecast.jsonスキーマが要求するshrinkageWeight。forecast()自身は縮小推定の
+        // 重みwをローカル変数のまま返さないため、ForecastResultが返すtickerSamples/poolSamples
+        // (=forecast()内部のnT/nPそのもの)を使って同じ式(gyakuhibu-forecast.ts内のw計算)を
+        // ここで再現する。forecast()を変更せずに済ませるための意図的な重複(1行の式のみ)。
+        // 両方0(na、tickerSamples===poolSamples===0)のときはforecast()内部でもwを一切計算
+        // せず早期returnするため、ここでも意味のある値を作らずnullにする。
+        shrinkageWeight:
+          result.tickerSamples === 0 && result.poolSamples === 0
+            ? null
+            : result.poolSamples === 0
+              ? 1
+              : result.tickerSamples === 0
+                ? 0
+                : result.tickerSamples / (result.tickerSamples + SHRINKAGE_K),
       },
       computedAt: new Date().toISOString(),
     });
