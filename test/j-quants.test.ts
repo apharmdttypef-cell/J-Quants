@@ -580,3 +580,35 @@ test('reference-api has read access to the tdnet event table', () => {
   });
   expect(hasEventReadAccess).toBe(true);
 });
+
+test('creates the gyakuhibu validation bucket with Object Lock (Governance, retain until 2026-12-31), versioning, and RETAIN policy', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::S3::Bucket', {
+    ObjectLockEnabled: true,
+    ObjectLockConfiguration: Match.objectLike({
+      ObjectLockEnabled: 'Enabled',
+      Rule: Match.objectLike({
+        DefaultRetention: Match.objectLike({
+          Mode: 'GOVERNANCE',
+        }),
+      }),
+    }),
+    VersioningConfiguration: Match.objectLike({ Status: 'Enabled' }),
+    PublicAccessBlockConfiguration: Match.objectLike({
+      BlockPublicAcls: true,
+      BlockPublicPolicy: true,
+      IgnorePublicAcls: true,
+      RestrictPublicBuckets: true,
+    }),
+    BucketEncryption: Match.objectLike({
+      ServerSideEncryptionConfiguration: Match.arrayWith([
+        Match.objectLike({ ServerSideEncryptionByDefault: Match.objectLike({ SSEAlgorithm: 'AES256' }) }),
+      ]),
+    }),
+  });
+  template.hasResource('AWS::S3::Bucket', {
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  });
+});

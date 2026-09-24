@@ -22,6 +22,7 @@ export class JQuantsStack extends cdk.Stack {
   public readonly gyakuhibuActualTable: dynamodb.Table;
   public readonly gyakuhibuForecastTable: dynamodb.Table;
   public readonly yutaiTdnetEventTable: dynamodb.Table;
+  public readonly gyakuhibuValidationBucket: s3.Bucket;
   public readonly apiKeySecret: secretsmanager.Secret;
   public readonly api: apigwv2.HttpApi;
   public readonly frontendBucket: s3.Bucket;
@@ -112,6 +113,21 @@ export class JQuantsStack extends cdk.Stack {
       sortKey: { name: 'eventId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // 逆日歩予測の精度検証(2026-09-28権利付き最終日)用。予測を凍結後に書き換えられない
+    // ことを保証するためObject Lock(Governanceモード)を使う。保持期限は検証プロジェクトの
+    // 区切りとして2026-12-31固定(docs/superpowers/specs/2026-09-24-gyakuhibu-forecast-validation-design.md)。
+    // Lambdaロールには s3:BypassGovernanceRetention を付与しない(誤って上書き・削除できないように)。
+    this.gyakuhibuValidationBucket = new s3.Bucket(this, 'GyakuhibuValidationBucket', {
+      objectLockEnabled: true,
+      objectLockDefaultRetention: s3.ObjectLockRetention.governance(cdk.Duration.days(
+        Math.ceil((new Date('2026-12-31T23:59:59+09:00').getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
+      )),
+      versioned: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -390,6 +406,8 @@ export class JQuantsStack extends cdk.Stack {
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 
+    // 検証用Lambda(ForecastSnapshotFunction)へのgrantはTask 2で追加する。
+
     // ビルド成果物を置くだけの静的ホスティング用バケット。セーブデータ等の
     // 永続資産ではないため、他テーブルと違いdestroy時に消えて構わない。
     this.frontendBucket = new s3.Bucket(this, 'FrontendBucket', {
@@ -493,6 +511,7 @@ function handler(event) {
     new cdk.CfnOutput(this, 'ApiEndpoint', { value: this.api.apiEndpoint });
     new cdk.CfnOutput(this, 'FrontendUrl', { value: `https://${this.distribution.distributionDomainName}` });
     new cdk.CfnOutput(this, 'FrontendBucketName', { value: this.frontendBucket.bucketName });
+    new cdk.CfnOutput(this, 'GyakuhibuValidationBucketName', { value: this.gyakuhibuValidationBucket.bucketName });
     new cdk.CfnOutput(this, 'DistributionId', { value: this.distribution.distributionId });
   }
 }
