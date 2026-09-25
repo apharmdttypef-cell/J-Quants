@@ -712,6 +712,9 @@ test('schedules the two one-time forecast validation snapshots via EventBridge S
     }),
   });
 
+  // スナップショットBは当初variant:'prelim'を想定していたが、9/25リハーサルで同日分の
+  // 品貸料率が常に空欄(確報は翌営業日)であることが再現確認されたため、per-tickerの
+  // 確報/速報フォールバックは実装せず「常にfinal(確報)を待つ」に単純化した。
   template.hasResourceProperties('AWS::Scheduler::Schedule', {
     ScheduleExpression: 'at(2026-09-28T15:00:00)',
     ScheduleExpressionTimezone: 'Asia/Tokyo',
@@ -720,7 +723,7 @@ test('schedules the two one-time forecast validation snapshots via EventBridge S
         Match.objectLike({
           rightsDate: '2026-09-28',
           asofLabel: '2026-09-28T1500JST',
-          variant: 'prelim',
+          variant: 'final',
           asofDate: '2026-09-25',
         }),
       ),

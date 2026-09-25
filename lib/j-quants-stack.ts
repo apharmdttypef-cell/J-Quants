@@ -465,6 +465,13 @@ export class JQuantsStack extends cdk.Stack {
     });
 
     // スナップショットB(参考上限、9/28 15:00 JST)。1回限りの実行。
+    // 設計書は「9/25確報が15:00時点で出ていれば確報、無ければ速報」という per-ticker
+    // フォールバックを想定していたが、9/25(金)夜のリハーサルで実際にticker 9024他307銘柄の
+    // 生CSVを確認した結果、当日分の品貸料率・応札ランクは常に空欄(確報は翌営業日になって
+    // 初めて入る)ことが再現確認された。9/25の次の営業日は9/28そのものであり、
+    // 9/28 11:30〜16:00頃の確報ウィンドウに間に合う想定のため、per-ticker
+    // フォールバックは実装せず「常に確報(final)を待つ」に単純化する(ユーザー指示、
+    // 2026-09-25、リハーサル結果を報告した上で確認済み)。asofDateは9/25のまま変更しない。
     new scheduler.Schedule(this, 'ForecastSnapshotBScheduler', {
       schedule: scheduler.ScheduleExpression.at(new Date('2026-09-28T15:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
       target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastSnapshotFn, {
@@ -472,7 +479,7 @@ export class JQuantsStack extends cdk.Stack {
           rightsDate: '2026-09-28',
           asofLabel: '2026-09-28T1500JST',
           runId: 'run=1',
-          variant: 'prelim',
+          variant: 'final',
           asofDate: '2026-09-25',
         }),
       }),
