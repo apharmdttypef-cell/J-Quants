@@ -223,7 +223,7 @@ describe('handler', () => {
     expect(manifest.crossCheckMismatches).toEqual([{ ticker: '1111', ours: 0.6, existing: 999 }]);
   });
 
-  test('an unexpected exception from fetchTickerActualsInput is caught and treated as fetch_error rather than aborting the run', async () => {
+  test('an unexpected exception thrown by fetchTickerActualsInput itself (not caught internally) is caught by the outer handler loop and treated as fetch_error, rather than aborting the run', async () => {
     mockS3Send.mockImplementationOnce(async () =>
       s3GetObjectStub(
         frozenForecastJsonBody([
@@ -231,7 +231,18 @@ describe('handler', () => {
         ]),
       ),
     );
-    mockFetchTaisyakuCsv.mockRejectedValueOnce(new Error('boom'));
+    // fetchTaisyakuCsv自体の失敗はfetchTickerActualsInput内部のtry/catch(actuals-input.ts)で
+    // 既にfetch_errorへ変換されるため(それは上のfetchTickerActualsInputのdescribeで別途検証済み)、
+    // それをmockFetchTaisyakuCsv.mockRejectedValueOnceで模擬してもindex.ts側の外側のtry/catch
+    // (1銘柄の想定外の例外がrun全体を止めないための最終防御、handler内のfor文)は一切通らない。
+    // 実際に外側のcatchへ到達させるには、fetchTickerActualsInput自身が例外を投げる必要がある。
+    // parseTaisyakuCsvの呼び出しはactuals-input.ts内でtry/catchされていない(taisyaku.jpの
+    // CSVヘッダー形状が想定外だった場合にthrowする、taisyaku-client.ts参照)ため、ここから
+    // 想定外の例外を模擬する。
+    mockFetchTaisyakuCsv.mockResolvedValueOnce('dummy-csv-body');
+    mockParseTaisyakuCsv.mockImplementationOnce(() => {
+      throw new Error('boom');
+    });
     mockS3Send.mockResolvedValue({});
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
