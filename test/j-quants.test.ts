@@ -733,3 +733,59 @@ test('schedules the two one-time forecast validation snapshots via EventBridge S
   const schedules = template.findResources('AWS::Scheduler::Schedule');
   expect(Object.keys(schedules)).toHaveLength(2);
 });
+
+test('creates the ForecastActualsFunction wired to the actual table and the validation bucket (read+write)', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Timeout: 840, // 14 minutes in seconds
+    MemorySize: 512,
+    Environment: {
+      Variables: Match.objectLike({
+        VALIDATION_BUCKET_NAME: Match.anyValue(),
+        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
+      }),
+    },
+  });
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const policyEntries = Object.entries(policies);
+
+  function hasStatement(namePrefix: string, predicate: (actions: string[], resourceStr: string) => boolean): boolean {
+    return policyEntries.some(([name, p]) => {
+      if (!name.includes(namePrefix)) return false;
+      const statements =
+        (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } })
+          .Properties?.PolicyDocument?.Statement || [];
+      return statements.some((stmt) => {
+        const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+        const resourceStr = JSON.stringify(stmt.Resource || '');
+        return predicate(actions, resourceStr);
+      });
+    });
+  }
+
+  expect(
+    hasStatement(
+      'ForecastActualsFunction',
+      (actions, resourceStr) =>
+        actions.some((a) => a.includes('GetItem') || a.includes('Query') || a.includes('Scan')) &&
+        resourceStr.includes('GyakuhibuActual'),
+    ),
+  ).toBe(true);
+
+  expect(
+    hasStatement(
+      'ForecastActualsFunction',
+      (actions, resourceStr) => actions.some((a) => a.includes('PutObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
+    ),
+  ).toBe(true);
+  expect(
+    hasStatement(
+      'ForecastActualsFunction',
+      (actions, resourceStr) => actions.some((a) => a.includes('GetObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
+    ),
+  ).toBe(true);
+});

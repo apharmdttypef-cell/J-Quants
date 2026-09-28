@@ -485,6 +485,23 @@ export class JQuantsStack extends cdk.Stack {
       }),
     });
 
+    const gyakuhibuForecastActualsFn = new nodejs.NodejsFunction(this, 'ForecastActualsFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'gyakuhibu-forecast-actuals', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 512,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        VALIDATION_BUCKET_NAME: this.gyakuhibuValidationBucket.bucketName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
+      },
+    });
+
+    this.gyakuhibuActualTable.grantReadData(gyakuhibuForecastActualsFn);
+    this.gyakuhibuValidationBucket.grantPut(gyakuhibuForecastActualsFn);
+    this.gyakuhibuValidationBucket.grantRead(gyakuhibuForecastActualsFn);
+
     // ビルド成果物を置くだけの静的ホスティング用バケット。セーブデータ等の
     // 永続資産ではないため、他テーブルと違いdestroy時に消えて構わない。
     this.frontendBucket = new s3.Bucket(this, 'FrontendBucket', {
