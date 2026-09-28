@@ -159,7 +159,7 @@ function baselinePinballLoss(
   samples: JoinedSample[],
   tau: number,
   baselineField: 'tickerSamplesForBaseline' | 'poolSamplesForBaseline',
-): number {
+): number | null {
   let total = 0;
   let n = 0;
   for (const s of samples) {
@@ -174,17 +174,19 @@ function baselinePinballLoss(
   // 注: 個別サンプルがベースライン配列を欠いている場合はそのサンプルだけをスキップする
   // (ブリーフのテスト「baseline functions skip samples with an empty baseline array rather
   // than crashing」が要求する挙動)。全サンプルがスキップされ尽くしてn=0になった場合でも
-  // 例外は投げず、呼び出し側が判別できるようNaNを返す。
-  return n === 0 ? NaN : total / n;
+  // 例外は投げず、nullを返す(gyakuhibu-forecast.tsの「データ不足はnull」慣習に合わせる。
+  // number | nullにすることでTask 4の比較・集計箇所がコンパイル時にこの分岐を無視できない
+  // ようにする)。
+  return n === 0 ? null : total / n;
 }
 
 // ベースライン(a): プールのみ(縮小推定の銘柄側重みを常に0にした場合)。
-export function poolOnlyPinballLoss(samples: JoinedSample[], tau: number): number {
+export function poolOnlyPinballLoss(samples: JoinedSample[], tau: number): number | null {
   return baselinePinballLoss(samples, tau, 'poolSamplesForBaseline');
 }
 
 // ベースライン(b): 銘柄自身のみ(縮小推定のプール側重みを常に0にした場合)。
-export function tickerOnlyPinballLoss(samples: JoinedSample[], tau: number): number {
+export function tickerOnlyPinballLoss(samples: JoinedSample[], tau: number): number | null {
   return baselinePinballLoss(samples, tau, 'tickerSamplesForBaseline');
 }
 

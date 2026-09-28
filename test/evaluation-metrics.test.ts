@@ -245,5 +245,6 @@ describe('baseline pinball losses', () => {
     const samples = [sample({ poolSamplesForBaseline: [] })];
 
     expect(() => poolOnlyPinballLoss(samples, 0.5)).not.toThrow();
+    expect(poolOnlyPinballLoss(samples, 0.5)).toBeNull();
   });
 });
