@@ -502,6 +502,32 @@ export class JQuantsStack extends cdk.Stack {
     this.gyakuhibuValidationBucket.grantPut(gyakuhibuForecastActualsFn);
     this.gyakuhibuValidationBucket.grantRead(gyakuhibuForecastActualsFn);
 
+    // 実績取得(1回目、2026-09-29 20:00 JST)。1回限りの実行。
+    // scheduler.ScheduleExpression.at(date, timeZone)はdate.toISOString()の数字を
+    // そのままat(...)リテラルに埋め込み、timeZoneは「その数字をどのタイムゾーンの
+    // 現地時刻として解釈するか」を別途指定する仕組み(Task 3(旧)で実装・検証済み)。
+    // 望む現地時刻の数字をそのままUTCとして書く('Z'サフィックス、'+09:00'は使わない)。
+    new scheduler.Schedule(this, 'ForecastActualsFirstScheduler', {
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-09-29T20:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastActualsFn, {
+        input: scheduler.ScheduleTargetInput.fromObject({
+          rightsDate: '2026-09-28',
+          fetchedLabel: '2026-09-29T2000JST',
+        }),
+      }),
+    });
+
+    // 実績再取得(確報修正・再現性の確認、2026-10-02 20:00 JST)。1回限りの実行。
+    new scheduler.Schedule(this, 'ForecastActualsRefetchScheduler', {
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-10-02T20:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastActualsFn, {
+        input: scheduler.ScheduleTargetInput.fromObject({
+          rightsDate: '2026-09-28',
+          fetchedLabel: '2026-10-02T2000JST',
+        }),
+      }),
+    });
+
     // ビルド成果物を置くだけの静的ホスティング用バケット。セーブデータ等の
     // 永続資産ではないため、他テーブルと違いdestroy時に消えて構わない。
     this.frontendBucket = new s3.Bucket(this, 'FrontendBucket', {

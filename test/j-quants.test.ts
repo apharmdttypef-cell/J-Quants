@@ -730,8 +730,9 @@ test('schedules the two one-time forecast validation snapshots via EventBridge S
     }),
   });
 
-  const schedules = template.findResources('AWS::Scheduler::Schedule');
-  expect(Object.keys(schedules)).toHaveLength(2);
+  // 合計のAWS::Scheduler::Scheduleリソース数(2→4)の確認はTask 2で追加した
+  // 「schedules the two one-time actuals-fetch runs...」テストが担う。このテストは
+  // スナップショットA/Bの2つのプロパティ検証にスコープを絞る。
 });
 
 test('creates the ForecastActualsFunction wired to the actual table and the validation bucket (read+write)', () => {
@@ -788,4 +789,43 @@ test('creates the ForecastActualsFunction wired to the actual table and the vali
       (actions, resourceStr) => actions.some((a) => a.includes('GetObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
     ),
   ).toBe(true);
+});
+
+test('schedules the two one-time actuals-fetch runs via EventBridge Scheduler at the correct JST wall-clock times', () => {
+  const template = synth();
+
+  // ForecastSnapshotA/Bと同じ仕組み: scheduler.ScheduleExpression.at(date, timeZone)は
+  // dateのtoISOString()の数字をat(...)リテラルにそのまま埋め込み、timeZoneはその数字を
+  // どのタイムゾーンの現地時刻として解釈するかを別途指定する。ScheduleExpressionの文字列
+  // 自体はJSTの壁時計表記(20:00)のまま、Timezoneフィールドで'Asia/Tokyo'を指定して初めて
+  // 正しい実時刻(UTC 11:00)になる。この2つが揃っていることを確認しないと、UTC変換を
+  // 誤って9時間ずれるバグを再発検知できない。
+  template.hasResourceProperties('AWS::Scheduler::Schedule', {
+    ScheduleExpression: 'at(2026-09-29T20:00:00)',
+    ScheduleExpressionTimezone: 'Asia/Tokyo',
+    Target: Match.objectLike({
+      Input: Match.serializedJson(
+        Match.objectLike({
+          rightsDate: '2026-09-28',
+          fetchedLabel: '2026-09-29T2000JST',
+        }),
+      ),
+    }),
+  });
+
+  template.hasResourceProperties('AWS::Scheduler::Schedule', {
+    ScheduleExpression: 'at(2026-10-02T20:00:00)',
+    ScheduleExpressionTimezone: 'Asia/Tokyo',
+    Target: Match.objectLike({
+      Input: Match.serializedJson(
+        Match.objectLike({
+          rightsDate: '2026-09-28',
+          fetchedLabel: '2026-10-02T2000JST',
+        }),
+      ),
+    }),
+  });
+
+  const schedules = template.findResources('AWS::Scheduler::Schedule');
+  expect(Object.keys(schedules)).toHaveLength(4);
 });
