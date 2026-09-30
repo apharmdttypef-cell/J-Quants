@@ -10,6 +10,50 @@ function synth() {
   return Template.fromStack(stack);
 }
 
+// bin/j-quants.tsは通常Secrets Managerから読んだ値をappPasswordプロパティで渡す
+// (デプロイ時に毎回環境変数を打たずに済むようにするため)。環境変数は初回デプロイと
+// ローテーション時のフォールバック。両方の経路が同じ場所に反映されることを検証する。
+test('appPassword prop takes precedence over the APP_PASSWORD env var, and both reach the secret and the CloudFront Function', () => {
+  const app = new cdk.App();
+  const stack = new JQuantsStack(app, 'PropPasswordStack', { appPassword: 'from-prop' });
+  const template = Template.fromStack(stack);
+
+  // Secrets Manager側
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Name: 'JQuantsAppPassword',
+    SecretString: 'from-prop',
+  });
+
+  // CloudFront Function側(Basic認証は`jquants:<password>`のbase64を埋め込む)
+  const expected = Buffer.from('jquants:from-prop').toString('base64');
+  const functions = template.findResources('AWS::CloudFront::Function');
+  const codes = Object.values(functions).map(
+    (f) => (f as { Properties: { FunctionCode: string } }).Properties.FunctionCode,
+  );
+  expect(codes.some((c) => c.includes(expected))).toBe(true);
+  // 環境変数の値(test-app-password)が使われていないこと
+  expect(codes.some((c) => c.includes(Buffer.from('jquants:test-app-password').toString('base64')))).toBe(false);
+});
+
+test('falls back to the APP_PASSWORD env var when no appPassword prop is given', () => {
+  const template = synth(); // propsなし → process.env.APP_PASSWORD = 'test-app-password'
+
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Name: 'JQuantsAppPassword',
+    SecretString: 'test-app-password',
+  });
+});
+
+test('throws when neither the appPassword prop nor the APP_PASSWORD env var is available', () => {
+  const saved = process.env.APP_PASSWORD;
+  delete process.env.APP_PASSWORD;
+  try {
+    expect(() => new JQuantsStack(new cdk.App(), 'NoPasswordStack')).toThrow(/appPassword prop or APP_PASSWORD/);
+  } finally {
+    process.env.APP_PASSWORD = saved;
+  }
+});
+
 test('creates the JQuantsStockPrices table with ticker/date key and RETAIN policy', () => {
   const template = synth();
 
