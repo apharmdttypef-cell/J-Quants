@@ -584,16 +584,20 @@ test('reference-api has read access to the tdnet event table', () => {
 test('the yutai detail sync Lambda has the yutai master table and a long timeout', () => {
   const template = synth();
 
-  template.hasResourceProperties('AWS::Lambda::Function', {
-    Timeout: 840,
-    MemorySize: 256,
-    Environment: {
-      Variables: Match.objectLike({
-        YUTAI_MASTER_TABLE_NAME: { Ref: Match.anyValue() },
-      }),
-    },
-    Handler: 'index.handler',
-  });
+  // Timeout/MemorySize/Environmentは既存の兄弟Lambdaも同じ値を持つため、プロパティだけの
+  // 照合では新Lambdaが無くても通ってしまう。論理IDの接頭辞(CDKがハッシュを付ける)で
+  // 対象を特定してから検証する。
+  const functions = template.findResources('AWS::Lambda::Function');
+  const detailSync = Object.entries(functions).filter(([logicalId]) =>
+    logicalId.startsWith('YutaiDetailSyncBatchFunction'),
+  );
+  expect(detailSync).toHaveLength(1);
+
+  const props = detailSync[0][1].Properties;
+  expect(props.Timeout).toBe(840);
+  expect(props.MemorySize).toBe(256);
+  expect(props.Handler).toBe('index.handler');
+  expect(props.Environment.Variables.YUTAI_MASTER_TABLE_NAME.Ref).toMatch(/YutaiMasterTable/);
 });
 
 test('the detail sync state machine fans out to nine code-prefix buckets one at a time', () => {
@@ -625,6 +629,9 @@ test('the detail sync batch has no EventBridge schedule of its own', () => {
   // 優待条件は年1回も変わらないため手動運用。スケジュールを足すと
   // kabuyutai.comへ無意味な定期アクセスを続けることになる。
   const template = synth();
+  // 関数が存在しないと「含まない」が自明に成り立つため、先に存在を確認する。
+  const functionIds = Object.keys(template.findResources('AWS::Lambda::Function'));
+  expect(functionIds.some((id) => id.startsWith('YutaiDetailSyncBatchFunction'))).toBe(true);
   const rules = template.findResources('AWS::Events::Rule');
   const targets = Object.values(rules).flatMap((rule) => rule.Properties.Targets ?? []);
   const targetArns = JSON.stringify(targets);
