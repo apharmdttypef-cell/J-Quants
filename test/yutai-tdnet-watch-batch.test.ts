@@ -368,3 +368,35 @@ test('swallows a ConditionalCheckFailedException on the event PutCommand without
     errorSpy.mockRestore();
   }
 });
+
+test('removes conditionCheckedAt so the detail page is re-read after a TDnet change', async () => {
+  // 既存テストと同じく、1日分の開示に優待関連のタイトルを1件だけ含めるHTMLを返す。
+  mockFetch.mockResolvedValue({
+    ok: true,
+    status: 200,
+    text: async () => dayListHtml([{ code: '74720', name: '鳥羽洋行', title: '株主優待制度の一部変更に関するお知らせ' }]),
+  });
+  mockFetchAllListings.mockResolvedValueOnce([
+    {
+      ticker: '7472',
+      companyName: '鳥羽洋行',
+      content: 'オリジナルQUOカード（1,000円相当～）',
+      rightsMonths: [5],
+      value: 1000,
+      minInvestment: 196800,
+      detailUrl: 'https://www.kabuyutai.com/kobetu/toba.html',
+      listBadge: 'chouki',
+    },
+  ]);
+  mockSend.mockResolvedValue({ Item: { ticker: '7472' } });
+
+  await handler();
+
+  const update = mockSend.mock.calls
+    .map((call) => call[0] as { UpdateExpression?: string; ExpressionAttributeValues?: Record<string, unknown> })
+    .find((input) => typeof input.UpdateExpression === 'string');
+  expect(update).toBeDefined();
+  expect(update!.UpdateExpression).toContain('REMOVE conditionCheckedAt');
+  expect(update!.ExpressionAttributeValues![':detailUrl']).toBe('https://www.kabuyutai.com/kobetu/toba.html');
+  expect(update!.ExpressionAttributeValues![':listBadge']).toBe('chouki');
+});

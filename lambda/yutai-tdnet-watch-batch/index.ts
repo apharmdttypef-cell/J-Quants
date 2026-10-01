@@ -182,8 +182,11 @@ export const handler = async (): Promise<void> => {
         new UpdateCommand({
           TableName: YUTAI_MASTER_TABLE_NAME,
           Key: { ticker: entry.ticker },
+          // conditionCheckedAtを消すことで、次のyutai-detail-sync-batchがこの銘柄を
+          // 「未取得」として拾い直す。ここで個別ページを同期取得しないのは、優待関連の
+          // 開示が多い週に該当銘柄が増えると14分のタイムアウトに近づくため。
           UpdateExpression:
-            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths',
+            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths, detailUrl = :detailUrl, listBadge = :listBadge REMOVE conditionCheckedAt',
           ExpressionAttributeNames: { '#content': 'content', '#value': 'value' },
           ExpressionAttributeValues: {
             ':companyName': entry.companyName,
@@ -192,6 +195,8 @@ export const handler = async (): Promise<void> => {
             ':unitShares': UNIT_SHARES,
             ':minInvestment': entry.minInvestment ?? null,
             ':rightsMonths': entry.rightsMonths,
+            ':detailUrl': entry.detailUrl ?? null,
+            ':listBadge': entry.listBadge ?? null,
           },
         }),
       );

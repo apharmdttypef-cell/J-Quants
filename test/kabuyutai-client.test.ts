@@ -54,6 +54,8 @@ describe('parseListPage', () => {
         rightsMonths: [2, 8],
         value: 2000,
         minInvestment: 102200,
+        detailUrl: 'https://www.kabuyutai.com/kobetu/koshidakaholdings.html',
+        listBadge: null,
       },
       {
         ticker: '2164',
@@ -62,6 +64,8 @@ describe('parseListPage', () => {
         rightsMonths: [2, 8],
         value: 9000,
         minInvestment: 8512,
+        detailUrl: 'https://www.kabuyutai.com/kobetu/chiikinews.html',
+        listBadge: null,
       },
     ]);
   });
@@ -85,6 +89,8 @@ describe('parseListPage', () => {
         rightsMonths: [3],
         value: undefined,
         minInvestment: undefined,
+        detailUrl: 'x',
+        listBadge: null,
       },
     ]);
   });
@@ -107,6 +113,8 @@ describe('parseListPage', () => {
         rightsMonths: [8],
         value: 500,
         minInvestment: undefined,
+        detailUrl: 'x',
+        listBadge: null,
       },
     ]);
   });
@@ -132,6 +140,8 @@ describe('parseListPage', () => {
         rightsMonths: [3, 9],
         value: 7871,
         minInvestment: 303900,
+        detailUrl: 'x',
+        listBadge: null,
       },
     ]);
   });
@@ -287,4 +297,53 @@ describe('findTicker', () => {
     expect(mockFetch).toHaveBeenCalledTimes(12);
     expect(result).toBeUndefined();
   });
+});
+
+// 長期保有バッジ付きのブロック。「長期優遇あり」は長期保有で優待が上乗せされる
+// (1回のクロスでも最低段階は取れる)、「長期優待のみ」は長期保有者限定で
+// クロスでは取れない。クラス属性は choukinomi の方が "chouki choukinomi" と
+// 2トークン持つため、トークン単位で判定する。
+const BADGED_PAGE_HTML = `
+<!-- ▼ランキング_ブロック -->
+<div class="table_tr">
+<div class="chouki tooltip">長期優遇あり<span class="tooltiptext">長期保有で優待が増えます</span></div>
+<div class="table_tr_inner">
+<div class="table_tr_info">
+<p><a href="https://www.kabuyutai.com/kobetu/toba.html" class="kigyoumei">鳥羽洋行</a>（7472）</p>
+<p>【優待内容】オリジナルQUOカード（1,000円相当～）</p>
+<p>【権利確定月】<span class="tousi_price">5月</span></p>
+<p>【必要投資金額】<span class="tousi_price">196,800円</span></p>
+</div>
+</div>
+</div>
+<!-- ▲ランキング_ブロック -->
+<!-- ▼ランキング_ブロック -->
+<div class="table_tr">
+<div class="chouki choukinomi tooltip">長期優待のみ<span class="tooltiptext">優待がもらえるのは長期株式保有株主に限られます</span></div>
+<div class="table_tr_inner">
+<div class="table_tr_info">
+<p><a href="https://www.kabuyutai.com/kobetu/maitake.html" class="kigyoumei">マイタケ</a>（1375）</p>
+<p>【優待内容】自社製品セット（3,000円相当～）</p>
+<p>【権利確定月】<span class="tousi_price">3月</span></p>
+<p>【必要投資金額】<span class="tousi_price">120,000円</span></p>
+</div>
+</div>
+</div>
+<!-- ▲ランキング_ブロック -->
+`;
+
+test('parseListPage captures the detail page URL from the kigyoumei anchor', () => {
+  const entries = parseListPage(SAMPLE_PAGE_HTML);
+  expect(entries.map((e) => e.detailUrl)).toEqual([
+    'https://www.kabuyutai.com/kobetu/koshidakaholdings.html',
+    'https://www.kabuyutai.com/kobetu/chiikinews.html',
+  ]);
+  // 既存の抽出が壊れていないこと(href捕捉でキャプチャ番号がずれるため)
+  expect(entries.map((e) => e.companyName)).toEqual(['コシダカホールディングス', '地域新聞社']);
+  expect(entries.map((e) => e.ticker)).toEqual(['2157', '2164']);
+});
+
+test('parseListPage distinguishes the two long-holding badges and no badge at all', () => {
+  expect(parseListPage(BADGED_PAGE_HTML).map((e) => e.listBadge)).toEqual(['chouki', 'choukinomi']);
+  expect(parseListPage(SAMPLE_PAGE_HTML).map((e) => e.listBadge)).toEqual([null, null]);
 });

@@ -1,3 +1,9 @@
+// 一覧ページの長期保有バッジ。'chouki' = 「長期優遇あり」(長期保有で上乗せ。
+// 1回のクロスでも最低段階は取れる)、'choukinomi' = 「長期優待のみ」
+// (長期保有者限定でクロスでは取れない)、null = バッジなし(継続保有条件なし)。
+// 個別ページの解析が失敗したときのクロス可否のフォールバックに使う。
+export type ListBadge = 'chouki' | 'choukinomi' | null;
+
 export interface KabuyutaiEntry {
   ticker: string;
   companyName: string;
@@ -9,6 +15,11 @@ export interface KabuyutaiEntry {
   // 呼び出し元(yutai-risk-precompute-batch)が現在株価と突き合わせて実際の必要株数を
   // 逆算するために使う。
   minInvestment: number | undefined;
+  // 個別ページのURL。一覧ページの企業名リンク(class="kigyoumei")のhrefそのもの。
+  // yutai-detail-sync-batchが株数段階・継続保有条件を取りに行くのに使う
+  // (URLの命名規則を推測する必要がない)。
+  detailUrl: string | undefined;
+  listBadge: ListBadge;
 }
 
 const KABUYUTAI_BASE_URL = 'https://www.kabuyutai.com';
@@ -85,6 +96,15 @@ function extractMinInvestment(block: string): number | undefined {
   return Number.isNaN(value) ? undefined : value;
 }
 
+// 長期保有バッジを抽出する。class属性は「長期優遇あり」が class="chouki tooltip"、
+// 「長期優待のみ」が class="chouki choukinomi tooltip" で、後者も chouki を含む。
+// クラスの並び順に依存しないようトークン単位で判定する。
+function extractListBadge(block: string): ListBadge {
+  const match = block.match(/<div class="([^"]*\bchouki\b[^"]*)"/);
+  if (!match) return null;
+  return /\bchoukinomi\b/.test(match[1]) ? 'choukinomi' : 'chouki';
+}
+
 // 一覧ページの「優待利回り」(例: 2.59％)を抽出する。
 function extractYieldPercent(block: string): number | undefined {
   const match = block.match(/【優待利回り】<span class="tousi_price">([\d.]+)％<\/span>/);
@@ -97,7 +117,7 @@ export function parseListPage(html: string): KabuyutaiEntry[] {
   const entries: KabuyutaiEntry[] = [];
 
   for (const block of splitBlocks(html)) {
-    const nameMatch = block.match(/<p><a href="[^"]+" class="kigyoumei">([^<]+)<\/a>（(\d{4})）<\/p>/);
+    const nameMatch = block.match(/<p><a href="([^"]+)" class="kigyoumei">([^<]+)<\/a>（(\d{4})）<\/p>/);
     const contentMatch = block.match(/【優待内容】([^<]+)/);
     const monthsMatch = block.match(/【権利確定月】<span class="tousi_price">([^<]+)<\/span>/);
     if (!nameMatch || !contentMatch || !monthsMatch) continue;
@@ -105,12 +125,14 @@ export function parseListPage(html: string): KabuyutaiEntry[] {
     const content = contentMatch[1].trim();
     const minInvestment = extractMinInvestment(block);
     entries.push({
-      companyName: nameMatch[1],
-      ticker: nameMatch[2],
+      companyName: nameMatch[2],
+      ticker: nameMatch[3],
       content,
       rightsMonths: parseRightsMonths(monthsMatch[1]),
       value: extractValue(content) ?? estimateValueFromYield(minInvestment, extractYieldPercent(block)),
       minInvestment,
+      detailUrl: nameMatch[1],
+      listBadge: extractListBadge(block),
     });
   }
 

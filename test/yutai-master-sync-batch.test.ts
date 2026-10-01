@@ -112,3 +112,53 @@ test('continues past a single upsert failure and processes the remaining entries
     errorSpy.mockRestore();
   }
 });
+
+test('persists detailUrl and listBadge from the list page', async () => {
+  mockFetchAllListings.mockResolvedValueOnce([
+    {
+      ticker: '7472',
+      companyName: '鳥羽洋行',
+      content: 'オリジナルQUOカード（1,000円相当～）',
+      rightsMonths: [5],
+      value: 1000,
+      minInvestment: 196800,
+      detailUrl: 'https://www.kabuyutai.com/kobetu/toba.html',
+      listBadge: 'chouki',
+    },
+  ]);
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  expect(mockSend).toHaveBeenCalledTimes(1);
+  const input = mockSend.mock.calls[0][0] as {
+    UpdateExpression: string;
+    ExpressionAttributeValues: Record<string, unknown>;
+  };
+  expect(input.UpdateExpression).toContain('detailUrl = :detailUrl');
+  expect(input.UpdateExpression).toContain('listBadge = :listBadge');
+  expect(input.ExpressionAttributeValues[':detailUrl']).toBe('https://www.kabuyutai.com/kobetu/toba.html');
+  expect(input.ExpressionAttributeValues[':listBadge']).toBe('chouki');
+});
+
+test('writes null for a ticker with no badge and no detail URL', async () => {
+  mockFetchAllListings.mockResolvedValueOnce([
+    {
+      ticker: '2157',
+      companyName: 'コシダカホールディングス',
+      content: '割引券（2,000円相当～）',
+      rightsMonths: [2, 8],
+      value: 2000,
+      minInvestment: 102200,
+      detailUrl: undefined,
+      listBadge: null,
+    },
+  ]);
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  const input = mockSend.mock.calls[0][0] as { ExpressionAttributeValues: Record<string, unknown> };
+  expect(input.ExpressionAttributeValues[':detailUrl']).toBeNull();
+  expect(input.ExpressionAttributeValues[':listBadge']).toBeNull();
+});

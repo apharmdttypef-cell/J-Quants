@@ -34,7 +34,7 @@ export const handler = async (): Promise<void> => {
           TableName: YUTAI_MASTER_TABLE_NAME,
           Key: { ticker: entry.ticker },
           UpdateExpression:
-            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths',
+            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths, detailUrl = :detailUrl, listBadge = :listBadge',
           ExpressionAttributeNames: { '#content': 'content', '#value': 'value' },
           ExpressionAttributeValues: {
             ':companyName': entry.companyName,
@@ -43,6 +43,8 @@ export const handler = async (): Promise<void> => {
             ':unitShares': UNIT_SHARES,
             ':minInvestment': entry.minInvestment ?? null,
             ':rightsMonths': entry.rightsMonths,
+            ':detailUrl': entry.detailUrl ?? null,
+            ':listBadge': entry.listBadge ?? null,
           },
         }),
       );
