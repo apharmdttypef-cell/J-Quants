@@ -1,0 +1,130 @@
+// kabuyutai.comの個別ページから株数段階別の優待内容を取り出す。純関数のみで、
+// ネットワークには触れない(取得はkabuyutai-client.fetchDetailPageの責務)。
+
+export interface BenefitTier {
+  shares: number;
+  // 金額が読み取れない段階(「ー」= 該当なし、自社製品の個数表記など)はnull。
+  // 表示にはrawTextを使うため、nullでも情報は失われない。
+  valueYen: number | null;
+  rawText: string;
+}
+
+export interface BenefitGroup {
+  // <h3>の優待種別。セクション先頭にh3が無い場合はnull。
+  title: string | null;
+  // 継続保有条件の月数。条件なしはnull。
+  holdingMonths: number | null;
+  holdingRaw: string | null;
+  tiers: BenefitTier[];
+}
+
+// セクションの終端候補。段階表は文書のかなり後方(実測で約74%の位置)にあるため、
+// 終端候補は「必ず段階表より後ろに現れるもの」に限らなければならない。開発中に
+// '<div class="comment' を候補に入れたところ段階表より手前でマッチし、全銘柄で
+// パース結果が0件になった(2026-10-01)。
+const SECTION_END_ANCHORS = ['この企業の公式ホームページ', 'の優待権利確定日情報', 'id="yutai_kijunbi"'];
+
+function detailSection(html: string): string | null {
+  const start = html.indexOf('id="yutai_detail"');
+  if (start === -1) return null;
+
+  let end = html.length;
+  for (const anchor of SECTION_END_ANCHORS) {
+    const position = html.indexOf(anchor, start);
+    if (position !== -1 && position < end) end = position;
+  }
+  return html.slice(start, end);
+}
+
+// 「継続保有期間3年以上」「継続保有期間6か月以上」の両表記を月数に正規化する。
+// 「ヶ月」「カ月」の表記ゆれも受ける。rawは「以上」まで含めて原文のまま残す。
+function parseHolding(text: string): { months: number; raw: string } | null {
+  const match = text.match(/継続保有期間\s*(\d+)\s*(年|ヶ月|か月|カ月)(?:以上)?/);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  return { months: match[2] === '年' ? amount * 12 : amount, raw: match[0] };
+}
+
+function parseTiers(tableHtml: string): BenefitTier[] {
+  const tiers: BenefitTier[] = [];
+
+  for (const row of tableHtml.matchAll(/<tr>\s*<td>([^<]*)<\/td>\s*<td>([\s\S]*?)<\/td>/g)) {
+    const sharesMatch = row[1].trim().match(/^([\d,]+)\s*株/);
+    // 株数列でない行(「権利確定月」等の説明行)は段階ではない。
+    if (!sharesMatch) continue;
+
+    const rawText = row[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    // 選択式(【下記から1点を選択】)は先頭の金額を採る。実データでは選択肢の金額が
+    // 揃っているため先頭で足りる(揃っていない銘柄が出たら設計を見直す)。
+    const valueMatch = rawText.match(/([\d,]+)\s*円/);
+
+    tiers.push({
+      shares: Number(sharesMatch[1].replace(/,/g, '')),
+      valueYen: valueMatch ? Number(valueMatch[1].replace(/,/g, '')) : null,
+      rawText,
+    });
+  }
+
+  return tiers;
+}
+
+type Token =
+  | { kind: 'title'; text: string }
+  | { kind: 'holding'; text: string }
+  | { kind: 'table'; html: string };
+
+// h3 / stit / table を出現順に並べる。並び順そのものが意味を持つ(stitは直後の表に、
+// h3はそれ以降の表に効く)ため、種類ごとに別々に集めてはならない。
+function tokenize(section: string): Token[] {
+  const tokens: Token[] = [];
+  const pattern = /<h3>([\s\S]*?)<\/h3>|<div class="stit">([^<]*)<\/div>|<table[^>]*>([\s\S]*?)<\/table>/g;
+
+  for (let match = pattern.exec(section); match !== null; match = pattern.exec(section)) {
+    if (match[1] !== undefined) {
+      tokens.push({ kind: 'title', text: match[1].replace(/<[^>]+>/g, '').trim() });
+    } else if (match[2] !== undefined) {
+      tokens.push({ kind: 'holding', text: match[2].trim() });
+    } else {
+      tokens.push({ kind: 'table', html: match[3] });
+    }
+  }
+
+  return tokens;
+}
+
+export function parseBenefitDetail(html: string): BenefitGroup[] {
+  const section = detailSection(html);
+  if (section === null) return [];
+
+  const groups: BenefitGroup[] = [];
+  let title: string | null = null;
+  let holding: { months: number; raw: string } | null = null;
+
+  for (const token of tokenize(section)) {
+    if (token.kind === 'title') {
+      // 新しい優待種別に入ったら継続保有条件はリセットする。ノジマのように
+      // 「条件なしの表 → 2年以上の表 → 次の種別の条件なしの表」と並ぶため、
+      // h3を越えてstitを引き継ぐと条件なしの表を誤って条件付きにしてしまう。
+      title = token.text;
+      holding = null;
+      continue;
+    }
+    if (token.kind === 'holding') {
+      holding = parseHolding(token.text);
+      continue;
+    }
+
+    const tiers = parseTiers(token.html);
+    // 株数段階を1つも含まない表は優待内容の表ではない。
+    if (tiers.length === 0) continue;
+
+    groups.push({
+      title,
+      holdingMonths: holding?.months ?? null,
+      holdingRaw: holding?.raw ?? null,
+      tiers,
+    });
+  }
+
+  return groups;
+}
