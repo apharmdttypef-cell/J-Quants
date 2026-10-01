@@ -1,4 +1,4 @@
-import { parseBenefitDetail } from '../lambda/shared/kabuyutai-detail';
+import { parseBenefitDetail, deriveBenefitScalars } from '../lambda/shared/kabuyutai-detail';
 
 // 2026-10-01 に実ページから取得した断片。設計書
 // docs/superpowers/specs/2026-10-01-yutai-condition-master-design.md の表の
@@ -179,4 +179,107 @@ test('skips tables that have no share rows', () => {
 <p>この企業の公式ホームページ</p>
 `;
   expect(parseBenefitDetail(html)).toEqual([]);
+});
+
+test('derives bonus kind when an unconditional group sits alongside a long-holding one', () => {
+  const derived = deriveBenefitScalars(parseBenefitDetail(TOBA_HTML), 'chouki');
+  expect(derived).toEqual({
+    requiredShares: 100,
+    holdingKind: 'bonus',
+    holdingMinMonths: null,
+    crossEligible: 'ok',
+    minTierValueYen: 1000,
+    benefitParseWarning: null,
+  });
+});
+
+test('picks the easiest holding group when several share the minimum tier', () => {
+  // ミライトは1年以上と3年以上の両方に100株段階がある。クロス後に実際に
+  // 到達しやすいのは1年以上の方なので、その価値(1,000円)を採る。
+  const derived = deriveBenefitScalars(parseBenefitDetail(MIRAIT_HTML), 'choukinomi');
+  expect(derived.requiredShares).toBe(100);
+  expect(derived.holdingKind).toBe('required');
+  expect(derived.holdingMinMonths).toBe(12);
+  expect(derived.crossEligible).toBe('ng');
+  expect(derived.minTierValueYen).toBe(1000);
+  expect(derived.benefitParseWarning).toBeNull();
+});
+
+test('derives required kind from a single long-holding group', () => {
+  const derived = deriveBenefitScalars(parseBenefitDetail(MAITAKE_HTML), 'choukinomi');
+  expect(derived.holdingKind).toBe('required');
+  expect(derived.holdingMinMonths).toBe(6);
+  expect(derived.crossEligible).toBe('ng');
+  expect(derived.requiredShares).toBe(100);
+  expect(derived.minTierValueYen).toBe(3000);
+});
+
+test('derives none kind and an above-unit required share count', () => {
+  const derived = deriveBenefitScalars(parseBenefitDetail(DKKARAOKE_HTML), null);
+  expect(derived.holdingKind).toBe('none');
+  expect(derived.holdingMinMonths).toBeNull();
+  expect(derived.crossEligible).toBe('ok');
+  expect(derived.requiredShares).toBe(200);
+  expect(derived.minTierValueYen).toBe(5000);
+  expect(derived.benefitParseWarning).toBeNull();
+});
+
+test('ignores long-holding groups when choosing the required share count', () => {
+  // ノジマの条件なしグループは300株・10,000株・3,000株。2年以上グループの
+  // 300株に引きずられず、条件なしの最小(300株=15,000円)を採る。
+  const derived = deriveBenefitScalars(parseBenefitDetail(NOJIMA_HTML), 'chouki');
+  expect(derived.requiredShares).toBe(300);
+  expect(derived.holdingKind).toBe('bonus');
+  expect(derived.crossEligible).toBe('ok');
+  expect(derived.minTierValueYen).toBe(15000);
+});
+
+test('warns when the same benefit type and holding period appear twice', () => {
+  // ノジマは「ポイント/2年以上」のグループが2つ現れる(年2回の中間/期末の
+  // 区別がパーサーで落ちている)。表示用途では許容するが、黙って見過ごさない。
+  const derived = deriveBenefitScalars(parseBenefitDetail(NOJIMA_HTML), 'chouki');
+  expect(derived.benefitParseWarning).toBe('duplicate-groups');
+});
+
+test('warns and falls back to the badge when nothing could be parsed', () => {
+  expect(deriveBenefitScalars([], 'choukinomi')).toEqual({
+    requiredShares: null,
+    holdingKind: 'unknown',
+    holdingMinMonths: null,
+    crossEligible: 'ng',
+    minTierValueYen: null,
+    benefitParseWarning: 'no-groups',
+  });
+  expect(deriveBenefitScalars([], 'chouki').crossEligible).toBe('ok');
+  expect(deriveBenefitScalars([], null).crossEligible).toBe('ok');
+  // バッジ自体が未取得(この変更より前に同期された行)なら判定できない
+  expect(deriveBenefitScalars([], undefined).crossEligible).toBe('unknown');
+});
+
+test('warns when no tier anywhere has a readable yen amount', () => {
+  const groups = [
+    { title: '◎自社製品', holdingMonths: null, holdingRaw: null, tiers: [{ shares: 100, valueYen: null, rawText: '自社製品1点' }] },
+  ];
+  const derived = deriveBenefitScalars(groups, null);
+  expect(derived.benefitParseWarning).toBe('no-values');
+  expect(derived.minTierValueYen).toBeNull();
+  // 金額が読めなくても必要株数は確定できる
+  expect(derived.requiredShares).toBe(100);
+});
+
+test('warns when the badge disagrees with the parsed holding conditions', () => {
+  // バッジは「長期優待のみ」(=クロス不可)だが、個別ページには条件なしの
+  // グループがある。どちらかの解析が壊れているので可視化する。
+  const derived = deriveBenefitScalars(parseBenefitDetail(DKKARAOKE_HTML), 'choukinomi');
+  expect(derived.benefitParseWarning).toBe('badge-mismatch');
+  // 食い違ったときは保有条件の原文を読んでいる個別ページ側を採る
+  expect(derived.crossEligible).toBe('ok');
+});
+
+test('joins several warnings with a comma', () => {
+  const groups = [
+    { title: '◎A', holdingMonths: 24, holdingRaw: '継続保有期間2年以上', tiers: [{ shares: 100, valueYen: null, rawText: 'ー' }] },
+    { title: '◎A', holdingMonths: 24, holdingRaw: '継続保有期間2年以上', tiers: [{ shares: 100, valueYen: null, rawText: 'ー' }] },
+  ];
+  expect(deriveBenefitScalars(groups, null).benefitParseWarning).toBe('duplicate-groups,no-values,badge-mismatch');
 });

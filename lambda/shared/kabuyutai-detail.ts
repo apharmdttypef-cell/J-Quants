@@ -1,6 +1,10 @@
 // kabuyutai.comの個別ページから株数段階別の優待内容を取り出す。純関数のみで、
 // ネットワークには触れない(取得はkabuyutai-client.fetchDetailPageの責務)。
 
+// 型だけを取り込む。kabuyutai-clientはfetchを含むため、値のimportにすると
+// この純関数モジュールとそのテストにネットワークコードが混ざる。
+import type { ListBadge } from './kabuyutai-client';
+
 export interface BenefitTier {
   shares: number;
   // 金額が読み取れない段階(「ー」= 該当なし、自社製品の個数表記など)はnull。
@@ -127,4 +131,101 @@ export function parseBenefitDetail(html: string): BenefitGroup[] {
   }
 
   return groups;
+}
+
+export type HoldingKind = 'none' | 'bonus' | 'required' | 'unknown';
+export type CrossEligible = 'ok' | 'ng' | 'unknown';
+
+export interface DerivedBenefitScalars {
+  requiredShares: number | null;
+  holdingKind: HoldingKind;
+  holdingMinMonths: number | null;
+  crossEligible: CrossEligible;
+  minTierValueYen: number | null;
+  // 解析の不完全さの理由をカンマ区切りで連結する(例 'duplicate-groups,no-values')。
+  // 該当なしはnull。画面で「この銘柄は要確認」と出すために使う。
+  benefitParseWarning: string | null;
+}
+
+// 一覧ページのバッジだけから見たクロス可否。'chouki'(長期優遇あり)は長期保有で
+// 上乗せされるだけなので最低段階はクロスで取れる。バッジなしも条件なしなので取れる。
+function crossEligibleFromBadge(listBadge: ListBadge | undefined): CrossEligible {
+  if (listBadge === undefined) return 'unknown';
+  return listBadge === 'choukinomi' ? 'ng' : 'ok';
+}
+
+// requiredShares と minTierValueYen を一意に決める。実データでは同じ株数の段階が
+// 複数グループに現れる(鳥羽洋行の100株は「条件なし=1,000円」と「3年以上=2,000円」の
+// 両方にある)ため、株数だけで価値を決めてはならない。
+function chooseGroup(groups: BenefitGroup[]): { group: BenefitGroup; shares: number } | null {
+  // クロスで取れるグループを優先する。1つも無ければ(全グループが継続保有必須)
+  // 全グループを候補にして「保有条件を満たせば何株必要か」を示す。
+  const unconditional = groups.filter((group) => group.holdingMonths === null);
+  const candidates = unconditional.length > 0 ? unconditional : groups;
+
+  const allShares = candidates.flatMap((group) => group.tiers.map((tier) => tier.shares));
+  if (allShares.length === 0) return null;
+  const shares = Math.min(...allShares);
+
+  // 同じ最小株数を持つグループが複数あれば、継続保有期間が短い方(= 到達しやすい方)を
+  // 採り、それも同じなら文書順で先のものを採る。sortは安定なので文書順は保たれる。
+  const holders = candidates
+    .filter((group) => group.tiers.some((tier) => tier.shares === shares))
+    .sort((a, b) => (a.holdingMonths ?? -1) - (b.holdingMonths ?? -1));
+
+  return { group: holders[0], shares };
+}
+
+export function deriveBenefitScalars(
+  groups: BenefitGroup[],
+  listBadge: ListBadge | undefined,
+): DerivedBenefitScalars {
+  if (groups.length === 0) {
+    // 解析できなかった場合だけ一覧ページのバッジに頼る。バッジは保有条件の有無しか
+    // 分からないので、必要株数や段階の金額は埋められない。
+    return {
+      requiredShares: null,
+      holdingKind: 'unknown',
+      holdingMinMonths: null,
+      crossEligible: crossEligibleFromBadge(listBadge),
+      minTierValueYen: null,
+      benefitParseWarning: 'no-groups',
+    };
+  }
+
+  const conditional = groups.filter((group) => group.holdingMonths !== null);
+  const holdingKind: HoldingKind =
+    conditional.length === groups.length ? 'required' : conditional.length > 0 ? 'bonus' : 'none';
+  const crossEligible: CrossEligible = holdingKind === 'required' ? 'ng' : 'ok';
+
+  const chosen = chooseGroup(groups);
+  const shares = chosen?.shares ?? null;
+  const minTierValueYen =
+    chosen === null
+      ? null
+      : (chosen.group.tiers.find((tier) => tier.shares === chosen.shares)?.valueYen ?? null);
+
+  const warnings: string[] = [];
+
+  const groupKeys = groups.map((group) => `${group.title ?? ''}|${group.holdingMonths ?? ''}`);
+  if (new Set(groupKeys).size !== groupKeys.length) warnings.push('duplicate-groups');
+
+  if (groups.every((group) => group.tiers.every((tier) => tier.valueYen === null))) {
+    warnings.push('no-values');
+  }
+
+  const badgeView = crossEligibleFromBadge(listBadge);
+  if (badgeView !== 'unknown' && badgeView !== crossEligible) warnings.push('badge-mismatch');
+
+  return {
+    requiredShares: shares,
+    holdingKind,
+    // 全グループが継続保有必須のときだけ「最低どれだけ持つ必要があるか」が意味を持つ。
+    // bonusのときは条件なしで取れるので最低保有期間は無い。
+    holdingMinMonths:
+      holdingKind === 'required' ? Math.min(...conditional.map((group) => group.holdingMonths as number)) : null,
+    crossEligible,
+    minTierValueYen,
+    benefitParseWarning: warnings.length > 0 ? warnings.join(',') : null,
+  };
 }
