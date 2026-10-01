@@ -1557,7 +1557,7 @@ import * as stepfunctions_tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
     const detailSyncMap = new stepfunctions.Map(this, 'YutaiDetailSyncBuckets', {
       // 1000台〜9000台。再実行はconditionCheckedAtにより冪等で、成功済みの銘柄は
       // 取り直されない。
-      items: stepfunctions.ProvideItems.fromJson(
+      items: stepfunctions.ProvideItems.jsonArray(
         ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((codePrefix) => ({ codePrefix })),
       ),
       maxConcurrency: 1,
@@ -1572,40 +1572,20 @@ import * as stepfunctions_tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
     });
 ```
 
-- [ ] **Step 5: テストを走らせ、CDK APIの食い違いを直す**
+- [ ] **Step 5: テストを走らせる**
 
 Run: `npx jest j-quants`
 
-`stepfunctions.ProvideItems` / `itemProcessor` / `DefinitionBody` は aws-cdk-lib のバージョンによって名前が違う。コンパイルエラーになった場合は、推測せず実物を読んで合わせる。
+使用する Step Functions の API は aws-cdk-lib 2.263.0 の実物で確認済み(2026-10-02)。
+`ProvideItems.jsonArray` / `ProvideItems.jsonata` の2つだけが存在する(`fromJson` は無い)。
+`Map.prototype.itemProcessor`・`DefinitionBody.fromChainable`・`JsonPath.DISCARD`・
+`TaskInput.fromJsonPathAt`・`stepfunctions_tasks.LambdaInvoke` はいずれも存在する。
+`Map.iterator` は deprecated なので使わない。
 
-```bash
-MSYS_NO_PATHCONV=1 npx tsc --noEmit lib/j-quants-stack.ts 2>&1 | head -20
-grep -n "class Map\|itemProcessor\|ProvideItems\|itemsPath\|DefinitionBody" node_modules/aws-cdk-lib/aws-stepfunctions/lib/states/map.d.ts | head -20
-```
-
-`ProvideItems` が無いバージョンでは、Map の前に `Pass` でリストを注入して `itemsPath` を使う形になる。その場合は以下に置き換える。
-
-```ts
-    const detailSyncSeed = new stepfunctions.Pass(this, 'YutaiDetailSyncSeed', {
-      result: stepfunctions.Result.fromObject({
-        buckets: ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((codePrefix) => ({ codePrefix })),
-      }),
-    });
-
-    const detailSyncMap = new stepfunctions.Map(this, 'YutaiDetailSyncBuckets', {
-      itemsPath: '$.buckets',
-      maxConcurrency: 1,
-    });
-    detailSyncMap.itemProcessor(detailSyncBucket);
-
-    new stepfunctions.StateMachine(this, 'YutaiDetailSyncStateMachine', {
-      stateMachineName: 'JQuantsYutaiDetailSync',
-      definitionBody: stepfunctions.DefinitionBody.fromChainable(detailSyncSeed.next(detailSyncMap)),
-      timeout: cdk.Duration.hours(2),
-    });
-```
-
-`itemProcessor` が無い古いバージョンでは `iterator(detailSyncBucket)` を使う。どちらを使ったかはコメントに残さず、動く形をそのまま採用する。
+`DefinitionString` は `Fn::Join` に展開されるため、テストで中身を文字列として探す際の
+エスケープの形は一度テストを走らせて失敗メッセージで確認し、実際の形に合わせること。
+アサーションの意図(`MaxConcurrency` が 1、9バケット分の `codePrefix` が入っている)は
+変えてはならない。
 
 - [ ] **Step 6: テストが通ることを確認する**
 
