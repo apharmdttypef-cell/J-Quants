@@ -6,6 +6,8 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
+import * as stepfunctions_tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { HttpLambdaAuthorizer, HttpLambdaResponseType } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
@@ -331,6 +333,59 @@ export class JQuantsStack extends cdk.Stack {
     new events.Rule(this, 'YutaiRiskPrecomputeBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '20', hour: '9' }),
       targets: [new targets.LambdaFunction(yutaiRiskPrecomputeBatchFn)],
+    });
+
+    const yutaiDetailSyncBatchFn = new nodejs.NodejsFunction(this, 'YutaiDetailSyncBatchFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'yutai-detail-sync-batch', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      // 1銘柄1リクエスト/秒。最大バケット(3000台・274件)で約5.5分なので14分で足りる。
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+      },
+    });
+
+    this.yutaiMasterTable.grantReadWriteData(yutaiDetailSyncBatchFn);
+
+    // 1,642銘柄を1リクエスト/秒で直列処理すると約33分かかり、Lambdaの15分制限を
+    // 超える。銘柄コード先頭1桁で9バケットに分けて1つずつ回す。
+    //
+    // maxConcurrencyは必ず1。並列にするとkabuyutai.comへ秒9リクエストを送ることに
+    // なり、各Lambda内の1リクエスト/秒ガードが無意味になる。Mapは15分制限の回避の
+    // ためだけに使っており、速くするためではない。
+    const detailSyncBucket = new stepfunctions_tasks.LambdaInvoke(this, 'YutaiDetailSyncBucket', {
+      lambdaFunction: yutaiDetailSyncBatchFn,
+      payload: stepfunctions.TaskInput.fromJsonPathAt('$'),
+      // バケットの戻り値を次の状態に渡さない(Step Functionsのペイロード上限に
+      // 無駄にカウントされないようにする)。
+      resultPath: stepfunctions.JsonPath.DISCARD,
+    });
+
+    detailSyncBucket.addRetry({
+      errors: ['Lambda.ServiceException', 'Lambda.TooManyRequestsException', 'States.Timeout'],
+      maxAttempts: 3,
+      interval: cdk.Duration.seconds(30),
+      backoffRate: 2,
+    });
+
+    const detailSyncMap = new stepfunctions.Map(this, 'YutaiDetailSyncBuckets', {
+      // 1000台〜9000台。再実行はconditionCheckedAtにより冪等で、成功済みの銘柄は
+      // 取り直されない。
+      items: stepfunctions.ProvideItems.jsonArray(
+        ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((codePrefix) => ({ codePrefix })),
+      ),
+      maxConcurrency: 1,
+    });
+    detailSyncMap.itemProcessor(detailSyncBucket);
+
+    new stepfunctions.StateMachine(this, 'YutaiDetailSyncStateMachine', {
+      stateMachineName: 'JQuantsYutaiDetailSync',
+      definitionBody: stepfunctions.DefinitionBody.fromChainable(detailSyncMap),
+      // 9バケット直列で約33分。リトライ込みでも余裕を持たせる。
+      timeout: cdk.Duration.hours(2),
     });
 
     const gyakuhibuForecastBatchFn = new nodejs.NodejsFunction(this, 'GyakuhibuForecastBatchFunction', {

@@ -580,3 +580,53 @@ test('reference-api has read access to the tdnet event table', () => {
   });
   expect(hasEventReadAccess).toBe(true);
 });
+
+test('the yutai detail sync Lambda has the yutai master table and a long timeout', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Timeout: 840,
+    MemorySize: 256,
+    Environment: {
+      Variables: Match.objectLike({
+        YUTAI_MASTER_TABLE_NAME: { Ref: Match.anyValue() },
+      }),
+    },
+    Handler: 'index.handler',
+  });
+});
+
+test('the detail sync state machine fans out to nine code-prefix buckets one at a time', () => {
+  const template = synth();
+
+  // 並列にするとkabuyutai.comへ秒9リクエストを送ることになり、各Lambda内の
+  // 1リクエスト/秒ガードが無意味になる。Mapは15分制限の回避だけが目的なので
+  // MaxConcurrencyは必ず1でなければならない。
+  template.resourceCountIs('AWS::StepFunctions::StateMachine', 1);
+  const machines = template.findResources('AWS::StepFunctions::StateMachine');
+  // DefinitionStringはFn::Joinになり、JSON.stringifyすると二重にエスケープされる
+  // (実測: {\\\"codePrefix\\\":\\\"1\\\"})。エスケープ形に依存しないよう、Joinの文字列片を
+  // 連結してJSONとして読み戻し、中身を直接検証する(Ref/GetAttは文字列内の穴埋めなので
+  // 仮の文字列に置き換えてよい)。
+  const joined = Object.values(machines)[0].Properties.DefinitionString['Fn::Join'][1]
+    .map((part: unknown) => (typeof part === 'string' ? part : 'X'))
+    .join('');
+  const definition = JSON.parse(joined);
+  const map = definition.States.YutaiDetailSyncBuckets;
+
+  expect(map.Type).toBe('Map');
+  expect(map.MaxConcurrency).toBe(1);
+  expect(map.Items).toEqual(
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((codePrefix) => ({ codePrefix })),
+  );
+});
+
+test('the detail sync batch has no EventBridge schedule of its own', () => {
+  // 優待条件は年1回も変わらないため手動運用。スケジュールを足すと
+  // kabuyutai.comへ無意味な定期アクセスを続けることになる。
+  const template = synth();
+  const rules = template.findResources('AWS::Events::Rule');
+  const targets = Object.values(rules).flatMap((rule) => rule.Properties.Targets ?? []);
+  const targetArns = JSON.stringify(targets);
+  expect(targetArns).not.toContain('YutaiDetailSyncBatchFunction');
+});
