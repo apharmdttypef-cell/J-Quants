@@ -2185,9 +2185,10 @@ git commit -m "Use the exact required share count and aggregate past gyakuhibu c
 
 **Interfaces:**
 - Consumes: Task 3/7 でマスタ行に入った属性
-- Produces: 両一覧の各要素に以下を追加。`GET /yutai/:ticker` には加えて `benefitGroups`。
+- Produces: 項目は2層に分ける。
 ```ts
-interface CrossFields {
+// 優待条件(個別ページ由来)。一覧と詳細の両方に出す。
+interface BenefitFields {
   unitShares: number;
   requiredShares: number | null;
   crossEligible: 'ok' | 'ng' | 'unknown';
@@ -2195,12 +2196,18 @@ interface CrossFields {
   holdingMinMonths: number | null;
   minTierValueYen: number | null;
   benefitParseWarning: string | null;
+}
+// 条件 + 価格・コスト。一覧だけに出す。
+interface CrossFields extends BenefitFields {
   closePrice: number | null;
   requiredInvestment: number | null;
   lastGyakuhibu: GyakuhibuActualRef | null;
   sameMonthLastYearGyakuhibu: GyakuhibuActualRef | null;
 }
 ```
+  2層に分ける理由: `GET /yutai/:ticker` は既に `basicInfo.closePrice`(リクエスト時点のライブ値)を返している。そこに precompute のスナップショット値を `closePrice` として並べると、同じ名前で違う値が1つのレスポンスに2つ入る罠になる。詳細は `BenefitFields` だけを受け取り、価格は `basicInfo` 側に一本化する。
+
+  2つの一覧(`GET /yutai`、`GET /yutai/forecast`)は `CrossFields`、`GET /yutai/:ticker` は `BenefitFields` + `benefitGroups`。
   クエリパラメータ `priceMin` / `priceMax` / `investmentMin` / `investmentMax` / `crossEligible` を両一覧で受ける。
 
 - [ ] **Step 1: `test/reference-api.test.ts` に失敗するテストを足す**
@@ -2462,10 +2469,8 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
 `passesYutaiFilters` の近くに置く。
 
 ```ts
-// 2つの一覧(GET /yutai と GET /yutai/forecast)と詳細で共通のクロス判断用項目。
-// 片方だけに足すと「同じ判断が両方の画面でできる」という要件が崩れるため、
-// 必ずこの関数を経由する。
-function buildCrossFields(row: YutaiMasterRow) {
+// 優待条件(個別ページ由来)。2つの一覧と詳細の3箇所で共通。
+function buildBenefitFields(row: YutaiMasterRow) {
   return {
     unitShares: row.unitShares,
     requiredShares: row.requiredShares,
@@ -2474,6 +2479,19 @@ function buildCrossFields(row: YutaiMasterRow) {
     holdingMinMonths: row.holdingMinMonths,
     minTierValueYen: row.minTierValueYen,
     benefitParseWarning: row.benefitParseWarning,
+  };
+}
+
+// 条件 + 価格・コスト。2つの一覧(GET /yutai と GET /yutai/forecast)専用。
+// 片方だけに足すと「同じ判断が両方の画面でできる」という要件が崩れるため、
+// 必ずこの関数を経由する。
+//
+// closePriceはprecomputeが日次で書いたスナップショットで、requiredInvestmentを
+// 算出した元の値。詳細エンドポイントには渡さない — あちらは既にリクエスト時点の
+// ライブ値をbasicInfo.closePriceで返しており、同名で違う値が並ぶのを避ける。
+function buildCrossFields(row: YutaiMasterRow) {
+  return {
+    ...buildBenefitFields(row),
     closePrice: row.closePrice,
     requiredInvestment: row.requiredInvestment,
     lastGyakuhibu: row.lastGyakuhibu,
@@ -2577,16 +2595,16 @@ function passesRange(value: number | null, min: number | undefined, max: number 
     });
 ```
 
-`getYutai` の `jsonResponse(200, {...})` に2つ足す。
+`getYutai` の `jsonResponse(200, {...})` に2つ足す。ここは `buildCrossFields` ではなく `buildBenefitFields` を使う(価格・コストは渡さない)。
 
 ```ts
     rightsHistory: history,
     benefitGroups: master.benefitGroups,
-    ...buildCrossFields(master),
+    ...buildBenefitFields(master),
     features: { tseMargin: tseMarginEnabled() },
 ```
 
-`getYutai` は既に `unitShares: master.unitShares` を返しているので、`buildCrossFields` の展開と重複する。同じ値なので動作は変わらないが、既存の行を削除して `buildCrossFields` 側に寄せる。
+`getYutai` は既に `unitShares: master.unitShares` を返しているので、`buildBenefitFields` の展開と重複する。同じ値なので動作は変わらないが、既存の行を削除して `buildBenefitFields` 側に寄せる。`basicInfo.closePrice` は**そのまま残す**(リクエスト時点のライブ値)。
 
 - [ ] **Step 7: テストを通す**
 
@@ -2622,7 +2640,8 @@ export type YutaiHoldingKind = 'none' | 'bonus' | 'required' | 'unknown';
 export interface BenefitTier { shares: number; valueYen: number | null; rawText: string }
 export interface BenefitGroup { title: string | null; holdingMonths: number | null; holdingRaw: string | null; tiers: BenefitTier[] }
 export interface GyakuhibuActualRef { rightsDate: string; avgRate: number; days: number; perShareRate: number; cost: number; basedOnUnitShares: boolean }
-export interface YutaiCrossFields { /* Task 8 の CrossFields と同じ11項目 */ }
+export interface YutaiBenefitFields { /* Task 8 の BenefitFields と同じ7項目 */ }
+export interface YutaiCrossFields extends YutaiBenefitFields { /* + 価格・コストの4項目 */ }
 
 // lib/yutai-cross.tsx
 export function crossColumns<T extends YutaiCrossFields>(): ColumnDef<T>[];
@@ -2665,9 +2684,8 @@ export interface GyakuhibuActualRef {
   basedOnUnitShares: boolean;
 }
 
-// 2つの一覧と詳細で共通のクロス判断用項目。両方の一覧で同じ判断ができるよう、
-// 列定義(lib/yutai-cross.tsx)はこの型だけに依存させる。
-export interface YutaiCrossFields {
+// 優待条件(個別ページ由来)。2つの一覧と詳細の3箇所で共通。
+export interface YutaiBenefitFields {
   unitShares: number;
   requiredShares: number | null;
   crossEligible: YutaiCrossEligible;
@@ -2675,6 +2693,15 @@ export interface YutaiCrossFields {
   holdingMinMonths: number | null;
   minTierValueYen: number | null;
   benefitParseWarning: string | null;
+}
+
+// 条件 + 価格・コスト。2つの一覧専用。両方の一覧で同じ判断ができるよう、
+// 列定義(lib/yutai-cross.tsx)はこの型だけに依存させる。
+//
+// 詳細(YutaiDetail)はこちらを継承しない。詳細は既にリクエスト時点のライブ値を
+// basicInfo.closePriceで持っており、precomputeのスナップショットを同名で並べると
+// 同じレスポンスに違う値が2つ入る。
+export interface YutaiCrossFields extends YutaiBenefitFields {
   closePrice: number | null;
   requiredInvestment: number | null;
   lastGyakuhibu: GyakuhibuActualRef | null;
@@ -2710,8 +2737,10 @@ export interface YutaiForecastListItem extends YutaiCrossFields {
 }
 ```
 
+`YutaiDetail` が継承するのは `YutaiBenefitFields` の方(価格・コストは `basicInfo` と `rightsHistory` が持つ)。
+
 ```ts
-export interface YutaiDetail extends YutaiCrossFields {
+export interface YutaiDetail extends YutaiBenefitFields {
   ticker: string;
   companyName: string | null;
   content: string;
