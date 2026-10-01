@@ -129,12 +129,24 @@ interface BenefitGroup {
 | `requiredShares` | `number \| null` | クロス可能なグループ(`holdingMonths === null`)の最小 `shares`。1つも無ければ全グループの最小 |
 | `holdingKind` | `'none' \| 'bonus' \| 'required' \| 'unknown'` | 条件なしグループのみ→`none`、条件なしと条件付き両方→`bonus`、全て条件付き→`required`、パース失敗→`unknown` |
 | `holdingMinMonths` | `number \| null` | `holdingKind === 'required'` のときのみ、全グループの `holdingMonths` の最小。それ以外は `null` |
-| `crossEligible` | `'ok' \| 'ng' \| 'unknown'` | `holdingKind` が `none`/`bonus` → `ok`、`required` → `ng`、`unknown` → `unknown` |
+| `crossEligible` | `'ok' \| 'ng' \| 'unknown'` | `holdingKind` が `none`/`bonus` → `ok`、`required` → `ng`。`unknown`(パース失敗)のときは一覧ページのバッジにフォールバックする |
 | `minTierValueYen` | `number \| null` | `requiredShares` を導出したグループの、その株数の段階の `valueYen` |
 
 `minTierValueYen` は**株数だけで決めてはならない**。鳥羽洋行は100株の段階が
 「条件なし→1,000円」と「3年以上→2,000円」の2グループに現れる。クロスで実際に
 得られるのは前者なので、`requiredShares` を導出したのと同じグループから取る。
+
+**グループ選択の規則**(実データで同数の段階が複数グループに現れるため、
+一意に決まるよう明文化する):
+
+1. 候補 = `holdingMonths === null` のグループ。1つも無ければ全グループ
+2. `requiredShares` = 候補の全段階の `shares` の最小値
+3. 候補のうち `requiredShares` の段階を持つものから、`holdingMonths` が小さい順
+   (`null` を最小とする)、同じなら文書順で先のものを選ぶ
+4. `minTierValueYen` = そのグループの `requiredShares` 段階の `valueYen`
+
+ミライト(1417)は1年以上と3年以上の両グループに100株段階があるため、この規則で
+1年以上のグループ(1,000円)が選ばれる。
 
 一覧ページには最小段階だけを出し、段階表の全体は詳細ページに置く。
 
@@ -156,6 +168,9 @@ interface BenefitGroup {
 - グループが0件 → `"no-groups"`
 - 同一 `(title, holdingMonths)` のグループが複数 → `"duplicate-groups"`
 - `valueYen` が全段階で `null` → `"no-values"`
+
+複数該当する場合はカンマ区切りで連結する(例 `"duplicate-groups,no-values"`)。
+該当なしは `null`。
 
 さらに、一覧ページのバッジからも `crossEligible` 相当が決まる
 (`chouki`→`ok`、`choukinomi`→`ng`、バッジ無し→`ok`)。個別ページから導いた
