@@ -2,9 +2,66 @@ import { Link, useParams } from 'react-router-dom';
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
 import * as HoverCard from '@radix-ui/react-hover-card';
 import { fetchYutaiDetail, fetchYutaiMarginTrend } from '../api/client';
+import type { BenefitGroup } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen, formatPrice, formatVolume } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+
+function holdingLabel(group: BenefitGroup): string {
+  if (group.holdingMonths === null) return '継続保有条件なし';
+  // 原文があればそのまま出す(「継続保有期間6か月以上」など表記が銘柄ごとに違う)。
+  return group.holdingRaw ?? `継続保有${group.holdingMonths}ヶ月以上`;
+}
+
+function BenefitGroupsCard({ groups, warning }: { groups: BenefitGroup[]; warning: string | null }) {
+  if (groups.length === 0) {
+    return (
+      <div className="card">
+        <p style={{ color: 'var(--text-muted)', margin: 0 }}>
+          株数段階の情報がまだ取得できていません。
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      {warning !== null && (
+        <p className="benefit-warning">
+          ⚠ 解析が不完全な可能性があります({warning})。内容は取得元のページで確認してください。
+        </p>
+      )}
+      {groups.map((group, groupIndex) => (
+        // 同じ種別・同じ保有条件のグループが重複して現れる銘柄があるため
+        // (年2回の中間/期末の区別が解析で落ちる)、keyには添字を含める。
+        <div key={`${group.title ?? ''}-${group.holdingMonths ?? 'none'}-${groupIndex}`} className="benefit-group">
+          {group.title !== null && <div className="benefit-group__title">{group.title}</div>}
+          <div className="summary-item__label">{holdingLabel(group)}</div>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>株数</th>
+                <th>優待内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.tiers.map((tier) => (
+                <tr key={tier.shares}>
+                  <td className="num">{tier.shares.toLocaleString('ja-JP')}株</td>
+                  {/* 金額が読めた段階は金額を、読めなかった段階(「ー」や個数表記)は
+                      原文をそのまま出す。どちらの場合も原文は失われていない。 */}
+                  <td className="cell-wrap" style={{ textAlign: 'left' }}>
+                    {tier.valueYen !== null ? formatFinancialYen(String(tier.valueYen)) : tier.rawText}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function YutaiDetailPage() {
   const { ticker } = useParams<{ ticker: string }>();
@@ -77,8 +134,29 @@ export function YutaiDetailPage() {
             <div className="summary-item__label">権利日</div>
             <div className="summary-item__value">{data.rightsDate ?? '—'}</div>
           </div>
+          <div className="summary-item">
+            <div className="summary-item__label">必要株数</div>
+            <div className="summary-item__value">
+              {data.requiredShares !== null ? `${data.requiredShares.toLocaleString('ja-JP')}株` : '—'}
+              {data.requiredShares !== null && data.requiredShares !== data.unitShares && (
+                <span className="cross-months">単元{data.unitShares}株</span>
+              )}
+            </div>
+          </div>
+          <div className="summary-item">
+            <div className="summary-item__label">1回のクロスで取得</div>
+            <div className="summary-item__value">
+              {data.crossEligible === 'ok' ? '可' : data.crossEligible === 'ng' ? '不可(長期保有者限定)' : '不明'}
+              {data.holdingKind === 'required' && data.holdingMinMonths !== null && (
+                <span className="cross-months">最低{data.holdingMinMonths}ヶ月</span>
+              )}
+            </div>
+          </div>
         </div>
       </div>
+
+      <div className="section-heading">株数段階別の優待条件</div>
+      <BenefitGroupsCard groups={data.benefitGroups} warning={data.benefitParseWarning} />
 
       <div className="section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <span>逆日歩リスク計算</span>

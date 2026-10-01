@@ -471,3 +471,21 @@ a {
     opacity: 0;
   }
 }
+
+/* 詳細画面の株数段階表: 種別・保有条件ごとのグループを区切って並べる */
+.benefit-group + .benefit-group {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.benefit-group__title {
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.benefit-warning {
+  margin: 0 0 1rem;
+  font-size: 0.85rem;
+  color: var(--caution);
+}
