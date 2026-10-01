@@ -326,6 +326,22 @@ function parseCrossEligibleParam(raw: string | undefined): CrossEligible | undef
   return raw === 'ok' || raw === 'ng' || raw === 'unknown' ? raw : undefined;
 }
 
+// 2つの一覧(GET /yutai と GET /yutai/forecast)が受けるクエリパラメータの解釈を
+// ここ1箇所に集約する。ハンドラごとに組み立てると、片方だけ項目を足し忘れても
+// 型エラーにならず「同じ判断が両方の画面でできる」という要件が静かに崩れる。
+function parseYutaiListFilters(query: Record<string, string | undefined>): YutaiListFilters {
+  return {
+    keyword: query.keyword?.toLowerCase(),
+    rightsDateFrom: query.rightsDateFrom,
+    rightsDateTo: query.rightsDateTo,
+    priceMin: parseNumberParam(query.priceMin),
+    priceMax: parseNumberParam(query.priceMax),
+    investmentMin: parseNumberParam(query.investmentMin),
+    investmentMax: parseNumberParam(query.investmentMax),
+    crossEligible: parseCrossEligibleParam(query.crossEligible),
+  };
+}
+
 // 範囲指定があるのに値が不明な行は除外する(「株価100万円以下」の結果に株価不明の
 // 銘柄を混ぜない)。範囲指定が無ければ値が不明でも通す。
 function passesRange(value: number | null, min: number | undefined, max: number | undefined): boolean {
@@ -386,16 +402,7 @@ function passesYutaiFilters(
 }
 
 async function listYutai(query: Record<string, string | undefined>): Promise<APIGatewayProxyResultV2> {
-  const filters: YutaiListFilters = {
-    keyword: query.keyword?.toLowerCase(),
-    rightsDateFrom: query.rightsDateFrom,
-    rightsDateTo: query.rightsDateTo,
-    priceMin: parseNumberParam(query.priceMin),
-    priceMax: parseNumberParam(query.priceMax),
-    investmentMin: parseNumberParam(query.investmentMin),
-    investmentMax: parseNumberParam(query.investmentMax),
-    crossEligible: parseCrossEligibleParam(query.crossEligible),
-  };
+  const filters = parseYutaiListFilters(query);
   const riskStatusFilter = query.riskStatus && query.riskStatus !== 'all' ? query.riskStatus : undefined;
 
   const rows = await scanYutaiMaster();
@@ -431,16 +438,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
 }
 
 async function listYutaiForecast(query: Record<string, string | undefined>): Promise<APIGatewayProxyResultV2> {
-  const filters: YutaiListFilters = {
-    keyword: query.keyword?.toLowerCase(),
-    rightsDateFrom: query.rightsDateFrom,
-    rightsDateTo: query.rightsDateTo,
-    priceMin: parseNumberParam(query.priceMin),
-    priceMax: parseNumberParam(query.priceMax),
-    investmentMin: parseNumberParam(query.investmentMin),
-    investmentMax: parseNumberParam(query.investmentMax),
-    crossEligible: parseCrossEligibleParam(query.crossEligible),
-  };
+  const filters = parseYutaiListFilters(query);
   const forecastStatusFilter = query.forecastStatus && query.forecastStatus !== 'all' ? query.forecastStatus : undefined;
 
   // 呼び出し順はテストのmockResolvedValueOnce順(master scan → forecast scan)と
