@@ -366,6 +366,32 @@ a {
   background: color-mix(in srgb, var(--caution) 14%, transparent);
 }
 
+/* 単元株数と必要株数が違う銘柄(第一興商の200株など)は見落とすと優待が取れない */
+.shares-above-unit {
+  font-weight: 700;
+  color: var(--caution);
+}
+
+.cross-months,
+.gyakuhibu-date,
+.gyakuhibu-seasonal,
+.gyakuhibu-note {
+  margin-left: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.cross-warning {
+  margin-left: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--caution);
+  cursor: help;
+}
+
+.input--narrow {
+  width: 6rem;
+}
+
 .event-badge {
   font-size: 0.8rem;
   padding: 0.15rem 0.55rem;

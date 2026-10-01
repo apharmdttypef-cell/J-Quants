@@ -27,7 +27,59 @@ export interface FinancialSummary {
 
 export type YutaiRiskStatus = 'safe' | 'danger' | 'na';
 
-export interface YutaiListItem {
+export type YutaiCrossEligible = 'ok' | 'ng' | 'unknown';
+export type YutaiHoldingKind = 'none' | 'bonus' | 'required' | 'unknown';
+
+export interface BenefitTier {
+  shares: number;
+  // 金額が読めない段階(「ー」= 該当なし、自社製品の個数表記など)はnull。
+  // 表示にはrawTextを使う。
+  valueYen: number | null;
+  rawText: string;
+}
+
+export interface BenefitGroup {
+  title: string | null;
+  holdingMonths: number | null;
+  holdingRaw: string | null;
+  tiers: BenefitTier[];
+}
+
+export interface GyakuhibuActualRef {
+  rightsDate: string;
+  avgRate: number;
+  days: number;
+  perShareRate: number;
+  cost: number;
+  // 必要株数が未取得で単元株数で代用したコスト。画面で注記する。
+  basedOnUnitShares: boolean;
+}
+
+// 優待条件(個別ページ由来)。2つの一覧と詳細の3箇所で共通。
+export interface YutaiBenefitFields {
+  unitShares: number;
+  requiredShares: number | null;
+  crossEligible: YutaiCrossEligible;
+  holdingKind: YutaiHoldingKind;
+  holdingMinMonths: number | null;
+  minTierValueYen: number | null;
+  benefitParseWarning: string | null;
+}
+
+// 条件 + 価格・コスト。2つの一覧専用。両方の一覧で同じ判断ができるよう、
+// 列定義(lib/yutai-cross.tsx)はこの型だけに依存させる。
+//
+// 詳細(YutaiDetail)はこちらを継承しない。詳細は既にリクエスト時点のライブ値を
+// basicInfo.closePriceで持っており、precomputeのスナップショットを同名で並べると
+// 同じレスポンスに違う値が2つ入る。
+export interface YutaiCrossFields extends YutaiBenefitFields {
+  closePrice: number | null;
+  requiredInvestment: number | null;
+  lastGyakuhibu: GyakuhibuActualRef | null;
+  sameMonthLastYearGyakuhibu: GyakuhibuActualRef | null;
+}
+
+export interface YutaiListItem extends YutaiCrossFields {
   ticker: string;
   companyName?: string;
   content: string;
@@ -66,13 +118,13 @@ export interface YutaiBasicInfo {
   eps: string | null;
 }
 
-export interface YutaiDetail {
+export interface YutaiDetail extends YutaiBenefitFields {
   ticker: string;
   companyName: string | null;
   content: string;
   value: number | null;
-  unitShares: number;
   rightsDate: string | null;
+  benefitGroups: BenefitGroup[];
   basicInfo: YutaiBasicInfo;
   risk: YutaiRiskInfo;
   rightsHistory: YutaiRightsHistoryPoint[];
@@ -130,7 +182,7 @@ export interface YutaiFeatures {
   tseMargin: boolean;
 }
 
-export interface YutaiForecastListItem {
+export interface YutaiForecastListItem extends YutaiCrossFields {
   ticker: string;
   companyName?: string;
   content: string;
@@ -138,7 +190,6 @@ export interface YutaiForecastListItem {
   rightsDate: string | null;
   riskStatus: YutaiRiskStatus;
   maxGyakuhibu: number | null;
-  closePrice: number | null;
   forecast: YutaiForecast;
   tseForecast: YutaiTseForecast | null;
 }
