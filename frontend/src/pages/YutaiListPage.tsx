@@ -7,6 +7,13 @@ import type { YutaiListItem, YutaiRiskStatus } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+import {
+  crossColumns,
+  EMPTY_CROSS_FILTERS,
+  toCrossParams,
+  YutaiCrossFilters,
+  type CrossFilterState,
+} from '../lib/yutai-cross';
 
 function monthRange(): { from: string; to: string } {
   const now = new Date();
@@ -88,6 +95,8 @@ const columns: ColumnDef<YutaiListItem>[] = [
       <span className={`risk-badge risk-badge--${row.original.riskStatus}`}>{RISK_LABEL[row.original.riskStatus]}</span>
     ),
   },
+  // 必要株数・クロス・必要資金・前回逆日歩(逆日歩予測画面と共通の列)
+  ...crossColumns<YutaiListItem>(),
 ];
 
 // キーワード入力欄からのAPI呼び出し用デバウンス(ms)。無しだと1文字打つたびに
@@ -120,9 +129,30 @@ export function YutaiListPage() {
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
   const [riskStatus, setRiskStatus] = useState<'all' | YutaiRiskStatus>('all');
 
+  const [crossFilters, setCrossFilters] = useState<CrossFilterState>(EMPTY_CROSS_FILTERS);
+
+  // depsはオブジェクトを渡すと毎レンダーで参照が変わり無限ループになるため、
+  // crossFiltersは個々の文字列に展開して並べる。
   const listState = useAsync(
-    () => fetchYutaiList({ rightsDateFrom, rightsDateTo, keyword: debouncedKeyword || undefined, riskStatus }),
-    [rightsDateFrom, rightsDateTo, debouncedKeyword, riskStatus],
+    () =>
+      fetchYutaiList({
+        rightsDateFrom,
+        rightsDateTo,
+        keyword: debouncedKeyword || undefined,
+        riskStatus,
+        ...toCrossParams(crossFilters),
+      }),
+    [
+      rightsDateFrom,
+      rightsDateTo,
+      debouncedKeyword,
+      riskStatus,
+      crossFilters.priceMin,
+      crossFilters.priceMax,
+      crossFilters.investmentMin,
+      crossFilters.investmentMax,
+      crossFilters.crossEligible,
+    ],
   );
 
   const table = useReactTable({
@@ -168,6 +198,7 @@ export function YutaiListPage() {
             <option value="na">対象外</option>
           </select>
         </label>
+        <YutaiCrossFilters state={crossFilters} onChange={setCrossFilters} />
       </div>
 
       {listState.loading && <StatusNote kind="loading" message="読み込み中…" />}
@@ -202,7 +233,9 @@ export function YutaiListPage() {
                     <td
                       key={cell.id}
                       className={
-                        cell.column.id === 'value' || cell.column.id === 'maxGyakuhibu' || cell.column.id === 'rightsDate'
+                        ['value', 'maxGyakuhibu', 'rightsDate', 'requiredShares', 'requiredInvestment', 'lastGyakuhibu'].includes(
+                          cell.column.id,
+                        )
                           ? 'num'
                           : cell.column.id === 'content'
                             ? 'cell-wrap'

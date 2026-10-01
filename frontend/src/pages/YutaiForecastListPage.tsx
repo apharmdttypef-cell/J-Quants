@@ -8,6 +8,13 @@ import type { YutaiForecastListItem, YutaiForecastStatus, YutaiTseForecast } fro
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+import {
+  crossColumns,
+  EMPTY_CROSS_FILTERS,
+  toCrossParams,
+  YutaiCrossFilters,
+  type CrossFilterState,
+} from '../lib/yutai-cross';
 
 // 列見出しの意味を説明する簡易ツールチップ。YutaiDetailPage.tsxの最大逆日歩ホバーカードと
 // 同じgyakuhibu-hover/gyakuhibu-tooltipクラス(見た目・アニメーション)を再利用する。
@@ -272,6 +279,9 @@ function buildColumns(tseEnabled: boolean): ColumnDef<YutaiForecastListItem>[] {
     );
   }
 
+  // 必要株数・クロス・必要資金・前回逆日歩(優待クロス画面と共通の列)
+  columns.push(...crossColumns<YutaiForecastListItem>());
+
   return columns;
 }
 
@@ -308,12 +318,31 @@ export function YutaiForecastListPage() {
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
   const [selectedStatuses, setSelectedStatuses] = useState<ReadonlySet<YutaiForecastStatus>>(DEFAULT_STATUSES);
 
+  const [crossFilters, setCrossFilters] = useState<CrossFilterState>(EMPTY_CROSS_FILTERS);
+
   // 判定はチェックボックスでの複数選択(クライアント側フィルタ)にしたため、APIには
   // forecastStatusを渡さず常に全件取得する。チェックボックスの切り替えはネットワーク
   // 往復無しで即座に反映される。
+  // depsはオブジェクトを渡すと毎レンダーで参照が変わり無限ループになるため、
+  // crossFiltersは個々の文字列に展開して並べる。
   const listState = useAsync(
-    () => fetchYutaiForecastList({ rightsDateFrom, rightsDateTo, keyword: debouncedKeyword || undefined }),
-    [rightsDateFrom, rightsDateTo, debouncedKeyword],
+    () =>
+      fetchYutaiForecastList({
+        rightsDateFrom,
+        rightsDateTo,
+        keyword: debouncedKeyword || undefined,
+        ...toCrossParams(crossFilters),
+      }),
+    [
+      rightsDateFrom,
+      rightsDateTo,
+      debouncedKeyword,
+      crossFilters.priceMin,
+      crossFilters.priceMax,
+      crossFilters.investmentMin,
+      crossFilters.investmentMax,
+      crossFilters.crossEligible,
+    ],
   );
 
   function toggleStatus(status: YutaiForecastStatus) {
@@ -386,6 +415,7 @@ export function YutaiForecastListPage() {
             </label>
           ))}
         </span>
+        <YutaiCrossFilters state={crossFilters} onChange={setCrossFilters} />
       </div>
 
       {listState.loading && <StatusNote kind="loading" message="読み込み中…" />}
@@ -431,7 +461,10 @@ export function YutaiForecastListPage() {
                         cell.column.id === 'forecastP50' ||
                         cell.column.id === 'forecastP90' ||
                         cell.column.id === 'tseForecastP50' ||
-                        cell.column.id === 'lendingGrowth4w'
+                        cell.column.id === 'lendingGrowth4w' ||
+                        cell.column.id === 'requiredShares' ||
+                        cell.column.id === 'requiredInvestment' ||
+                        cell.column.id === 'lastGyakuhibu'
                           ? 'num'
                           : cell.column.id === 'content'
                             ? 'cell-wrap'
