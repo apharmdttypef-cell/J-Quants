@@ -634,7 +634,9 @@ function detailSection(html: string): string | null {
 // 「継続保有期間3年以上」「継続保有期間6か月以上」の両表記を月数に正規化する。
 // 「ヶ月」「カ月」の表記ゆれも受ける。
 function parseHolding(text: string): { months: number; raw: string } | null {
-  const match = text.match(/継続保有期間\s*(\d+)\s*(年|ヶ月|か月|カ月)/);
+  // 末尾の「以上」まで含めて捕まえる。holdingRawは原文をそのまま画面に出すため、
+  // 「継続保有期間3年」で切れていると「3年以上」なのか「3年のみ」なのか読めない。
+  const match = text.match(/継続保有期間\s*(\d+)\s*(年|ヶ月|か月|カ月)(?:以上)?/);
   if (!match) return null;
   const amount = Number(match[1]);
   return { months: match[2] === '年' ? amount * 12 : amount, raw: match[0] };
