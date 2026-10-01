@@ -2194,7 +2194,18 @@ interface CrossFields extends BenefitFields {
 
 - [ ] **Step 1: `test/reference-api.test.ts` に失敗するテストを足す**
 
-既存ファイルのリクエスト組み立てヘルパー(`invoke({ rawPath, queryStringParameters })` 等)の名前を確認して合わせる。
+`test/reference-api.test.ts` の既存の規約に合わせる(2026-10-02 に実ファイルで確認済み):
+
+- ハンドラは `event.routeKey` で分岐するので、リクエストは `handler(makeEvent('GET /yutai', { queryStringParameters: {...} }))` の形で作る。`rawPath` は使わない。
+- 詳細は `handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '7458' } }))`。
+- レスポンスの読み取りは `body(result)`(`JSON.parse((result as { body: string }).body)` を返すヘルパー)。戻りは `unknown` なので、既存テストと同じく `const parsed = body(result) as { tickers: Array<{ ticker: string }> };` のように用途に合わせてキャストする。
+- 環境変数はファイル先頭で既に全テーブル分設定済み。追加は不要。
+
+**既存テストの重要な不変条件**: `GET /yutai` のテストに
+`expect(mockSend).toHaveBeenCalledTimes(1)` がある。一覧エンドポイントは銘柄数に関係なく
+**DynamoDB アクセス1回(マスタのスキャンのみ)**でなければならない。これが
+`yutai-risk-precompute-batch` が存在する理由そのものなので、銘柄ごとのクエリを
+足してはならない。新項目はすべてスキャン済みの行から読む。
 
 ```ts
 // マスタ行1件ぶんの素材。個別ページ取得済み・実績ありの状態。
@@ -2227,8 +2238,8 @@ function crossMasterItem(overrides: Record<string, unknown> = {}) {
 test('GET /yutai returns the cross-eligibility and cost fields', async () => {
   mockSend.mockResolvedValueOnce({ Items: [crossMasterItem()] });
 
-  const response = await invoke({ rawPath: '/yutai', queryStringParameters: {} });
-  const item = JSON.parse(response.body).tickers[0];
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
+  const item = body(response).tickers[0];
 
   expect(item.unitShares).toBe(100);
   expect(item.requiredShares).toBe(200);
@@ -2250,7 +2261,7 @@ test('GET /yutai defaults the cross fields for a row the detail sync has not rea
     Items: [{ ticker: '1111', content: '割引券', value: 1000, unitShares: 100, rightsMonths: [3] }],
   });
 
-  const item = JSON.parse((await invoke({ rawPath: '/yutai', queryStringParameters: {} })).body).tickers[0];
+  const item = JSON.parse((await handler(makeEvent('GET /yutai', { queryStringParameters: {} }))).body).tickers[0];
 
   // 項目を省略したり例外を投げたりせず、既定値で埋める
   expect(item.requiredShares).toBeNull();
@@ -2269,8 +2280,8 @@ test('GET /yutai filters by share price range', async () => {
     ],
   });
 
-  const response = await invoke({ rawPath: '/yutai', queryStringParameters: { priceMin: '1000', priceMax: '5000' } });
-  expect(JSON.parse(response.body).tickers.map((t: { ticker: string }) => t.ticker)).toEqual(['2222']);
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { priceMin: '1000', priceMax: '5000' } }));
+  expect(body(response).tickers.map((t: { ticker: string }) => t.ticker)).toEqual(['2222']);
 });
 
 test('GET /yutai filters by required investment range', async () => {
@@ -2281,8 +2292,8 @@ test('GET /yutai filters by required investment range', async () => {
     ],
   });
 
-  const response = await invoke({ rawPath: '/yutai', queryStringParameters: { investmentMax: '100000' } });
-  expect(JSON.parse(response.body).tickers.map((t: { ticker: string }) => t.ticker)).toEqual(['1111']);
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { investmentMax: '100000' } }));
+  expect(body(response).tickers.map((t: { ticker: string }) => t.ticker)).toEqual(['1111']);
 });
 
 test('a range filter excludes rows whose value is unknown', async () => {
@@ -2291,8 +2302,8 @@ test('a range filter excludes rows whose value is unknown', async () => {
     Items: [crossMasterItem({ ticker: '1111', closePrice: null }), crossMasterItem({ ticker: '2222', closePrice: 2000 })],
   });
 
-  const response = await invoke({ rawPath: '/yutai', queryStringParameters: { priceMax: '5000' } });
-  expect(JSON.parse(response.body).tickers.map((t: { ticker: string }) => t.ticker)).toEqual(['2222']);
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { priceMax: '5000' } }));
+  expect(body(response).tickers.map((t: { ticker: string }) => t.ticker)).toEqual(['2222']);
 });
 
 test('GET /yutai filters by cross eligibility', async () => {
@@ -2304,8 +2315,8 @@ test('GET /yutai filters by cross eligibility', async () => {
     ],
   });
 
-  const response = await invoke({ rawPath: '/yutai', queryStringParameters: { crossEligible: 'ng' } });
-  expect(JSON.parse(response.body).tickers.map((t: { ticker: string }) => t.ticker)).toEqual(['2222']);
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { crossEligible: 'ng' } }));
+  expect(body(response).tickers.map((t: { ticker: string }) => t.ticker)).toEqual(['2222']);
 });
 
 test('an all or absent cross eligibility filter keeps every row', async () => {
@@ -2313,15 +2324,15 @@ test('an all or absent cross eligibility filter keeps every row', async () => {
     Items: [crossMasterItem({ ticker: '1111', crossEligible: 'ok' }), crossMasterItem({ ticker: '2222', crossEligible: 'ng' })],
   });
 
-  const response = await invoke({ rawPath: '/yutai', queryStringParameters: { crossEligible: 'all' } });
-  expect(JSON.parse(response.body).tickers).toHaveLength(2);
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { crossEligible: 'all' } }));
+  expect(body(response).tickers).toHaveLength(2);
 });
 
 test('a non-numeric range filter is ignored rather than dropping every row', async () => {
   mockSend.mockResolvedValueOnce({ Items: [crossMasterItem()] });
 
-  const response = await invoke({ rawPath: '/yutai', queryStringParameters: { priceMin: 'abc' } });
-  expect(JSON.parse(response.body).tickers).toHaveLength(1);
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { priceMin: 'abc' } }));
+  expect(body(response).tickers).toHaveLength(1);
 });
 ```
 
@@ -2333,7 +2344,7 @@ test('GET /yutai/forecast carries the same cross fields', async () => {
     .mockResolvedValueOnce({ Items: [crossMasterItem()] })
     .mockResolvedValueOnce({ Items: [] });
 
-  const item = JSON.parse((await invoke({ rawPath: '/yutai/forecast', queryStringParameters: {} })).body).tickers[0];
+  const item = JSON.parse((await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: {} }))).body).tickers[0];
   expect(item.requiredShares).toBe(200);
   expect(item.crossEligible).toBe('ok');
   expect(item.lastGyakuhibu.cost).toBe(1200);
@@ -2361,7 +2372,7 @@ test('GET /yutai/:ticker returns the benefit tier groups verbatim', async () => 
     .mockResolvedValueOnce({ Items: [] })
     .mockResolvedValueOnce({ Items: [] });
 
-  const body = JSON.parse((await invoke({ rawPath: '/yutai/7458' })).body);
+  const body = JSON.parse((await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '7458' } }))).body);
   expect(body.benefitGroups).toEqual(groups);
   expect(body.requiredShares).toBe(200);
   expect(body.crossEligible).toBe('ok');
