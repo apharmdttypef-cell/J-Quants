@@ -301,7 +301,7 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
   const template = synth();
 
   // Verify the Lambda function exists with exact environment variables (not a superset like ReferenceApiFunction).
-  // Use Match.exact() to ensure only these three env vars are present, distinguishing it from ReferenceApiFunction
+  // Use Match.exact() to ensure only these four env vars are present, distinguishing it from ReferenceApiFunction
   // which has many more env vars (FINANCIAL_TABLE_NAME, GYAKUHIBU_ACTUAL_TABLE_NAME, MARGIN_BALANCE_TABLE_NAME, YUTAI_TDNET_EVENT_TABLE_NAME).
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
@@ -311,6 +311,7 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
         TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
       }),
     },
   });
@@ -360,6 +361,15 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
     });
   });
   expect(hasMarginStockReadAccess).toBe(true);
+
+  // 逆日歩実績テーブルは読み取りのみ(前回逆日歩の集計用)。書き込みは付けない。
+  const actualStatements = policyEntries
+    .filter(([name]) => name.includes('YutaiRiskPrecompute'))
+    .flatMap(([, p]) => (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: unknown }> } } }).Properties?.PolicyDocument?.Statement ?? [])
+    .filter((stmt) => JSON.stringify(stmt.Resource ?? '').includes('GyakuhibuActual'));
+  const actualActions = actualStatements.flatMap((stmt) => (Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : []));
+  expect(actualActions.some((a) => a.includes('Query'))).toBe(true);
+  expect(actualActions.some((a) => a.includes('PutItem') || a.includes('UpdateItem') || a.includes('DeleteItem'))).toBe(false);
 });
 
 test('creates the JQuantsGyakuhibuForecast table (ticker only key) with RETAIN policy', () => {

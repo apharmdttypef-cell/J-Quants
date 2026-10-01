@@ -11,6 +11,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.TABLE_NAME = 'JQuantsStockPrices';
+process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/yutai-risk-precompute-batch/index') as { handler: () => Promise<void> };
@@ -29,6 +30,7 @@ test('writes riskStatus na when rightsMonths is empty (no upcoming rights date)'
   mockSend.mockResolvedValueOnce({
     Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [] }],
   }); // yutai master scan
+  mockSend.mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
 
@@ -44,7 +46,8 @@ test('writes riskStatus na when rightsMonths is empty (no upcoming rights date)'
 test('writes riskStatus na when there is no margin balance data for the ticker', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
-    .mockResolvedValueOnce({ Items: [] }); // margin balance presence: none
+    .mockResolvedValueOnce({ Items: [] }) // margin balance presence: none
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals(リスク判定がnaでも走る)
 
   await handler();
 
@@ -59,7 +62,8 @@ test('writes riskStatus na when there is no price data for the ticker', async ()
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10' }] }) // margin balance presence: yes
-    .mockResolvedValueOnce({ Items: [] }); // latest close: none
+    .mockResolvedValueOnce({ Items: [] }) // latest close: none
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
 
@@ -74,7 +78,8 @@ test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10' }] }) // margin balance presence: yes
-    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500 }] }); // latest close
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
 
@@ -92,7 +97,8 @@ test('computes maxGyakuhibu/maxRate/days but writes riskStatus na when value is 
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9001', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan (valueフィールド無し = 東武鉄道のような銘柄)
     .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-10' }] }) // margin balance presence: yes
-    .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-12', close: 500 }] }); // latest close
+    .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-12', close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
 
@@ -105,31 +111,97 @@ test('computes maxGyakuhibu/maxRate/days but writes riskStatus na when value is 
   expect(typeof values[':days']).toBe('number');
 });
 
-test('derives unitShares from minInvestment÷closePrice when it implies more than the stored default (第一興商-style: 単元100株だが優待には200株必要)', async () => {
+test('uses requiredShares instead of estimating from minInvestment', async () => {
+  // 第一興商: 単元100株だが優待は200株。推定ではなく個別ページ由来の正確値を使う。
   mockSend
-    .mockResolvedValueOnce({
-      Items: [{ ticker: '7458', value: 5000, unitShares: 100, minInvestment: 378600, rightsMonths: [8] }],
-    }) // yutai master scan (unitSharesは単元株数のまま100で保存されている)
-    .mockResolvedValueOnce({ Items: [{ ticker: '7458', date: '2026-08-10' }] }) // margin balance presence: yes
-    .mockResolvedValueOnce({ Items: [{ ticker: '7458', date: '2026-08-12', close: 1893 }] }); // latest close
+    .mockResolvedValueOnce({ Items: [{ ticker: '7458', value: 5000, unitShares: 100, minInvestment: 400000, requiredShares: 200, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '7458' }] }) // margin balance あり
+    .mockResolvedValueOnce({ Items: [{ close: 2000 }] }) // 直近終値
+    .mockResolvedValueOnce({ Items: [] }) // 逆日歩実績なし
+    .mockResolvedValueOnce({}); // update
 
   await handler();
 
-  const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
-  // 378,600円 ÷ 1,893円 = 200.0 → 100株単位に丸めて200株。
-  expect(values[':unitShares']).toBe(200);
+  const update = updateCalls()[0][0] as {
+    UpdateExpression: string;
+    ExpressionAttributeValues: Record<string, unknown>;
+  };
+  // unitSharesはもう書かない(単元株数の意味に戻した)
+  expect(update.UpdateExpression).not.toContain('unitShares');
+  expect(update.ExpressionAttributeValues).not.toHaveProperty(':unitShares');
+  // 必要資金 = 終値 × 必要株数
+  expect(update.ExpressionAttributeValues[':requiredInvestment']).toBe(400000);
 });
 
-test('falls back to the stored unitShares when minInvestment is unavailable', async () => {
+test('falls back to unitShares when requiredShares has not been fetched yet', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '9999', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // minInvestmentフィールド無し
-    .mockResolvedValueOnce({ Items: [{ ticker: '9999', date: '2026-08-10' }] })
-    .mockResolvedValueOnce({ Items: [{ ticker: '9999', date: '2026-08-12', close: 500 }] });
+    .mockResolvedValueOnce({ Items: [{ ticker: '1111', value: 3000, unitShares: 100, minInvestment: null, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '1111' }] })
+    .mockResolvedValueOnce({ Items: [{ close: 1500 }] })
+    .mockResolvedValueOnce({ Items: [] })
+    .mockResolvedValueOnce({});
 
   await handler();
 
-  const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
-  expect(values[':unitShares']).toBe(100);
+  const update = updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> };
+  expect(update.ExpressionAttributeValues[':requiredInvestment']).toBe(150000);
+});
+
+test('aggregates the last and prior-year-same-month gyakuhibu costs', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '7458', value: 5000, unitShares: 100, requiredShares: 200, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '7458' }] })
+    .mockResolvedValueOnce({ Items: [{ close: 2000 }] })
+    .mockResolvedValueOnce({
+      Items: [
+        { rightsDate: '2024-03-27', avgRate: 1.0, days: 3 },
+        { rightsDate: '2025-03-27', avgRate: 2.0, days: 3 },
+      ],
+    })
+    .mockResolvedValueOnce({});
+
+  await handler();
+
+  const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> })
+    .ExpressionAttributeValues;
+  const last = values[':lastGyakuhibu'] as { rightsDate: string; cost: number; basedOnUnitShares: boolean };
+  expect(last.rightsDate).toBe('2025-03-27');
+  expect(last.cost).toBe(1200); // 2.0 × 3日 × 200株
+  expect(last.basedOnUnitShares).toBe(false);
+});
+
+test('writes null summaries for a ticker with no actual history', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1111', value: 3000, unitShares: 100, requiredShares: 100, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '1111' }] })
+    .mockResolvedValueOnce({ Items: [{ close: 1500 }] })
+    .mockResolvedValueOnce({ Items: [] })
+    .mockResolvedValueOnce({});
+
+  await handler();
+
+  const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> })
+    .ExpressionAttributeValues;
+  expect(values[':lastGyakuhibu']).toBeNull();
+  expect(values[':sameMonthLastYearGyakuhibu']).toBeNull();
+});
+
+test('still aggregates the actual history when the risk verdict is na', async () => {
+  // 信用残が無くリスク判定ができない銘柄でも、過去に実際に取られたコストは
+  // 独立した事実なので一覧に出す価値がある。
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1111', value: 3000, unitShares: 100, requiredShares: 100, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [] }) // margin balance なし → riskStatus 'na'(価格Queryはスキップ)
+    .mockResolvedValueOnce({ Items: [{ rightsDate: '2025-03-27', avgRate: 1.0, days: 2 }] })
+    .mockResolvedValueOnce({});
+
+  await handler();
+
+  const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> })
+    .ExpressionAttributeValues;
+  expect(values[':riskStatus']).toBe('na');
+  expect((values[':lastGyakuhibu'] as { cost: number }).cost).toBe(200);
+  expect(values[':requiredInvestment']).toBeNull();
 });
 
 test('applies the rights-day 4x rate multiplier (taisyaku.jp「倍率適用」) to maxRate and maxGyakuhibu', async () => {
@@ -141,7 +213,8 @@ test('applies the rights-day 4x rate multiplier (taisyaku.jp「倍率適用」) 
     mockSend
       .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
       .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10' }] }) // margin balance presence: yes
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-07-31', close: 500 }] }); // latest close
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-07-31', close: 500 }] }) // latest close
+      .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
     await handler();
 
@@ -170,7 +243,9 @@ test('continues past a single row failure and processes the remaining rows', asy
           { ticker: '2222', value: 1000, unitShares: 100, rightsMonths: [] },
         ],
       }) // yutai master scan
+      .mockResolvedValueOnce({ Items: [] }) // 1111's gyakuhibu actuals
       .mockRejectedValueOnce(new Error('DynamoDB error')) // 1111's UpdateCommand fails
+      .mockResolvedValueOnce({ Items: [] }) // 2222's gyakuhibu actuals
       .mockResolvedValueOnce({}); // 2222's UpdateCommand succeeds
 
     await handler();

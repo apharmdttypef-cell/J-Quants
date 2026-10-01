@@ -321,12 +321,14 @@ export class JQuantsStack extends cdk.Stack {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         TABLE_NAME: this.stockPricesTable.tableName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
       },
     });
 
     this.yutaiMasterTable.grantReadWriteData(yutaiRiskPrecomputeBatchFn);
     this.marginBalanceTable.grantReadData(yutaiRiskPrecomputeBatchFn);
     this.stockPricesTable.grantReadData(yutaiRiskPrecomputeBatchFn);
+    this.gyakuhibuActualTable.grantReadData(yutaiRiskPrecomputeBatchFn);
 
     // GET /yutai一覧のリスク判定を事前計算し、reference-apiでの逐次クエリ(銘柄数に比例して
     // 増える)を無くす。PriceBatchFunction(daily 09:00 UTC)の後に実行する。JST 18:20 = UTC 09:20。
