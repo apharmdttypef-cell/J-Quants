@@ -195,6 +195,13 @@ export async function fetchAllListings(): Promise<KabuyutaiEntry[]> {
   return all;
 }
 
+// 個別ページを1枚取得する。呼び出し元(yutai-detail-sync-batch)が銘柄ごとに
+// REQUEST_INTERVAL_MSの間隔を空ける責務を持つ。ここで間隔を取らないのは、
+// 単一ページの取得関数が自分で待つと呼び出し側の進捗管理と二重になるため。
+export async function fetchDetailPage(url: string): Promise<string> {
+  return fetchPage(url);
+}
+
 // TDnetで変更が検知された銘柄1件について、どの月のページに載っているか分からないため
 // 12ヶ月を順に走査する。見つかった時点で打ち切る。
 export async function findTicker(ticker: string): Promise<KabuyutaiEntry | undefined> {

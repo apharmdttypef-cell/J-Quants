@@ -8,7 +8,7 @@ beforeEach(() => {
   (global as unknown as { fetch: typeof mockFetch }).fetch = mockFetch;
 });
 
-import { parseListPage, fetchMonthListings, fetchAllListings, findTicker } from '../lambda/shared/kabuyutai-client';
+import { parseListPage, fetchMonthListings, fetchAllListings, findTicker, fetchDetailPage } from '../lambda/shared/kabuyutai-client';
 
 // docs/superpowers/notes/2026-08-20-kabuyutai-list-page-format.md で確認した実データの
 // 抜粋(コシダカホールディングス・2157、地域新聞社・2164)を1ページ2銘柄分の断片として使う。
@@ -346,4 +346,19 @@ test('parseListPage captures the detail page URL from the kigyoumei anchor', () 
 test('parseListPage distinguishes the two long-holding badges and no badge at all', () => {
   expect(parseListPage(BADGED_PAGE_HTML).map((e) => e.listBadge)).toEqual(['chouki', 'choukinomi']);
   expect(parseListPage(SAMPLE_PAGE_HTML).map((e) => e.listBadge)).toEqual([null, null]);
+});
+
+test('fetchDetailPage returns the body and sends the bot user agent', async () => {
+  mockFetch.mockResolvedValueOnce({ ok: true, status: 200, text: async () => '<html>detail</html>' });
+
+  await expect(fetchDetailPage('https://www.kabuyutai.com/kobetu/toba.html')).resolves.toBe('<html>detail</html>');
+  expect(mockFetch).toHaveBeenCalledWith('https://www.kabuyutai.com/kobetu/toba.html', {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; JQuantsYutaiBot/1.0)' },
+  });
+});
+
+test('fetchDetailPage throws on a non-OK response', async () => {
+  mockFetch.mockResolvedValueOnce({ ok: false, status: 404, text: async () => '' });
+
+  await expect(fetchDetailPage('https://www.kabuyutai.com/kobetu/gone.html')).rejects.toThrow('404');
 });
