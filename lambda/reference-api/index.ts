@@ -3,6 +3,7 @@ import { DynamoDBDocumentClient, GetCommand, QueryCommand, ScanCommand } from '@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getLocalTradingCalendar, isTradingDay, nextRightsDate } from '../shared/trading-calendar';
 import { excessRatio, fillRatio } from '../shared/gyakuhibu-forecast';
+import type { GyakuhibuActualRef } from '../shared/gyakuhibu-actual-summary';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
@@ -98,6 +99,13 @@ async function getSummary(ticker: string): Promise<APIGatewayProxyResultV2> {
 }
 
 type RiskStatus = 'safe' | 'danger' | 'na';
+type CrossEligible = 'ok' | 'ng' | 'unknown';
+type HoldingKind = 'none' | 'bonus' | 'required' | 'unknown';
+
+// yutai-detail-sync-batchが書く株数段階。詳細エンドポイントが素通しで返すだけなので
+// ここで中身を検証しない(検証はパーサー側の責務)。
+interface BenefitTier { shares: number; valueYen: number | null; rawText: string }
+interface BenefitGroup { title: string | null; holdingMonths: number | null; holdingRaw: string | null; tiers: BenefitTier[] }
 
 interface YutaiMasterRow {
   ticker: string;
@@ -111,6 +119,45 @@ interface YutaiMasterRow {
   maxRate: number | null;
   days: number | null;
   closePrice: number | null;
+  requiredShares: number | null;
+  crossEligible: CrossEligible;
+  holdingKind: HoldingKind;
+  holdingMinMonths: number | null;
+  minTierValueYen: number | null;
+  benefitParseWarning: string | null;
+  requiredInvestment: number | null;
+  lastGyakuhibu: GyakuhibuActualRef | null;
+  sameMonthLastYearGyakuhibu: GyakuhibuActualRef | null;
+  benefitGroups: BenefitGroup[];
+}
+
+// DynamoDBの行をYutaiMasterRowにする。個別ページ取得前の行は新項目を持たないため、
+// 省略や例外ではなく既定値(null / 'unknown' / [])で埋める。
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
+  return {
+    ticker: item.ticker,
+    companyName: item.companyName,
+    content: item.content,
+    value: item.value ?? null,
+    unitShares: item.unitShares,
+    rightsMonths: item.rightsMonths ?? [],
+    riskStatus: item.riskStatus ?? 'na',
+    maxGyakuhibu: item.maxGyakuhibu ?? null,
+    maxRate: item.maxRate ?? null,
+    days: item.days ?? null,
+    closePrice: item.closePrice ?? null,
+    requiredShares: item.requiredShares ?? null,
+    crossEligible: item.crossEligible ?? 'unknown',
+    holdingKind: item.holdingKind ?? 'unknown',
+    holdingMinMonths: item.holdingMinMonths ?? null,
+    minTierValueYen: item.minTierValueYen ?? null,
+    benefitParseWarning: item.benefitParseWarning ?? null,
+    requiredInvestment: item.requiredInvestment ?? null,
+    lastGyakuhibu: item.lastGyakuhibu ?? null,
+    sameMonthLastYearGyakuhibu: item.sameMonthLastYearGyakuhibu ?? null,
+    benefitGroups: item.benefitGroups ?? [],
+  };
 }
 
 async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
@@ -122,19 +169,7 @@ async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
       new ScanCommand({ TableName: YUTAI_MASTER_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
     );
     for (const item of result.Items ?? []) {
-      rows.push({
-        ticker: item.ticker,
-        companyName: item.companyName,
-        content: item.content,
-        value: item.value ?? null,
-        unitShares: item.unitShares,
-        rightsMonths: item.rightsMonths ?? [],
-        riskStatus: item.riskStatus ?? 'na',
-        maxGyakuhibu: item.maxGyakuhibu ?? null,
-        maxRate: item.maxRate ?? null,
-        days: item.days ?? null,
-        closePrice: item.closePrice ?? null,
-      });
+      rows.push(toYutaiMasterRow(item));
     }
     exclusiveStartKey = result.LastEvaluatedKey;
   } while (exclusiveStartKey);
@@ -272,6 +307,63 @@ interface YutaiListFilters {
   keyword?: string;
   rightsDateFrom?: string;
   rightsDateTo?: string;
+  priceMin?: number;
+  priceMax?: number;
+  investmentMin?: number;
+  investmentMax?: number;
+  crossEligible?: CrossEligible;
+}
+
+// 数値のクエリパラメータ。空文字や数値でない値は「指定なし」として扱う
+// (指定ミスで全件が消えるより、絞り込みが効かない方が気付きやすい)。
+function parseNumberParam(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function parseCrossEligibleParam(raw: string | undefined): CrossEligible | undefined {
+  return raw === 'ok' || raw === 'ng' || raw === 'unknown' ? raw : undefined;
+}
+
+// 範囲指定があるのに値が不明な行は除外する(「株価100万円以下」の結果に株価不明の
+// 銘柄を混ぜない)。範囲指定が無ければ値が不明でも通す。
+function passesRange(value: number | null, min: number | undefined, max: number | undefined): boolean {
+  if (min === undefined && max === undefined) return true;
+  if (value === null) return false;
+  if (min !== undefined && value < min) return false;
+  if (max !== undefined && value > max) return false;
+  return true;
+}
+
+// 優待条件(個別ページ由来)。2つの一覧と詳細の3箇所で共通。
+function buildBenefitFields(row: YutaiMasterRow) {
+  return {
+    unitShares: row.unitShares,
+    requiredShares: row.requiredShares,
+    crossEligible: row.crossEligible,
+    holdingKind: row.holdingKind,
+    holdingMinMonths: row.holdingMinMonths,
+    minTierValueYen: row.minTierValueYen,
+    benefitParseWarning: row.benefitParseWarning,
+  };
+}
+
+// 条件 + 価格・コスト。2つの一覧(GET /yutai と GET /yutai/forecast)専用。
+// 片方だけに足すと「同じ判断が両方の画面でできる」という要件が崩れるため、
+// 必ずこの関数を経由する。
+//
+// closePriceはprecomputeが日次で書いたスナップショットで、requiredInvestmentを
+// 算出した元の値。詳細エンドポイントには渡さない — あちらは既にリクエスト時点の
+// ライブ値をbasicInfo.closePriceで返しており、同名で違う値が並ぶのを避ける。
+function buildCrossFields(row: YutaiMasterRow) {
+  return {
+    ...buildBenefitFields(row),
+    closePrice: row.closePrice,
+    requiredInvestment: row.requiredInvestment,
+    lastGyakuhibu: row.lastGyakuhibu,
+    sameMonthLastYearGyakuhibu: row.sameMonthLastYearGyakuhibu,
+  };
 }
 
 // keyword/rightsDateFrom/rightsDateToによる絞り込み。listYutaiとlistYutaiForecastの
@@ -287,6 +379,9 @@ function passesYutaiFilters(
   }
   if (filters.rightsDateFrom && (!rightsDate || rightsDate < filters.rightsDateFrom)) return false;
   if (filters.rightsDateTo && (!rightsDate || rightsDate > filters.rightsDateTo)) return false;
+  if (!passesRange(row.closePrice, filters.priceMin, filters.priceMax)) return false;
+  if (!passesRange(row.requiredInvestment, filters.investmentMin, filters.investmentMax)) return false;
+  if (filters.crossEligible && row.crossEligible !== filters.crossEligible) return false;
   return true;
 }
 
@@ -295,6 +390,11 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
     keyword: query.keyword?.toLowerCase(),
     rightsDateFrom: query.rightsDateFrom,
     rightsDateTo: query.rightsDateTo,
+    priceMin: parseNumberParam(query.priceMin),
+    priceMax: parseNumberParam(query.priceMax),
+    investmentMin: parseNumberParam(query.investmentMin),
+    investmentMax: parseNumberParam(query.investmentMax),
+    crossEligible: parseCrossEligibleParam(query.crossEligible),
   };
   const riskStatusFilter = query.riskStatus && query.riskStatus !== 'all' ? query.riskStatus : undefined;
 
@@ -315,6 +415,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
       rightsDate: rightsDate ?? null,
       riskStatus: row.riskStatus,
       maxGyakuhibu: row.maxGyakuhibu,
+      ...buildCrossFields(row),
     });
   }
 
@@ -334,6 +435,11 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
     keyword: query.keyword?.toLowerCase(),
     rightsDateFrom: query.rightsDateFrom,
     rightsDateTo: query.rightsDateTo,
+    priceMin: parseNumberParam(query.priceMin),
+    priceMax: parseNumberParam(query.priceMax),
+    investmentMin: parseNumberParam(query.investmentMin),
+    investmentMax: parseNumberParam(query.investmentMax),
+    crossEligible: parseCrossEligibleParam(query.crossEligible),
   };
   const forecastStatusFilter = query.forecastStatus && query.forecastStatus !== 'all' ? query.forecastStatus : undefined;
 
@@ -363,9 +469,9 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
       rightsDate: rightsDate ?? null,
       riskStatus: row.riskStatus,
       maxGyakuhibu: row.maxGyakuhibu,
-      closePrice: row.closePrice,
       forecast,
       tseForecast: buildTseForecast(forecastByTicker.get(row.ticker)),
+      ...buildCrossFields(row),
     });
   }
 
@@ -385,19 +491,7 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
 async function getYutaiMaster(ticker: string): Promise<YutaiMasterRow | undefined> {
   const result = await ddbDocClient.send(new GetCommand({ TableName: YUTAI_MASTER_TABLE_NAME, Key: { ticker } }));
   if (!result.Item) return undefined;
-  return {
-    ticker: result.Item.ticker,
-    companyName: result.Item.companyName,
-    content: result.Item.content,
-    value: result.Item.value ?? null,
-    unitShares: result.Item.unitShares,
-    rightsMonths: result.Item.rightsMonths ?? [],
-    riskStatus: result.Item.riskStatus ?? 'na',
-    maxGyakuhibu: result.Item.maxGyakuhibu ?? null,
-    maxRate: result.Item.maxRate ?? null,
-    days: result.Item.days ?? null,
-    closePrice: result.Item.closePrice ?? null,
-  };
+  return toYutaiMasterRow(result.Item);
 }
 
 async function latestPricePoint(ticker: string): Promise<{ close: number; volume: number | null } | undefined> {
@@ -467,7 +561,6 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
     companyName: master.companyName ?? null,
     content: master.content,
     value: master.value,
-    unitShares: master.unitShares,
     rightsDate: rightsDate ?? null,
     basicInfo: {
       closePrice: price?.close ?? null,
@@ -485,6 +578,8 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
       days: master.days,
     },
     rightsHistory: history,
+    benefitGroups: master.benefitGroups,
+    ...buildBenefitFields(master),
     features: { tseMargin: tseMarginEnabled() },
   });
 }

@@ -660,3 +660,195 @@ test('GET /yutai/tdnet-events paginates through multiple pages and returns every
   const parsed = body(result) as { events: Array<{ ticker: string }> };
   expect(parsed.events.map((e) => e.ticker)).toEqual(['1001', '2002']);
 });
+
+// マスタ行1件ぶんの素材。個別ページ取得済み・実績ありの状態。
+function crossMasterItem(overrides: Record<string, unknown> = {}) {
+  return {
+    ticker: '7458',
+    companyName: '第一興商',
+    content: '優待利用割引カード（5,000円相当～）',
+    value: 5000,
+    unitShares: 100,
+    requiredShares: 200,
+    crossEligible: 'ok',
+    holdingKind: 'none',
+    holdingMinMonths: null,
+    minTierValueYen: 5000,
+    benefitParseWarning: null,
+    rightsMonths: [3],
+    riskStatus: 'safe',
+    maxGyakuhibu: 1200,
+    maxRate: 400,
+    days: 3,
+    closePrice: 2000,
+    requiredInvestment: 400000,
+    lastGyakuhibu: { rightsDate: '2025-03-27', avgRate: 2, days: 3, perShareRate: 6, cost: 1200, basedOnUnitShares: false },
+    sameMonthLastYearGyakuhibu: { rightsDate: '2025-03-27', avgRate: 2, days: 3, perShareRate: 6, cost: 1200, basedOnUnitShares: false },
+    ...overrides,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyItem = Record<string, any>;
+const tickersOf = (result: APIGatewayProxyResultV2) =>
+  (body(result) as { tickers: AnyItem[] }).tickers.map((t) => t.ticker);
+
+test('GET /yutai returns the cross-eligibility and cost fields', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [crossMasterItem()] });
+
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
+  const item = (body(response) as { tickers: AnyItem[] }).tickers[0];
+
+  // 一覧は銘柄数に関係なくマスタのスキャン1回だけ(銘柄ごとのクエリを足さない)
+  expect(mockSend).toHaveBeenCalledTimes(1);
+  expect(item.unitShares).toBe(100);
+  expect(item.requiredShares).toBe(200);
+  expect(item.crossEligible).toBe('ok');
+  expect(item.holdingKind).toBe('none');
+  expect(item.holdingMinMonths).toBeNull();
+  expect(item.minTierValueYen).toBe(5000);
+  expect(item.benefitParseWarning).toBeNull();
+  expect(item.requiredInvestment).toBe(400000);
+  expect(item.lastGyakuhibu.cost).toBe(1200);
+  expect(item.sameMonthLastYearGyakuhibu.rightsDate).toBe('2025-03-27');
+  // 既存項目が消えていないこと
+  expect(item.maxGyakuhibu).toBe(1200);
+  expect(item.rightsDate).toBeDefined();
+});
+
+test('GET /yutai defaults the cross fields for a row the detail sync has not reached', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [{ ticker: '1111', content: '割引券', value: 1000, unitShares: 100, rightsMonths: [3] }],
+  });
+
+  const item = (body(await handler(makeEvent('GET /yutai', { queryStringParameters: {} }))) as { tickers: AnyItem[] }).tickers[0];
+
+  // 項目を省略したり例外を投げたりせず、既定値で埋める
+  expect(item.requiredShares).toBeNull();
+  expect(item.crossEligible).toBe('unknown');
+  expect(item.holdingKind).toBe('unknown');
+  expect(item.lastGyakuhibu).toBeNull();
+  expect(item.requiredInvestment).toBeNull();
+});
+
+test('GET /yutai filters by share price range', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [
+      crossMasterItem({ ticker: '1111', closePrice: 500 }),
+      crossMasterItem({ ticker: '2222', closePrice: 2000 }),
+      crossMasterItem({ ticker: '3333', closePrice: 9000 }),
+    ],
+  });
+
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { priceMin: '1000', priceMax: '5000' } }));
+  expect(tickersOf(response)).toEqual(['2222']);
+});
+
+test('GET /yutai filters by required investment range', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [
+      crossMasterItem({ ticker: '1111', requiredInvestment: 50000 }),
+      crossMasterItem({ ticker: '2222', requiredInvestment: 400000 }),
+    ],
+  });
+
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { investmentMax: '100000' } }));
+  expect(tickersOf(response)).toEqual(['1111']);
+});
+
+test('a range filter excludes rows whose value is unknown', async () => {
+  // 「株価100万円以下」の検索結果に株価不明の銘柄を混ぜない。
+  mockSend.mockResolvedValueOnce({
+    Items: [crossMasterItem({ ticker: '1111', closePrice: null }), crossMasterItem({ ticker: '2222', closePrice: 2000 })],
+  });
+
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { priceMax: '5000' } }));
+  expect(tickersOf(response)).toEqual(['2222']);
+});
+
+test('GET /yutai filters by cross eligibility', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [
+      crossMasterItem({ ticker: '1111', crossEligible: 'ok' }),
+      crossMasterItem({ ticker: '2222', crossEligible: 'ng' }),
+      crossMasterItem({ ticker: '3333', crossEligible: 'unknown' }),
+    ],
+  });
+
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { crossEligible: 'ng' } }));
+  expect(tickersOf(response)).toEqual(['2222']);
+});
+
+test('an all or absent cross eligibility filter keeps every row', async () => {
+  mockSend.mockResolvedValueOnce({
+    Items: [crossMasterItem({ ticker: '1111', crossEligible: 'ok' }), crossMasterItem({ ticker: '2222', crossEligible: 'ng' })],
+  });
+
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { crossEligible: 'all' } }));
+  expect(tickersOf(response)).toHaveLength(2);
+});
+
+test('a non-numeric range filter is ignored rather than dropping every row', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [crossMasterItem()] });
+
+  const response = await handler(makeEvent('GET /yutai', { queryStringParameters: { priceMin: 'abc' } }));
+  expect(tickersOf(response)).toHaveLength(1);
+});
+
+test('GET /yutai/forecast carries the same cross fields', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [crossMasterItem()] })
+    .mockResolvedValueOnce({ Items: [] });
+
+  const item = (body(await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: {} }))) as { tickers: AnyItem[] }).tickers[0];
+  expect(item.requiredShares).toBe(200);
+  expect(item.crossEligible).toBe('ok');
+  expect(item.lastGyakuhibu.cost).toBe(1200);
+  // 予測一覧固有の項目も残っていること
+  expect(item.forecast).toBeDefined();
+});
+
+test('GET /yutai/forecast applies the same new filters as GET /yutai', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        crossMasterItem({ ticker: '1111', closePrice: 500, crossEligible: 'ok' }),
+        crossMasterItem({ ticker: '2222', closePrice: 2000, crossEligible: 'ng' }),
+        crossMasterItem({ ticker: '3333', closePrice: 2000, crossEligible: 'ok' }),
+      ],
+    })
+    .mockResolvedValueOnce({ Items: [] });
+
+  const response = await handler(
+    makeEvent('GET /yutai/forecast', { queryStringParameters: { priceMin: '1000', crossEligible: 'ok' } }),
+  );
+  expect(tickersOf(response)).toEqual(['3333']);
+  // マスタとforecastの2テーブルをスキャンするだけで、銘柄ごとのクエリは足さない
+  expect(mockSend).toHaveBeenCalledTimes(2);
+});
+
+test('GET /yutai/:ticker returns the benefit tier groups verbatim', async () => {
+  const groups = [
+    {
+      title: '◎優待利用割引カード',
+      holdingMonths: null,
+      holdingRaw: null,
+      tiers: [{ shares: 200, valueYen: 5000, rawText: '5,000円 相当' }],
+    },
+  ];
+  // 既存テストと同じ順序でモックする(master get → price → summary → actual query)
+  mockSend
+    .mockResolvedValueOnce({ Item: crossMasterItem({ benefitGroups: groups }) })
+    .mockResolvedValueOnce({ Items: [{ close: 2000, volume: 1000 }] })
+    .mockResolvedValueOnce({ Items: [] })
+    .mockResolvedValueOnce({ Items: [] });
+
+  const parsed = body(await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '7458' } }))) as AnyItem;
+  expect(parsed.benefitGroups).toEqual(groups);
+  expect(parsed.requiredShares).toBe(200);
+  expect(parsed.crossEligible).toBe('ok');
+  // 価格は basicInfo.closePrice(ライブ値)に一本化。スナップショットを同名で並べない
+  expect(parsed.closePrice).toBeUndefined();
+  expect(parsed.requiredInvestment).toBeUndefined();
+  expect(parsed.basicInfo.closePrice).toBe(2000);
+});
