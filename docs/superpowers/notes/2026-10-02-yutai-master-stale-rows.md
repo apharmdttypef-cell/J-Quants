@@ -69,8 +69,106 @@ master-sync は「サイトから消えた銘柄」を検出しない(upsert の
 
 ## 削除した6行の完全な内容(復元用)
 
-削除は 2026-10-02 に実施。復元するにはこのJSONを  に PutItem すればよい。
-ただし復元しても  は kabuyutai.com に無い銘柄を更新しないので、
-値は削除時点のまま古いままになる点に注意。
+削除は 2026-10-02 に実施。復元するにはこのJSONの各要素を `JQuantsYutaiMaster` に PutItem すればよい。
+ただし復元しても `yutai-master-sync-batch` は kabuyutai.com の一覧に無い銘柄を更新しないため、
+値は削除時点のまま古いままになる(`conditionCheckedAt` も入らないので detail-sync もスキップする)。
 
-
+```json
+[
+  {
+    "closePrice": 3700,
+    "companyName": "日本ドライケミカル",
+    "content": "オリジナルQUOカード（1,000円相当～）など",
+    "days": 1,
+    "maxGyakuhibu": 2960,
+    "maxRate": 29.6,
+    "rightsMonths": [
+      9
+    ],
+    "riskStatus": "danger",
+    "ticker": "1909",
+    "unitShares": 100,
+    "value": 1000
+  },
+  {
+    "closePrice": 1867,
+    "companyName": "三機サービス",
+    "content": "QUOカード（500円相当～）",
+    "days": 1,
+    "maxGyakuhibu": 1520,
+    "maxRate": 15.2,
+    "minInvestment": 190100,
+    "rightsMonths": [
+      5
+    ],
+    "riskStatus": "danger",
+    "ticker": "6044",
+    "unitShares": 100,
+    "value": 500
+  },
+  {
+    "closePrice": 1051,
+    "companyName": "デジタルハーツホールディングス",
+    "content": "QUOカード（10,000円相当）",
+    "days": 1,
+    "maxGyakuhibu": 4400,
+    "maxRate": 8.8,
+    "minInvestment": 529000,
+    "rightsMonths": [
+      3
+    ],
+    "riskStatus": "safe",
+    "ticker": "3676",
+    "unitShares": 500,
+    "value": 10000
+  },
+  {
+    "closePrice": 2192,
+    "companyName": "日新商事",
+    "content": "カタログギフト（3,000円相当～）",
+    "days": 1,
+    "maxGyakuhibu": 5280,
+    "maxRate": 17.6,
+    "minInvestment": 656400,
+    "rightsMonths": [
+      3
+    ],
+    "riskStatus": "danger",
+    "ticker": "7490",
+    "unitShares": 300,
+    "value": 3000
+  },
+  {
+    "closePrice": 703,
+    "companyName": "エンビプロ・ホールディングス",
+    "content": "QUOカード（2,000円相当）",
+    "days": 1,
+    "maxGyakuhibu": 2400,
+    "maxRate": 6,
+    "minInvestment": 295600,
+    "rightsMonths": [
+      6
+    ],
+    "riskStatus": "danger",
+    "ticker": "5698",
+    "unitShares": 400,
+    "value": 2000
+  },
+  {
+    "closePrice": 1249,
+    "companyName": "アスタリスク",
+    "content": "QUOカードPay（500円相当）",
+    "days": 1,
+    "maxGyakuhibu": 1040,
+    "maxRate": 10.4,
+    "minInvestment": 150000,
+    "rightsMonths": [
+      8
+    ],
+    "riskStatus": "danger",
+    "ticker": "6522",
+    "unitShares": 100,
+    "value": 500
+  }
+]
+```
