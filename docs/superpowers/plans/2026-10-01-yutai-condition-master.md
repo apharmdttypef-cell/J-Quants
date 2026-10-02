@@ -3392,7 +3392,7 @@ APP_PASSWORD=xxxxx npx cdk deploy
 - [ ] **Step 2: 一覧ページを再同期して detailUrl と listBadge を入れる**
 
 ```bash
-aws lambda invoke --function-name "$(aws cloudformation describe-stack-resource --stack-name JQuantsStack --logical-resource-id YutaiMasterSyncBatchFunction --query 'StackResourceDetail.PhysicalResourceId' --output text)" --invocation-type Event /dev/null
+aws lambda invoke --function-name "$(aws cloudformation list-stack-resources --stack-name JQuantsStack --query "StackResourceSummaries[?starts_with(LogicalResourceId,'YutaiMasterSyncBatchFunction')].PhysicalResourceId" --output text)" --invocation-type Event /dev/null
 ```
 
 12ヶ月分の走査で約10分かかる。完了後、`detailUrl` が入った件数と `unitShares` が 100 に戻ったことを確認する。
@@ -3411,7 +3411,7 @@ Windows の Git-Bash では `/tmp/...` がネイティブの `node.exe` から�
 まず1銘柄で動作を確かめる。第一興商は必要株数が 200 になるはずの銘柄。
 
 ```bash
-FN=$(aws cloudformation describe-stack-resource --stack-name JQuantsStack --logical-resource-id YutaiDetailSyncBatchFunction --query 'StackResourceDetail.PhysicalResourceId' --output text)
+FN=$(aws cloudformation list-stack-resources --stack-name JQuantsStack --query "StackResourceSummaries[?starts_with(LogicalResourceId,'YutaiDetailSyncBatchFunction')].PhysicalResourceId" --output text)
 aws lambda invoke --function-name "$FN" --payload '{"tickers":["7458"]}' --cli-binary-format raw-in-base64-out /dev/null
 aws dynamodb get-item --table-name JQuantsYutaiMaster --key '{"ticker":{"S":"7458"}}' --projection-expression "requiredShares,crossEligible,holdingKind,minTierValueYen,benefitParseWarning"
 ```
@@ -3454,7 +3454,7 @@ aws dynamodb scan --table-name JQuantsYutaiMaster --projection-expression "ticke
 スケジュール(JST 18:20)を待たずに動かす。
 
 ```bash
-aws lambda invoke --function-name "$(aws cloudformation describe-stack-resource --stack-name JQuantsStack --logical-resource-id YutaiRiskPrecomputeBatchFunction --query 'StackResourceDetail.PhysicalResourceId' --output text)" --invocation-type Event /dev/null
+aws lambda invoke --function-name "$(aws cloudformation list-stack-resources --stack-name JQuantsStack --query "StackResourceSummaries[?starts_with(LogicalResourceId,'YutaiRiskPrecomputeBatchFunction')].PhysicalResourceId" --output text)" --invocation-type Event /dev/null
 ```
 
 完了後、第一興商の行で必要資金と前回逆日歩が入ったことを確認する。
