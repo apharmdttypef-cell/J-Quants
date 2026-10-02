@@ -113,7 +113,7 @@ test('parses a benefit with one unconditional group and one long-holding group',
   // h3は引き継がれ、stitは次の表にだけ効く
   expect(groups[1].title).toBe(groups[0].title);
   expect(groups[1].holdingMonths).toBe(36);
-  expect(groups[1].holdingRaw).toBe('継続保有期間3年以上');
+  expect(groups[1].holdingRaw).toBe('株式継続保有期間3年以上');
   expect(groups[1].tiers[0].valueYen).toBe(2000);
 });
 
@@ -137,7 +137,7 @@ test('reads a holding period written in months', () => {
   const groups = parseBenefitDetail(MAITAKE_HTML);
   expect(groups).toHaveLength(1);
   expect(groups[0].holdingMonths).toBe(6);
-  expect(groups[0].holdingRaw).toBe('継続保有期間6か月以上');
+  expect(groups[0].holdingRaw).toBe('株式継続保有期間6か月以上');
 });
 
 test('reads a minimum tier above one trading unit', () => {
@@ -292,7 +292,7 @@ test('reads a holding period written without 以上', () => {
   expect(groups).toHaveLength(1);
   expect(groups[0].holdingMonths).toBe(36);
   // 「以上」が無い原文には「以上」を足さない(原文のまま残す)
-  expect(groups[0].holdingRaw).toBe('継続保有期間3年');
+  expect(groups[0].holdingRaw).toBe('株式継続保有期間3年');
 });
 
 test('reads the ヶ月 and カ月 spellings of a holding period', () => {
@@ -307,11 +307,11 @@ test('reads the ヶ月 and カ月 spellings of a holding period', () => {
 
   const kyaGetsu = parseBenefitDetail(sectionWith('【株式継続保有期間6ヶ月以上】'));
   expect(kyaGetsu[0].holdingMonths).toBe(6);
-  expect(kyaGetsu[0].holdingRaw).toBe('継続保有期間6ヶ月以上');
+  expect(kyaGetsu[0].holdingRaw).toBe('株式継続保有期間6ヶ月以上');
 
   const kaGetsu = parseBenefitDetail(sectionWith('【株式継続保有期間12カ月以上】'));
   expect(kaGetsu[0].holdingMonths).toBe(12);
-  expect(kaGetsu[0].holdingRaw).toBe('継続保有期間12カ月以上');
+  expect(kaGetsu[0].holdingRaw).toBe('株式継続保有期間12カ月以上');
 });
 
 // バッジと個別ページの突き合わせは「1回のクロスで優待が取れるか」という本機能の
@@ -351,4 +351,83 @@ test('joins several warnings with a comma', () => {
     { title: '◎A', holdingMonths: 24, holdingRaw: '継続保有期間2年以上', tiers: [{ shares: 100, valueYen: null, rawText: 'ー' }] },
   ];
   expect(deriveBenefitScalars(groups, null).benefitParseWarning).toBe('duplicate-groups,no-values,badge-mismatch');
+});
+
+// 2026-10-02 の本番初回取得で判明: kabuyutai.com の継続保有条件は「継続保有期間N年以上」
+// だけではない。NTT(9432)は【2年連続で100株以上を保有】、三井不動産(8801)は
+// 【通常優待の取得条件を3年連続で満たす】と書く。リテラル「継続保有期間」を要求していた
+// ため条件を取りこぼし、holdingKind=none/bonus → crossEligible=ok と誤判定していた
+// (= 1回のクロスで取れないのに「取れる」と出す危険側の誤り)。一覧ページのバッジとの
+// 突き合わせが8件検出したが、バッジが無い銘柄では警告すら出ないため根本を直す。
+const NTT_HTML = `
+<section id="yutai_detail">
+<h3>◎dポイント（1ポイント1円相当）</h3>
+<div class="stit">【2年連続で100株以上を保有】</div>
+<table><tr><td>100株</td><td><b>1,500</b>ポイント</td></tr></table>
+<div class="stit">【5年連続で100株以上を保有】</div>
+<table><tr><td>100株</td><td><b>3,000</b>ポイント</td></tr></table>
+</section>
+<p>この企業の公式ホームページ</p>
+`;
+
+const MITSUI_HTML = `
+<section id="yutai_detail">
+<h3>◎三井ショッピングパークポイント（通常優待）</h3>
+<div class="stit">【株式継続保有期間1年以上】</div>
+<table><tr><td>100株</td><td><b>1,000円</b>相当</td></tr></table>
+<h3>◎三井ショッピングパークポイント（追加贈呈）</h3>
+<div class="stit">【通常優待の取得条件を3年連続で満たす】</div>
+<table><tr><td>100株</td><td><b>1,000円</b>相当を追加贈呈</td></tr></table>
+<div class="stit">【通常優待の取得条件を5年連続で満たす】</div>
+<table><tr><td>100株</td><td><b>2,000円</b>相当を追加贈呈</td></tr></table>
+</section>
+<p>この企業の公式ホームページ</p>
+`;
+
+test('reads a holding condition written as N年連続 rather than 継続保有期間', () => {
+  const groups = parseBenefitDetail(NTT_HTML);
+  expect(groups).toHaveLength(2);
+  expect(groups.map((g) => g.holdingMonths)).toEqual([24, 60]);
+  // 原文は株数の条件まで含めて出す(「2年連続」だけでは画面で意味が通らない)
+  expect(groups[0].holdingRaw).toBe('2年連続で100株以上を保有');
+});
+
+test('treats every group as conditional when all conditions use the 連続 wording', () => {
+  // NTTはバッジが choukinomi(長期優待のみ)。全グループに条件があるので required。
+  const derived = deriveBenefitScalars(parseBenefitDetail(NTT_HTML), 'choukinomi');
+  expect(derived.holdingKind).toBe('required');
+  expect(derived.crossEligible).toBe('ng');
+  expect(derived.holdingMinMonths).toBe(24);
+  // バッジと一致するので mismatch は立たない。NTTの優待は「1,500ポイント」で円表記が
+  // 無いため no-values だけが立つ(円に換算できない優待は想定内の分類)。
+  expect(derived.benefitParseWarning).toBe('no-values');
+});
+
+test('reads a holding condition written as 取得条件をN年連続で満たす', () => {
+  const groups = parseBenefitDetail(MITSUI_HTML);
+  expect(groups).toHaveLength(3);
+  expect(groups.map((g) => g.holdingMonths)).toEqual([12, 36, 60]);
+  expect(groups[0].holdingRaw).toBe('株式継続保有期間1年以上');
+  expect(groups[1].holdingRaw).toBe('通常優待の取得条件を3年連続で満たす');
+});
+
+test('derives required when a mix of 継続保有期間 and 連続 wordings all impose conditions', () => {
+  const derived = deriveBenefitScalars(parseBenefitDetail(MITSUI_HTML), 'choukinomi');
+  expect(derived.holdingKind).toBe('required');
+  expect(derived.crossEligible).toBe('ng');
+  expect(derived.holdingMinMonths).toBe(12);
+  expect(derived.benefitParseWarning).toBeNull();
+});
+
+test('does not mistake a share count for a holding period', () => {
+  // 【100株以上】だけの見出しは保有期間ではない。株数を年数と読んだら致命的。
+  const html = `
+<section id="yutai_detail">
+<h3>◎QUOカード</h3>
+<div class="stit">【100株以上】</div>
+<table><tr><td>100株</td><td><b>1,000円</b>相当</td></tr></table>
+</section>
+<p>この企業の公式ホームページ</p>
+`;
+  expect(parseBenefitDetail(html)[0].holdingMonths).toBeNull();
 });

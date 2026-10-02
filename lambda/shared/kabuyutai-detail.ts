@@ -40,13 +40,38 @@ function detailSection(html: string): string | null {
   return html.slice(start, end);
 }
 
-// 「継続保有期間3年以上」「継続保有期間6か月以上」の両表記を月数に正規化する。
-// 「ヶ月」「カ月」の表記ゆれも受ける。rawは「以上」まで含めて原文のまま残す。
+// 継続保有条件の表記を月数に正規化する。kabuyutai.comの書式は1系統ではなく、
+// 2026-10-02の本番初回取得で少なくとも次の3系統が実在することが分かった。
+//
+//   【株式継続保有期間3年以上】             … 最も明示的
+//   【2年連続で100株以上を保有】            … NTT(9432)
+//   【通常優待の取得条件を3年連続で満たす】  … 三井不動産(8801)
+//
+// 当初は1系統目のリテラル「継続保有期間」だけを要求していたため、2・3系統目を取りこぼして
+// holdingKind を none/bonus と誤判定していた。結果 crossEligible が ok になり、「1回のクロスでは
+// 取れない銘柄を取れる」と出す危険側の誤りになる。一覧ページのバッジとの突き合わせが8件を
+// 検出したが、バッジが無い銘柄では警告すら出ないため根本を直した。
+//
+// 「100株以上」を年数と読まないよう、数字の直後に年/月の単位を必ず要求する。
+const HOLDING_PATTERNS = [
+  /継続保有期間\s*(\d+)\s*(年|ヶ月|か月|カ月)(?:以上)?/,
+  /(\d+)\s*(年|ヶ月|か月|カ月)連続/,
+  /(\d+)\s*(年|ヶ月|か月|カ月)以上(?:継続して)?保有/,
+];
+
 function parseHolding(text: string): { months: number; raw: string } | null {
-  const match = text.match(/継続保有期間\s*(\d+)\s*(年|ヶ月|か月|カ月)(?:以上)?/);
-  if (!match) return null;
-  const amount = Number(match[1]);
-  return { months: match[2] === '年' ? amount * 12 : amount, raw: match[0] };
+  for (const pattern of HOLDING_PATTERNS) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const amount = Number(match[1]);
+    // rawは画面にそのまま出すので、見出し全体から【】を外したものを使う。部分一致
+    // (「2年連続」)だけでは何株を何年持つのか読めない。
+    return {
+      months: match[2] === '年' ? amount * 12 : amount,
+      raw: text.replace(/^[【\s]+/, '').replace(/[】\s]+$/, ''),
+    };
+  }
+  return null;
 }
 
 function parseTiers(tableHtml: string): BenefitTier[] {
