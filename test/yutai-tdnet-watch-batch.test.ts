@@ -1,3 +1,9 @@
+// このファイルをモジュールにする。トップレベルのimport/exportが無いとファイルの宣言が
+// グローバルスコープに出てしまい、同名の宣言(mockSend・handlerなど)を持つ他のテスト
+// ファイルとts-jestの型検査で衝突する(TS2451)。どのファイルが同じワーカーに割り当て
+// られるかで発火するため非決定的に落ちていた。
+export {};
+
 const mockSend = jest.fn();
 const mockFetchAllListings = jest.fn();
 const mockFetch = jest.fn();
