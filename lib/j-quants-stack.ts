@@ -419,19 +419,29 @@ export class JQuantsStack extends cdk.Stack {
     // 成功済みの銘柄は取り直されない)。ハンドラ側が残り時間で自分を打ち切るのは
     // このためで、retryOnServiceExceptions: falseにはしない — falseにすると
     // 誰も検討していない30秒 × 3回のポリシーが代わりに有効になる。
-    const detailSyncMap = new stepfunctions.Map(this, 'YutaiDetailSyncBuckets', {
+    // バケットの一覧はPassステートで状態に注入し、MapはItemsPathで参照する。
+    // `ProvideItems.jsonArray`(Itemsフィールド)はJSONata専用で、既定のJSONPathでは
+    // サービス側が「The QueryLanguage is set to 'JSONPath', but field 'Items' is only
+    // supported for the 'JSONata' QueryLanguage」で作成を拒否する(2026-10-02に実際の
+    // デプロイで判明)。synthもCDKのユニットテストも通ってしまうため、ここはCDKのAPIが
+    // 存在するかではなくStep Functions側のスキーマに合わせる必要がある。
+    const detailSyncSeed = new stepfunctions.Pass(this, 'YutaiDetailSyncSeed', {
       // 1000台〜9000台。再実行はconditionCheckedAtにより冪等で、成功済みの銘柄は
       // 取り直されない。
-      items: stepfunctions.ProvideItems.jsonArray(
-        ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((codePrefix) => ({ codePrefix })),
-      ),
+      result: stepfunctions.Result.fromObject({
+        buckets: ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((codePrefix) => ({ codePrefix })),
+      }),
+    });
+
+    const detailSyncMap = new stepfunctions.Map(this, 'YutaiDetailSyncBuckets', {
+      itemsPath: '$.buckets',
       maxConcurrency: 1,
     });
     detailSyncMap.itemProcessor(detailSyncBucket);
 
     new stepfunctions.StateMachine(this, 'YutaiDetailSyncStateMachine', {
       stateMachineName: 'JQuantsYutaiDetailSync',
-      definitionBody: stepfunctions.DefinitionBody.fromChainable(detailSyncMap),
+      definitionBody: stepfunctions.DefinitionBody.fromChainable(detailSyncSeed.next(detailSyncMap)),
       // 9バケット直列で約33分。リトライ込みでも余裕を持たせる。
       timeout: cdk.Duration.hours(2),
     });

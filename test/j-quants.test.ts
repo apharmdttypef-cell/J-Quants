@@ -708,7 +708,14 @@ test('the detail sync state machine fans out to nine code-prefix buckets one at 
 
   expect(map.Type).toBe('Map');
   expect(map.MaxConcurrency).toBe(1);
-  expect(map.Items).toEqual(
+
+  // バケットはPassで注入してItemsPathで参照する。Itemsフィールドを使うと、synthも
+  // このテストも通るのにStep Functions側が作成を拒否する(JSONata専用のため。
+  // 2026-10-02に実際のデプロイで判明)。QueryLanguageを指定していない=JSONPathなので、
+  // Itemsが現れていないこと自体をここで固定する。
+  expect(map.ItemsPath).toBe('$.buckets');
+  expect(map.Items).toBeUndefined();
+  expect(definition.States.YutaiDetailSyncSeed.Result.buckets).toEqual(
     ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((codePrefix) => ({ codePrefix })),
   );
 });
