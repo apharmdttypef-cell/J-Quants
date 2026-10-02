@@ -3375,17 +3375,19 @@ git commit -m "Show the full benefit tier tables on the yutai detail page"
 
 - [ ] **Step 1: デプロイする**
 
+`APP_PASSWORD` は**必須**。`lib/j-quants-stack.ts` は未設定だと synth の時点で例外を投げる(無認証でのデプロイを構造的に不可能にするための意図的な設計。`README.md` の「認証モデル」参照)。したがって `cdk diff` も `cdk deploy` も、環境変数を付けずに実行すると失敗する。値は Secrets Manager から読まれるのではなく**逆** — synth 時の `APP_PASSWORD` の値がそのまま `JQuantsAppPassword` シークレットと CloudFront Function の Basic 認証に埋め込まれる。既存の本番と同じ値を渡すこと(違う値を渡すとフロントとAPIのパスワードが変わる)。
+
 ```bash
-npx cdk diff
+APP_PASSWORD=xxxxx npx cdk diff
 ```
 
 差分を読み、以下が含まれることを確認する。新しい Lambda 1つ、Step Functions ステートマシン1つとその IAM ロール、`YutaiRiskPrecomputeBatchFunction` の環境変数と IAM ポリシーの変更。**EventBridge ルールが増えていないこと**も確認する(増えていたら detail-sync にスケジュールを付けてしまっている)。
 
 ```bash
-npx cdk deploy
+APP_PASSWORD=xxxxx npx cdk deploy
 ```
 
-`APP_PASSWORD` は不要(`bin/j-quants.ts` が Secrets Manager の `JQuantsAppPassword` から読む)。
+この手順はバックエンドだけを更新する。`cdk deploy` はフロントの S3 バケットに触れないため、画面に新しい4列が出るのは手順6でフロントを配信してからになる。
 
 - [ ] **Step 2: 一覧ページを再同期して detailUrl と listBadge を入れる**
 
@@ -3423,6 +3425,10 @@ SM=$(aws stepfunctions list-state-machines --query "stateMachines[?name=='JQuant
 aws stepfunctions start-execution --state-machine-arn "$SM"
 ```
 
+**バケットが失敗したときの扱い**: ステートマシンをもう一度 `start-execution` する。detail-sync は `conditionCheckedAt`(当日分を書いた銘柄は90日間スキップ)により冪等なので、成功済みの銘柄は取り直されず、失敗したバケットの残りだけが進む。
+
+ただし**Lambda のタイムアウトはリトライされない**。Step Functions にはタイムアウトが `Lambda.Unknown` として届き、`LambdaInvoke` が既定で登録するリトライヤー(`Lambda.ClientExecutionTimeoutException` / `ServiceException` / `AWSLambdaException` / `SdkClientException`)のどれにも一致しないため、そのバケットで実行全体が失敗し**後続のバケットは走らない**。実行履歴で「どのバケットまで終わったか」を必ず確認すること(例: バケット4で落ちていれば5〜9は未処理)。再実行すれば未処理分から進む。なお Lambda 側は残り実行時間が尽きる手前で自分からループを打ち切る(打ち切った分は `conditionCheckedAt` 未更新のまま次回へ持ち越される)ため、通常はタイムアウトに到達しない。
+
 - [ ] **Step 4: 取りこぼしを評価する**
 
 完了後、各バケットのログの最終行(`yutai-detail-sync-batch: codePrefix=... warnings: ...`)を集める。
@@ -3439,7 +3445,11 @@ aws dynamodb scan --table-name JQuantsYutaiMaster --projection-expression "ticke
 
 `requiredShares` が null の件数が全体の数%を大きく超える、または `no-groups` が多数ある場合は、サイト構造の想定と合っていない。その場合は手順5に進まず、該当銘柄の `detailUrl` を1つ開いて構造を確認し、パーサーを直してから `tickers` 指定で再取得する。
 
+**`badge-mismatch` の件数は特に確認する**(ログの警告集計に理由別で出る)。これは一覧ページのバッジと個別ページの解析が食い違っている銘柄 = 「1回のクロスで優待が取れるか」というこの機能の中心的な判断がどちらか壊れている銘柄で、画面には安全側に倒して「不明」と出る。ほぼ 0 件であることを確認してから手順5に進む。まとまった件数が出た場合は、どちらの解析が誤っているのかを実ページで確かめて直す(バッジの抽出か、継続保有条件の解析のどちらか)。
+
 - [ ] **Step 5: 日次バッチを1回手動で回して集計を入れる**
+
+**前提**: 手順4で `no-groups` が多数でないこと、かつ `badge-mismatch` がほぼ 0 件であること。満たさない場合はここで止めてパーサーを直す — 誤った必要株数で必要資金と前回逆日歩を書くと、画面上は「正しく計算された値」と区別がつかなくなる。
 
 スケジュール(JST 18:20)を待たずに動かす。
 
@@ -3455,11 +3465,26 @@ aws dynamodb get-item --table-name JQuantsYutaiMaster --key '{"ticker":{"S":"745
 
 `requiredInvestment` が `closePrice × 200` になっていること、`lastGyakuhibu.basedOnUnitShares` が `false` であること、`unitShares` が 100 のままであることを確認する。
 
-- [ ] **Step 6: 画面を確認する**
+- [ ] **Step 6: フロントを配信する**
 
-本番の `/yutai` と `/yutai/forecast` を開き、4列に値が入っていること、絞り込みが効くことを確認する。`/yutai/7458` で段階表(200株→5,000円、2,000株→12,500円)が出ることを確認する。
+`cdk deploy`(手順1)はフロントの S3 バケットに触れない。この手順を踏むまで本番で配信されているのは**古いバンドル**で、新しい4列は存在しない。手順3・4でスクレイピング結果を確かめ、手順5で集計が入ったこの位置で初めて画面を出す(設計書の「手順3の確認を経てから画面を出す」)。
 
-- [ ] **Step 7: 結果を記録する**
+`FrontendBucketName` / `DistributionId` は `cdk deploy` の出力(CfnOutput)で確認する。手順は `README.md` の「主要コマンド」と同じ。
+
+```bash
+cd frontend
+npm run build
+aws s3 sync dist/ s3://<FrontendBucketName> --delete
+aws cloudfront create-invalidation --distribution-id <DistributionId> --paths '/*'
+```
+
+今回の変更はAPIのルートを削除も改名もしていない(項目の追加のみ)ため、`README.md` が言う「ルート削除時はフロントを先に配信する」順序の制約は当たらない。バックエンドを先にデプロイしてよい。
+
+- [ ] **Step 7: 画面を確認する**
+
+本番の `/yutai` と `/yutai/forecast` を開き(CloudFront の invalidation 完了後。ブラウザキャッシュが残る場合はスーパーリロード)、4列に値が入っていること、絞り込みが効くことを確認する。`/yutai/7458` で段階表(200株→5,000円、2,000株→12,500円)が出ることを確認する。一覧の「前回逆日歩」と `/yutai/7458` の実績逆日歩・`/yutai/7458/forecast` の過去権利日の金額が**同じ権利日で一致している**ことも確認する(どちらも必要株数200株ベースで組み直しているため、一致しなければ株数の扱いがどこかで食い違っている)。
+
+- [ ] **Step 8: 結果を記録する**
 
 `docs/superpowers/notes/2026-10-01-yutai-detail-sync-runbook.md` に以下を書く。測定した実数を入れること(「おおむね成功」のような曖昧な記述は役に立たない)。
 
@@ -3468,10 +3493,11 @@ aws dynamodb get-item --table-name JQuantsYutaiMaster --key '{"ticker":{"S":"745
 - `requiredShares` が取れた件数と取れなかった件数
 - `benefitParseWarning` の理由別件数
 - `requiredShares !== unitShares` だった銘柄の一覧(第一興商・ノジマ以外に何があったか。これは「単元100株だと思って買うと優待が取れない」銘柄のリストなので、それ自体が価値のある成果物)
-- ステートマシンの実行ARNと、失敗したバケットがあればその理由
+- ステートマシンの実行ARNと、失敗したバケットがあればその理由(タイムアウトで落ちたのか、再実行で解消したのか)
+- フロントを配信した日時と、CloudFront invalidation の完了を確認した時刻
 - 次に `yutai-master-sync-batch` と detail-sync を手動で回すべき目安(クールダウンは90日)
 
-- [ ] **Step 8: コミット**
+- [ ] **Step 9: コミット**
 
 ```bash
 git add docs/superpowers/notes/2026-10-01-yutai-detail-sync-runbook.md
