@@ -431,3 +431,25 @@ test('does not mistake a share count for a holding period', () => {
 `;
   expect(parseBenefitDetail(html)[0].holdingMonths).toBeNull();
 });
+
+test('reads 継続保有期 with the 間 missing, as kabuyutai writes it on some pages', () => {
+  // カメイ(8037)の実ページは【株式継続保有期6か月以上】と書く(「間」が無い)。
+  // 「間」を要求していたため条件を落とし、kind=none → crossEligible=ok と誤判定していた。
+  const html = `
+<section id="yutai_detail">
+<h3>◎QUOカードなど</h3>
+<div class="stit">【株式継続保有期6か月以上】</div>
+<table><tr><td>100株</td><td><b>500円</b>相当</td></tr></table>
+<div class="stit">【株式継続保有期1年以上】</div>
+<table><tr><td>100株</td><td><b>1,000円</b>相当</td></tr></table>
+</section>
+<p>この企業の公式ホームページ</p>
+`;
+  const groups = parseBenefitDetail(html);
+  expect(groups.map((g) => g.holdingMonths)).toEqual([6, 12]);
+  expect(groups[0].holdingRaw).toBe('株式継続保有期6か月以上');
+  const derived = deriveBenefitScalars(groups, 'choukinomi');
+  expect(derived.holdingKind).toBe('required');
+  expect(derived.crossEligible).toBe('ng');
+  expect(derived.benefitParseWarning).toBeNull();
+});
