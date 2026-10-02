@@ -52,6 +52,20 @@ function formatSignedYen(value: number | null): string {
   return `${value < 0 ? '-' : ''}${formatFinancialYen(String(Math.abs(value)))}`;
 }
 
+// 過去権利日のコストを出す株数。優待の権利獲得に必要な実際の株数が分かっていればそれを、
+// 未取得なら単元株数で代用する(lambda/shared/gyakuhibu-actual-summary.tsと同じ規則)。
+function sharesBasis(requiredShares: number | null, unitShares: number): number {
+  return requiredShares ?? unitShares;
+}
+
+// 1株あたりの料率 × 株数。保存済みのtotalAmountは読まない — あれは記録当時のunitShares
+// (移行期には200や300が入っている)を掛けた値で、必要株数とは別の株数を指している。
+// avgRateとdaysは株数に依存しないので、ここから組み直せば一覧画面の前回逆日歩と必ず一致する。
+function sharesBasedYen(perShareRate: number | null, shares: number): string {
+  if (perShareRate === null) return '—';
+  return formatFinancialYen(String(Math.round(perShareRate * shares)));
+}
+
 function scenarioText(forecast: YutaiForecast): string {
   if (forecast.scenario === 'last-rights') {
     const ratio =
@@ -101,6 +115,9 @@ export function YutaiForecastDetailPage() {
   const { data } = detailState;
   const { forecast } = data;
   const maxGyakuhibu = data.maxGyakuhibu;
+  // 過去権利日の金額を出す株数。必要株数が200株・300株の銘柄で単元株数(100株)を使うと
+  // 一覧画面の「前回逆日歩」の半分・3分の1の金額が並んでしまう。
+  const shares = sharesBasis(data.requiredShares, data.unitShares);
   const netP90 = forecast.forecastP90 !== null && data.value !== null ? data.value - forecast.forecastP90 : null;
 
   const chartData = BIN_LABELS.map((label) => {
@@ -288,7 +305,9 @@ export function YutaiForecastDetailPage() {
                 <th>貸株残</th>
                 <th>超過株数</th>
                 <th>超過率</th>
-                <th>実績逆日歩</th>
+                {/* 金額は必要株数ベース。株数が未取得なら単元株数で概算していることを
+                    列見出しで示す(一覧画面の「※」と同じ扱い)。 */}
+                <th>実績逆日歩({shares.toLocaleString('ja-JP')}株{data.requiredShares === null ? '・概算' : ''})</th>
                 <th>上限</th>
                 <th>充足率</th>
                 <th>応札</th>
@@ -303,10 +322,8 @@ export function YutaiForecastDetailPage() {
                   <td className="num">{h.lendingBalance.toLocaleString('ja-JP')}</td>
                   <td className="num">{h.excessShares.toLocaleString('ja-JP')}</td>
                   <td className="num">{excessRatioLabel(h)}</td>
-                  <td className="num">{formatFinancialYen(String(h.totalAmount))}</td>
-                  <td className="num">
-                    {h.maxRateActual !== null ? formatFinancialYen(String(h.maxRateActual * data.unitShares)) : '—'}
-                  </td>
+                  <td className="num">{sharesBasedYen(h.avgRate * h.days, shares)}</td>
+                  <td className="num">{sharesBasedYen(h.maxRateActual, shares)}</td>
                   <td className="num">{formatPercent(h.fillRatio)}</td>
                   <td>{h.bidRank ?? '—'}</td>
                   <td>{[h.restriction, h.emergencyMeasure].filter(Boolean).join('/') || '—'}</td>
@@ -314,6 +331,11 @@ export function YutaiForecastDetailPage() {
               ))}
             </tbody>
           </table>
+          {data.requiredShares === null && (
+            <p style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+              ※ 必要株数が未取得のため、実績逆日歩と上限は単元株数({data.unitShares.toLocaleString('ja-JP')}株)で概算しています。
+            </p>
+          )}
         </div>
       )}
 

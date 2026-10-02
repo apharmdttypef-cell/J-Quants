@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { YutaiCrossEligible, YutaiCrossFields } from '../api/types';
 import { formatFinancialYen } from './format';
@@ -48,9 +49,18 @@ export function crossColumns<T extends YutaiCrossFields>(): ColumnDef<T>[] {
       cell: ({ row }) => {
         const { crossEligible, holdingKind, holdingMinMonths, benefitParseWarning } = row.original;
         const months = holdingKind === 'required' && holdingMinMonths !== null ? `${holdingMinMonths}ヶ月` : null;
+        // 一覧ページのバッジと個別ページの解析が食い違っている銘柄は、保存値の優先順位
+        // (個別ページ優先)は変えずに、表示だけ安全側に倒して「不明」にする。誤りの
+        // コストが非対称だから — 誤った「可」はクロスして逆日歩を払った上で優待が
+        // 取れないが、誤った「長期のみ」は機会損失で済む。
+        const mismatched = benefitParseWarning !== null && benefitParseWarning.includes('badge-mismatch');
         return (
           <>
-            <span className={CROSS_BADGE_CLASS[crossEligible]}>{CROSS_LABEL[crossEligible]}</span>
+            {mismatched ? (
+              <span className="risk-badge risk-badge--caution">不明</span>
+            ) : (
+              <span className={CROSS_BADGE_CLASS[crossEligible]}>{CROSS_LABEL[crossEligible]}</span>
+            )}
             {months !== null && <span className="cross-months">{months}</span>}
             {/* 解析が不完全な銘柄は詳細ページで原文を確かめてほしい */}
             {benefitParseWarning !== null && <span className="cross-warning" title={benefitParseWarning}>⚠</span>}
@@ -94,7 +104,12 @@ export function crossColumns<T extends YutaiCrossFields>(): ColumnDef<T>[] {
               </span>
             )}
             {lastGyakuhibu.basedOnUnitShares && (
-              <span className="gyakuhibu-note" title="必要株数が未取得のため単元株数(100株)で概算しています">
+              // 単元株数は銘柄ごとの値をそのまま出す。「100株」と決め打ちすると、
+              // 移行期にunitSharesが200/300のまま残っている行で嘘の数字を出してしまう。
+              <span
+                className="gyakuhibu-note"
+                title={`必要株数が未取得のため単元株数(${row.original.unitShares.toLocaleString('ja-JP')}株)で概算しています`}
+              >
                 ※
               </span>
             )}
@@ -147,14 +162,56 @@ export function toCrossParams(state: CrossFilterState): CrossQueryParams {
   };
 }
 
+type CrossNumericFilters = Omit<CrossFilterState, 'crossEligible'>;
+
+function pickNumeric(state: CrossFilterState): CrossNumericFilters {
+  return {
+    priceMin: state.priceMin,
+    priceMax: state.priceMax,
+    investmentMin: state.investmentMin,
+    investmentMax: state.investmentMax,
+  };
+}
+
+function sameNumeric(a: CrossNumericFilters, b: CrossNumericFilters): boolean {
+  return (
+    a.priceMin === b.priceMin &&
+    a.priceMax === b.priceMax &&
+    a.investmentMin === b.investmentMin &&
+    a.investmentMax === b.investmentMax
+  );
+}
+
+// 数値欄からのAPI呼び出し用デバウンス(ms)。同じ画面のキーワード欄と同じ理由で必要 —
+// 無しだと必要資金に「400000」と打つ間に全表スキャンのリクエストが6回走る
+// (逆日歩予測画面はmaster+forecastの2スキャンなので12回)。キーワード欄に合わせて400ms。
+const NUMERIC_DEBOUNCE_MS = 400;
+
+// 入力中の値はこのコンポーネントが持ち、デバウンス後に親へ渡す(キーワード欄の
+// KeywordFilterInputと同じ仕組み)。親のstateが1文字ごとに変わると、親のuseAsyncの
+// 依存配列が変わって打つたびにリクエストが飛ぶ。
+//
+// onChangeは更新関数を受ける形にしてある。親のsetStateをそのまま渡せる(=参照が安定する)
+// ので、デバウンスのタイマーが親の再レンダーごとに張り替わらない。
 export function YutaiCrossFilters({
   state,
   onChange,
 }: {
   state: CrossFilterState;
-  onChange: (next: CrossFilterState) => void;
+  onChange: (update: (prev: CrossFilterState) => CrossFilterState) => void;
 }) {
-  const update = (patch: Partial<CrossFilterState>) => onChange({ ...state, ...patch });
+  const [numeric, setNumeric] = useState<CrossNumericFilters>(() => pickNumeric(state));
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      // 中身が同じなら同じオブジェクトを返してReactの再レンダーを省く(初回マウント時の
+      // 空振り対策)。
+      onChange((prev) => (sameNumeric(prev, numeric) ? prev : { ...prev, ...numeric }));
+    }, NUMERIC_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [numeric, onChange]);
+
+  const updateNumeric = (patch: Partial<CrossNumericFilters>) => setNumeric((prev) => ({ ...prev, ...patch }));
 
   return (
     <>
@@ -163,16 +220,16 @@ export function YutaiCrossFilters({
         <input
           type="number"
           className="input input--narrow"
-          value={state.priceMin}
-          onChange={(e) => update({ priceMin: e.target.value })}
+          value={numeric.priceMin}
+          onChange={(e) => updateNumeric({ priceMin: e.target.value })}
           placeholder="下限"
         />
         {' 〜 '}
         <input
           type="number"
           className="input input--narrow"
-          value={state.priceMax}
-          onChange={(e) => update({ priceMax: e.target.value })}
+          value={numeric.priceMax}
+          onChange={(e) => updateNumeric({ priceMax: e.target.value })}
           placeholder="上限"
         />
       </label>
@@ -181,24 +238,28 @@ export function YutaiCrossFilters({
         <input
           type="number"
           className="input input--narrow"
-          value={state.investmentMin}
-          onChange={(e) => update({ investmentMin: e.target.value })}
+          value={numeric.investmentMin}
+          onChange={(e) => updateNumeric({ investmentMin: e.target.value })}
           placeholder="下限"
         />
         {' 〜 '}
         <input
           type="number"
           className="input input--narrow"
-          value={state.investmentMax}
-          onChange={(e) => update({ investmentMax: e.target.value })}
+          value={numeric.investmentMax}
+          onChange={(e) => updateNumeric({ investmentMax: e.target.value })}
           placeholder="上限"
         />
       </label>
       <label>
         クロス可否:{' '}
+        {/* <select>は1操作で値が確定するのでデバウンスしない(待たせる意味がない)。 */}
         <select
           value={state.crossEligible}
-          onChange={(e) => update({ crossEligible: e.target.value as CrossFilterState['crossEligible'] })}
+          onChange={(e) => {
+            const crossEligible = e.target.value as CrossFilterState['crossEligible'];
+            onChange((prev) => ({ ...prev, crossEligible }));
+          }}
         >
           <option value="all">すべて</option>
           <option value="ok">可</option>

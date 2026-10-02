@@ -14,11 +14,26 @@ function holdingLabel(group: BenefitGroup): string {
 }
 
 function BenefitGroupsCard({ groups, warning }: { groups: BenefitGroup[]; warning: string | null }) {
+  // 警告は段階表が空のときこそ重要なので、早期returnより手前で組み立てて
+  // 両方の分岐で出す。空の分岐の中で出し忘れると、no-groups(取得したが読めなかった)
+  // が画面から黙って落ちる。
+  const warningNote =
+    warning !== null ? (
+      <p className="benefit-warning">
+        ⚠ 解析が不完全な可能性があります({warning})。内容は取得元のページで確認してください。
+      </p>
+    ) : null;
+
   if (groups.length === 0) {
     return (
       <div className="card">
+        {warningNote}
         <p style={{ color: 'var(--text-muted)', margin: 0 }}>
-          株数段階の情報がまだ取得できていません。
+          {warning === null
+            ? // 個別ページの取得がこの銘柄まで到達していない。次回のバッチで埋まる。
+              '株数段階の情報はまだ取得していません。'
+            : // 取得済みだが段階表を1つも読み取れなかった。運用者はパーサーを確認する必要がある。
+              '個別ページは取得済みですが、株数段階を読み取れませんでした。'}
         </p>
       </div>
     );
@@ -26,11 +41,7 @@ function BenefitGroupsCard({ groups, warning }: { groups: BenefitGroup[]; warnin
 
   return (
     <div className="card">
-      {warning !== null && (
-        <p className="benefit-warning">
-          ⚠ 解析が不完全な可能性があります({warning})。内容は取得元のページで確認してください。
-        </p>
-      )}
+      {warningNote}
       {groups.map((group, groupIndex) => (
         // 同じ種別・同じ保有条件のグループが重複して現れる銘柄があるため
         // (年2回の中間/期末の区別が解析で落ちる)、keyには添字を含める。
@@ -45,8 +56,10 @@ function BenefitGroupsCard({ groups, warning }: { groups: BenefitGroup[]; warnin
               </tr>
             </thead>
             <tbody>
-              {group.tiers.map((tier) => (
-                <tr key={tier.shares}>
+              {/* 1つの表に同じ株数が2回現れることがある(年2回の中間/期末が1グループに
+                  潰れた場合)。グループのkeyと同じ理由で、tierのkeyにも添字を含める。 */}
+              {group.tiers.map((tier, tierIndex) => (
+                <tr key={`${tier.shares}-${tierIndex}`}>
                   <td className="num">{tier.shares.toLocaleString('ja-JP')}株</td>
                   {/* 金額が読めた段階は金額を、読めなかった段階(「ー」や個数表記)は
                       原文をそのまま出す。どちらの場合も原文は失われていない。 */}
@@ -82,6 +95,10 @@ export function YutaiDetailPage() {
 
   const { data } = detailState;
   const riskLabel = { safe: '安全', danger: '危険', na: '対象外' }[data.risk.riskStatus];
+  // 過去の実績逆日歩を出す株数。必要株数が未取得なら単元株数で代用する
+  // (lambda/shared/gyakuhibu-actual-summary.tsと同じ規則)。必要株数が200株・300株の
+  // 銘柄で単元株数を使うと、一覧画面の「前回逆日歩」の半分・3分の1の金額が並んでしまう。
+  const shares = data.requiredShares ?? data.unitShares;
 
   return (
     <>
@@ -185,14 +202,20 @@ export function YutaiDetailPage() {
                     <thead>
                       <tr>
                         <th>権利日</th>
-                        <th>実績逆日歩</th>
+                        {/* 金額は必要株数ベース。未取得なら単元株数で概算していることを示す。 */}
+                        <th>
+                          実績逆日歩({shares.toLocaleString('ja-JP')}株{data.requiredShares === null ? '・概算' : ''})
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
                       {data.rightsHistory.map((h) => (
                         <tr key={h.rightsDate}>
                           <td>{h.rightsDate}</td>
-                          <td className="num">{formatFinancialYen(String(h.totalAmount))}</td>
+                          {/* 保存済みのtotalAmountは読まない — 記録当時のunitShares(移行期には
+                              200や300)を掛けた値で、必要株数とは別の株数を指している。
+                              avgRate・daysは株数に依存しないのでここから組み直す。 */}
+                          <td className="num">{formatFinancialYen(String(Math.round(h.avgRate * h.days * shares)))}</td>
                         </tr>
                       ))}
                     </tbody>

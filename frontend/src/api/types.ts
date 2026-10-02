@@ -209,6 +209,12 @@ export interface YutaiForecastHistoryPoint {
   lendingBalance: number;
   lendingPrice: number | null;
   fillRatio: number | null;
+  // 1株1日あたりの料率と品貸日数。実績逆日歩は totalAmount ではなく
+  // avgRate × days × 株数 で組み直す(totalAmountは記録当時のunitSharesを掛けた値で、
+  // 必要株数とは別の株数を指しているため読まない)。
+  avgRate: number;
+  days: number;
+  // 記録当時のunitShares基準の金額。互換のため残っているが表示には使わない。
   totalAmount: number;
   maxRateActual: number | null;
   bidRank: string | null;
@@ -240,6 +246,8 @@ export interface YutaiForecastDetail {
   content: string;
   value: number | null;
   unitShares: number;
+  // 優待の権利獲得に必要な実際の株数。未取得はnullで、その場合は単元株数で代用する。
+  requiredShares: number | null;
   rightsDate: string | null;
   maxGyakuhibu: number | null;
   closePrice: number | null;

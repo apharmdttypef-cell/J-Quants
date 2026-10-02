@@ -325,6 +325,8 @@ export function YutaiForecastListPage() {
   // 往復無しで即座に反映される。
   // depsはオブジェクトを渡すと毎レンダーで参照が変わり無限ループになるため、
   // crossFiltersは個々の文字列に展開して並べる。
+  // 数値欄(株価・必要資金)の値はYutaiCrossFilters側でデバウンスされてから届く。この画面は
+  // 1リクエストでmaster+forecastの2スキャンを使うため、無しだと「400000」で12回スキャンが走る。
   const listState = useAsync(
     () =>
       fetchYutaiForecastList({
