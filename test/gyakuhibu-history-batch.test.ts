@@ -18,6 +18,11 @@ jest.mock('../lambda/gyakuhibu-history-batch/taisyaku-client', () => ({
 
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
+// taisyaku.jpへの1リクエスト/秒の待機を0にする(モジュール読み込み時に読まれるので
+// requireより手前で設定する)。本物の1秒を待つと、取得を複数回試すテストが4秒前後
+// 眠ったままjestの既定タイムアウト5秒に迫り、他のスイート(CDKのsynthなど)と並列に
+// 走ったときだけ落ちる。待機そのものはこのスイートの検証対象ではない。
+process.env.TAISYAKU_REQUEST_INTERVAL_MS = '0';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/gyakuhibu-history-batch/index') as { handler: () => Promise<void> };

@@ -625,7 +625,9 @@ test('the detail sync bucket relies on the CDK default Lambda retrier only', () 
   const joined = Object.values(machines)[0].Properties.DefinitionString['Fn::Join'][1]
     .map((part: unknown) => (typeof part === 'string' ? part : 'X'))
     .join('');
-  const bucket = JSON.parse(joined).States.YutaiDetailSyncBucket;
+  // バケットのタスクはMapのItemProcessorの中にある(トップレベルのStatesにはMapだけ)。
+  const map = JSON.parse(joined).States.YutaiDetailSyncBuckets;
+  const bucket = map.ItemProcessor.States.YutaiDetailSyncBucket;
 
   expect(bucket.Retry).toEqual([
     {
