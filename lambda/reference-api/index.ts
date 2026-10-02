@@ -160,13 +160,34 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
   };
 }
 
+// 一覧(GET /yutai と GET /yutai/forecast)が実際に返す属性だけを読む。
+// 特にbenefitGroups(1銘柄0.7〜2KB × 1,642銘柄)は一覧では一切使わない(buildCrossFieldsは
+// 出さないし、詳細エンドポイントは同じ行をGetCommandで取り直す)。Scanは1MBごとに
+// ページングするため、使わない属性を運ぶとリクエストあたりの往復回数が増える —
+// 「銘柄数によらずDynamoDB呼び出しを一定にする」という一覧の存在理由そのものを削る。
+//
+// maxRate / days / benefitGroups / minInvestment / detailUrl / listBadge /
+// conditionCheckedAt は意図的に除いてある。ここに無い属性はtoYutaiMasterRowで
+// 既定値(null / 'unknown' / [])に落ちるので、一覧の返す項目を増やすときは
+// この射影にも足すこと(足し忘れは型エラーにならず、黙ってnullになる)。
+// content / value はDynamoDBの予約語なので#名で逃がす。
+const YUTAI_LIST_PROJECTION =
+  'ticker, companyName, #content, #value, unitShares, rightsMonths, riskStatus, maxGyakuhibu, closePrice, ' +
+  'requiredShares, crossEligible, holdingKind, holdingMinMonths, minTierValueYen, benefitParseWarning, ' +
+  'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu';
+
 async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
   const rows: YutaiMasterRow[] = [];
   let exclusiveStartKey: Record<string, unknown> | undefined;
 
   do {
     const result = await ddbDocClient.send(
-      new ScanCommand({ TableName: YUTAI_MASTER_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
+      new ScanCommand({
+        TableName: YUTAI_MASTER_TABLE_NAME,
+        ProjectionExpression: YUTAI_LIST_PROJECTION,
+        ExpressionAttributeNames: { '#content': 'content', '#value': 'value' },
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
     );
     for (const item of result.Items ?? []) {
       rows.push(toYutaiMasterRow(item));
@@ -627,6 +648,11 @@ async function getYutaiForecast(ticker: string): Promise<APIGatewayProxyResultV2
       lendingBalance,
       lendingPrice: item.lendingPrice ?? null,
       fillRatio: fillRatio(item.avgRate ?? 0, item.days ?? 0, item.maxRateActual ?? null),
+      // totalAmountは記録当時のunitSharesを掛けた値なので、必要株数とは別の株数を
+      // 指している可能性がある。画面はavgRate × days × 株数で組み直すため、
+      // 株数に依存しないavgRateとdaysを渡す(totalAmountは既存の互換のために残す)。
+      avgRate: item.avgRate ?? 0,
+      days: item.days ?? 0,
       totalAmount: item.totalAmount ?? 0,
       maxRateActual: item.maxRateActual ?? null,
       bidRank: item.bidRank ?? null,
@@ -657,6 +683,9 @@ async function getYutaiForecast(ticker: string): Promise<APIGatewayProxyResultV2
     content: master.content,
     value: master.value,
     unitShares: master.unitShares,
+    // 過去権利日のコストは必要株数ベースで出す(単元株数ではない)。unitSharesは
+    // 単元の表示に使うので消さずに両方返す。
+    requiredShares: master.requiredShares,
     rightsDate: rightsDate ?? null,
     maxGyakuhibu: master.maxGyakuhibu,
     closePrice: master.closePrice,

@@ -43,6 +43,29 @@ test('writes riskStatus na when rightsMonths is empty (no upcoming rights date)'
   });
 });
 
+test('the master scan projects only the attributes the batch reads', async () => {
+  // benefitGroups(1銘柄0.7〜2KB × 1,642銘柄)はこのバッチでは使わないのに、Scanの
+  // 1MBページングの往復回数を押し上げる。MasterRowに項目を足したときは射影にも
+  // 足すこと(足し忘れると黙ってundefinedになる)。
+  mockSend.mockResolvedValueOnce({ Items: [] }); // yutai master scan
+
+  await handler();
+
+  const scanInput = mockSend.mock.calls[0][0] as {
+    ProjectionExpression: string;
+    ExpressionAttributeNames: Record<string, string>;
+  };
+  expect(scanInput.ProjectionExpression.split(',').map((name) => name.trim())).toEqual([
+    'ticker',
+    '#value',
+    'unitShares',
+    'requiredShares',
+    'rightsMonths',
+  ]);
+  // valueはDynamoDBの予約語なので素のままでは射影に書けない
+  expect(scanInput.ExpressionAttributeNames).toEqual({ '#value': 'value' });
+});
+
 test('writes riskStatus na when there is no margin balance data for the ticker', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan

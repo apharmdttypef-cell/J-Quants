@@ -191,6 +191,44 @@ test('GET /yutai returns each ticker with its next rights date and its precomput
   expect(mockSend).toHaveBeenCalledTimes(1);
 });
 
+test('the yutai list scan projects only the attributes the list returns', async () => {
+  // 「呼び出し回数が銘柄数によらず一定」はScanの1MBページングを増やさないことが前提。
+  // benefitGroups(1銘柄0.7〜2KB)を運ぶとページングが増えるので射影で落とす。
+  // 一覧が返す項目を増やしたときは射影にも足すこと(足し忘れは黙ってnullになる)。
+  mockSend.mockResolvedValueOnce({ Items: [] });
+
+  await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
+
+  const scanInput = mockSend.mock.calls[0][0] as {
+    ProjectionExpression: string;
+    ExpressionAttributeNames: Record<string, string>;
+  };
+  const projected = scanInput.ProjectionExpression.split(',').map((name) => name.trim());
+  expect(projected).toEqual([
+    'ticker',
+    'companyName',
+    '#content',
+    '#value',
+    'unitShares',
+    'rightsMonths',
+    'riskStatus',
+    'maxGyakuhibu',
+    'closePrice',
+    'requiredShares',
+    'crossEligible',
+    'holdingKind',
+    'holdingMinMonths',
+    'minTierValueYen',
+    'benefitParseWarning',
+    'requiredInvestment',
+    'lastGyakuhibu',
+    'sameMonthLastYearGyakuhibu',
+  ]);
+  // content / value はDynamoDBの予約語なので素のままでは射影に書けない
+  expect(scanInput.ExpressionAttributeNames).toEqual({ '#content': 'content', '#value': 'value' });
+  expect(scanInput.ProjectionExpression).not.toContain('benefitGroups');
+});
+
 test('GET /yutai filters by keyword against company name and content', async () => {
   mockSend.mockResolvedValueOnce({
     Items: [
@@ -451,6 +489,43 @@ test('GET /yutai/{ticker}/forecast returns history including noGyakuhibu rows wi
 
   expect(parsed.poolBins).toHaveLength(1);
   expect(parsed.poolBins[0]).toMatchObject({ label: '1〜2', n: 400 });
+});
+
+test('GET /yutai/{ticker}/forecast exposes requiredShares and the per-share rate behind each history row', async () => {
+  // 画面は実績逆日歩を avgRate × days × (requiredShares ?? unitShares) で組み直す。
+  // 保存済みのtotalAmountは記録当時のunitSharesを掛けた値で、必要株数とは別の株数を
+  // 指しているため読めない。そのための材料をこのエンドポイントが返す必要がある。
+  mockSend
+    .mockResolvedValueOnce({
+      Item: {
+        ticker: '7458', companyName: '第一興商', content: '割引カード', value: 5000, unitShares: 100,
+        requiredShares: 200, rightsMonths: [3], riskStatus: 'danger', maxGyakuhibu: 5000, closePrice: 2000,
+      },
+    }) // master get
+    .mockResolvedValueOnce({ Item: undefined }) // forecast get
+    .mockResolvedValueOnce({ Item: undefined }) // _POOL_ get
+    .mockResolvedValueOnce({
+      Items: [
+        // totalAmountは単元100株で記録された古い値(600円)。必要株数200株では1,200円が正しい。
+        { ticker: '7458', rightsDate: '2025-03-27', financingBalance: 100, lendingBalance: 250, avgRate: 2, days: 3, totalAmount: 600, maxRateActual: 10 },
+      ],
+    }) // gyakuhibu actual query
+    .mockResolvedValueOnce({ Items: [] }); // margin balance query
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '7458' } }));
+
+  const parsed = body(result) as {
+    unitShares: number;
+    requiredShares: number | null;
+    history: Array<{ avgRate: number; days: number; totalAmount: number }>;
+  };
+  expect(parsed.requiredShares).toBe(200);
+  // unitSharesは単元の表示に使うので消さない
+  expect(parsed.unitShares).toBe(100);
+  expect(parsed.history[0].avgRate).toBe(2);
+  expect(parsed.history[0].days).toBe(3);
+  // 既存フィールドは消さない(画面は使わないが削除も改名もしない)
+  expect(parsed.history[0].totalAmount).toBe(600);
 });
 
 test('GET /yutai/{ticker}/forecast returns forecastStatus na and empty history/poolBins when nothing is computed yet', async () => {

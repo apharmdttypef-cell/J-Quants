@@ -32,7 +32,16 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
 
   do {
     const result = await ddbDocClient.send(
-      new ScanCommand({ TableName: YUTAI_MASTER_TABLE_NAME, ExclusiveStartKey: exclusiveStartKey }),
+      new ScanCommand({
+        TableName: YUTAI_MASTER_TABLE_NAME,
+        // MasterRowが読む5項目だけを取る。特にbenefitGroups(1銘柄0.7〜2KB × 1,642銘柄)は
+        // ここでは使わないのに、Scanの1MBページングの往復回数を押し上げる。
+        // MasterRowに項目を足すときはこの射影にも足すこと(足し忘れると黙ってundefinedに
+        // なる)。valueはDynamoDBの予約語なので#valueで逃がす。
+        ProjectionExpression: 'ticker, #value, unitShares, requiredShares, rightsMonths',
+        ExpressionAttributeNames: { '#value': 'value' },
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
     );
     for (const item of result.Items ?? []) {
       if (typeof item.ticker === 'string' && typeof item.unitShares === 'number') {
