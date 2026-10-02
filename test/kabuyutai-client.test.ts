@@ -362,3 +362,23 @@ test('fetchDetailPage throws on a non-OK response', async () => {
 
   await expect(fetchDetailPage('https://www.kabuyutai.com/kobetu/gone.html')).rejects.toThrow('404');
 });
+
+test('fetchDetailPage refuses a URL that does not point at kabuyutai.com', async () => {
+  // detailUrlはスクレイピングしたhrefそのもの。一覧ページが改変・再構成されても
+  // 別サイトへリクエストを出さないこと、相対パスがTypeErrorではなく
+  // 「1銘柄の失敗」として扱えるErrorになることを固定する。
+  await expect(fetchDetailPage('https://evil.example.com/kobetu/toba.html')).rejects.toThrow(
+    'refusing to fetch a detail page outside kabuyutai.com',
+  );
+  // ホスト名の末尾一致だけを見て通してしまわないこと
+  await expect(fetchDetailPage('https://kabuyutai.com.evil.example/x.html')).rejects.toThrow('refusing to fetch');
+  // 相対パス(new URL()がTypeErrorになる)
+  await expect(fetchDetailPage('/kobetu/toba.html')).rejects.toThrow('refusing to fetch');
+  // httpへのダウングレードも通さない
+  await expect(fetchDetailPage('http://www.kabuyutai.com/kobetu/toba.html')).rejects.toThrow('refusing to fetch');
+  expect(mockFetch).not.toHaveBeenCalled();
+
+  // サブドメイン・ドメイン直下はどちらも正規のホストとして通す
+  mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '<html>ok</html>' });
+  await expect(fetchDetailPage('https://kabuyutai.com/kobetu/toba.html')).resolves.toBe('<html>ok</html>');
+});

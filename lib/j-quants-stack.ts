@@ -341,9 +341,18 @@ export class JQuantsStack extends cdk.Stack {
       entry: path.join(__dirname, '..', 'lambda', 'yutai-detail-sync-batch', 'index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
-      // 1銘柄1リクエスト/秒。最大バケット(3000台・274件)で約5.5分なので14分で足りる。
+      // 1銘柄1リクエスト/秒。最大バケット(3000台・274件)で約5分なので14分で足りる
+      // (待機はページ取得と並行に数えるので、1件あたり約1秒。lambda/yutai-detail-sync-batch
+      // の待機計算を参照)。残り時間が尽きる手前でハンドラ側が打ち切るため、
+      // タイムアウトには到達しない設計。
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
+      // kabuyutai.comへの1リクエスト/秒という上限を構造として担保する。Mapは直列なので
+      // 設計どおりの経路では多重起動しないが、失敗したと思った実行を運用者が重ねて
+      // 起動した場合や、実行中に単一銘柄モードを手で叩いた場合に秒2リクエストになる。
+      // 2つ目の呼び出しはLambda.TooManyRequestsExceptionとして表に出る(黙って倍速に
+      // ならない)。
+      reservedConcurrentExecutions: 1,
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
@@ -366,13 +375,17 @@ export class JQuantsStack extends cdk.Stack {
       resultPath: stepfunctions.JsonPath.DISCARD,
     });
 
-    detailSyncBucket.addRetry({
-      errors: ['Lambda.ServiceException', 'Lambda.TooManyRequestsException', 'States.Timeout'],
-      maxAttempts: 3,
-      interval: cdk.Duration.seconds(30),
-      backoffRate: 2,
-    });
-
+    // リトライはLambdaInvokeがコンストラクタで登録する既定のリトライヤー
+    // (Lambda.ClientExecutionTimeoutException / ServiceException / AWSLambdaException /
+    // SdkClientException を2秒 × 6回)に任せる。Step Functionsは最初に一致した
+    // リトライヤーだけを使うため、ここで同じエラー名を並べても後ろに置かれて効かない。
+    //
+    // 一方、Lambda自体のタイムアウトはLambda.Unknownとして表に出て、どのリトライヤーにも
+    // 一致しない。タイムアウトしたバケットは実行ごと失敗し、後続のバケットは走らない
+    // (運用上はステートマシンを再実行する。conditionCheckedAtにより冪等なので
+    // 成功済みの銘柄は取り直されない)。ハンドラ側が残り時間で自分を打ち切るのは
+    // このためで、retryOnServiceExceptions: falseにはしない — falseにすると
+    // 誰も検討していない30秒 × 3回のポリシーが代わりに有効になる。
     const detailSyncMap = new stepfunctions.Map(this, 'YutaiDetailSyncBuckets', {
       // 1000台〜9000台。再実行はconditionCheckedAtにより冪等で、成功済みの銘柄は
       // 取り直されない。

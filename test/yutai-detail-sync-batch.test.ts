@@ -16,7 +16,10 @@ process.env.KABUYUTAI_REQUEST_INTERVAL_MS = '0';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/yutai-detail-sync-batch/index') as {
-  handler: (event: { codePrefix?: string; tickers?: string[]; maxFetches?: number }) => Promise<void>;
+  handler: (
+    event: { codePrefix?: string; tickers?: string[]; maxFetches?: number },
+    context?: { getRemainingTimeInMillis: () => number },
+  ) => Promise<void>;
 };
 
 // 個別ページ1枚ぶんの最小HTML。条件なしの100株→1,000円だけを持つ。
@@ -51,11 +54,12 @@ function updateCalls() {
     .filter((input) => input.__type === 'Update');
 }
 
+// YUTAI_DETAIL_COOLDOWN_DAYS / MAX_DETAIL_FETCHES_PER_RUN はモジュール読み込み時に
+// 一度だけ読まれるため、ここで消しても既に読み込んだhandlerには効かない。テストごとに
+// 変えたい場合はloadHandlerWithIntervalと同じくjest.isolateModulesで読み直すこと。
 beforeEach(() => {
   mockSend.mockReset();
   mockFetchDetailPage.mockReset();
-  delete process.env.YUTAI_DETAIL_COOLDOWN_DAYS;
-  delete process.env.MAX_DETAIL_FETCHES_PER_RUN;
 });
 
 test('writes the parsed groups and the derived scalars for a ticker', async () => {
@@ -169,4 +173,54 @@ test('records a warning and falls back to the badge when the page cannot be pars
   // 解析失敗でもconditionCheckedAtは書く。書かないと毎回同じ銘柄を取り直し、
   // 構造変化が直るまで他の銘柄が進まなくなる。
   expect(values[':conditionCheckedAt']).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+});
+
+// kabuyutai.comへのリクエスト間隔(1リクエスト/秒)はこの機能で最も重い外部制約なので、
+// 「待っていること」自体をテストで固定する。REQUEST_INTERVAL_MSはモジュール読み込み時に
+// 読まれるため、0以外の値を効かせるにはjest.isolateModulesで作り直す必要がある。
+function loadHandlerWithInterval(intervalMs: number): typeof handler {
+  const previous = process.env.KABUYUTAI_REQUEST_INTERVAL_MS;
+  process.env.KABUYUTAI_REQUEST_INTERVAL_MS = String(intervalMs);
+  let loaded: typeof handler | undefined;
+  jest.isolateModules(() => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    loaded = (require('../lambda/yutai-detail-sync-batch/index') as { handler: typeof handler }).handler;
+  });
+  // 元の値に戻す。未設定だった場合に文字列'undefined'を入れてしまわないよう消す。
+  if (previous === undefined) delete process.env.KABUYUTAI_REQUEST_INTERVAL_MS;
+  else process.env.KABUYUTAI_REQUEST_INTERVAL_MS = previous;
+  return loaded!;
+}
+
+test('waits at least the configured interval between two kabuyutai.com requests', async () => {
+  const intervalMs = 60;
+  const isolatedHandler = loadHandlerWithInterval(intervalMs);
+  mockScanThenUpdates([masterRow('1111'), masterRow('2222')]);
+  // 「リクエストを開始した時刻」そのものを記録する。守るべき制約は
+  // 「2つのリクエスト開始の間隔が間隔以上」であって全体の所要時間ではない。
+  const requestStartedAt: number[] = [];
+  mockFetchDetailPage.mockImplementation(() => {
+    requestStartedAt.push(Date.now());
+    return Promise.resolve(SIMPLE_DETAIL_HTML);
+  });
+
+  await isolatedHandler({});
+
+  expect(requestStartedAt).toHaveLength(2);
+  // 待機を削る(あるいはtryの中に移して失敗時に待たなくする)とここが0msになる。
+  // 上限は見ない — 遅い環境でflakyになるため、下限だけを一方向に固定する。
+  // タイマーの分解能ぶん(数ms)の余裕を引いてある。
+  expect(requestStartedAt[1] - requestStartedAt[0]).toBeGreaterThanOrEqual(intervalMs - 5);
+});
+
+test('stops early when the Lambda is about to run out of time', async () => {
+  mockScanThenUpdates([masterRow('1111'), masterRow('2222')]);
+  mockFetchDetailPage.mockResolvedValue(SIMPLE_DETAIL_HTML);
+
+  // 残り時間が打ち切りマージンを下回っている状態。1件も取らずに正常終了し、
+  // 残りはconditionCheckedAtが未更新なので次回実行に持ち越される。
+  await expect(handler({}, { getRemainingTimeInMillis: () => 1_000 })).resolves.toBeUndefined();
+
+  expect(mockFetchDetailPage).not.toHaveBeenCalled();
+  expect(updateCalls()).toEqual([]);
 });

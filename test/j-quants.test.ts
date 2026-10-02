@@ -608,6 +608,38 @@ test('the yutai detail sync Lambda has the yutai master table and a long timeout
   expect(props.MemorySize).toBe(256);
   expect(props.Handler).toBe('index.handler');
   expect(props.Environment.Variables.YUTAI_MASTER_TABLE_NAME.Ref).toMatch(/YutaiMasterTable/);
+  // kabuyutai.comへの1リクエスト/秒はLambda内の待機だけでなく同時実行数でも担保する。
+  // 2つ目の実行(運用者の重複起動や実行中の単一銘柄モード)が走ると秒2リクエストに
+  // なるため、ここは必ず1。
+  expect(props.ReservedConcurrentExecutions).toBe(1);
+});
+
+test('the detail sync bucket relies on the CDK default Lambda retrier only', () => {
+  // LambdaInvokeはコンストラクタでLambdaのサービス例外用のリトライヤー(2秒 × 6回)を
+  // 登録する。Step Functionsは最初に一致したリトライヤーだけを使うため、同じエラー名を
+  // 後ろに足しても死蔵される。独自Retryを足し直さないようここで形を固定する。
+  // なおLambda自体のタイムアウトはLambda.Unknownとして出て、どのリトライヤーにも
+  // 一致しない(タイムアウトしたバケットは再試行されず、後続バケットも走らない)。
+  const template = synth();
+  const machines = template.findResources('AWS::StepFunctions::StateMachine');
+  const joined = Object.values(machines)[0].Properties.DefinitionString['Fn::Join'][1]
+    .map((part: unknown) => (typeof part === 'string' ? part : 'X'))
+    .join('');
+  const bucket = JSON.parse(joined).States.YutaiDetailSyncBucket;
+
+  expect(bucket.Retry).toEqual([
+    {
+      ErrorEquals: [
+        'Lambda.ClientExecutionTimeoutException',
+        'Lambda.ServiceException',
+        'Lambda.AWSLambdaException',
+        'Lambda.SdkClientException',
+      ],
+      IntervalSeconds: 2,
+      MaxAttempts: 6,
+      BackoffRate: 2,
+    },
+  ]);
 });
 
 test('the detail sync state machine fans out to nine code-prefix buckets one at a time', () => {

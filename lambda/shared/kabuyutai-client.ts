@@ -10,10 +10,12 @@ export interface KabuyutaiEntry {
   content: string;
   rightsMonths: number[];
   value: number | undefined;
-  // 一覧ページの「必要投資金額」。単元株数(100株)と優待の権利獲得に必要な実際の株数が
-  // 異なる銘柄(例: 第一興商は単元100株だが優待には200株必要、2026-09-04発見)があるため、
-  // 呼び出し元(yutai-risk-precompute-batch)が現在株価と突き合わせて実際の必要株数を
-  // 逆算するために使う。
+  // 一覧ページの「必要投資金額」。必要株数の逆算には使わない — 単元株数と異なる銘柄
+  // (例: 第一興商は単元100株だが優待には200株必要、2026-09-04発見)の正確な株数は
+  // yutai-detail-sync-batchが個別ページの株数段階表から取る(requiredShares)。
+  // ここでの用途は2つ: 「円相当」記載が無い銘柄の優待価値の近似
+  // (estimateValueFromYieldが優待利回りと掛け合わせる)と、requiredShares × 株価が
+  // 大きく外れていないかの突き合わせ材料。
   minInvestment: number | undefined;
   // 個別ページのURL。一覧ページの企業名リンク(class="kigyoumei")のhrefそのもの。
   // yutai-detail-sync-batchが株数段階・継続保有条件を取りに行くのに使う
@@ -195,10 +197,32 @@ export async function fetchAllListings(): Promise<KabuyutaiEntry[]> {
   return all;
 }
 
+// 個別ページのURLはスクレイピングしたHTMLのhrefそのものなので、取得前にホストを検証する。
+// 一覧ページが改変されたり構造が変わったりしても、Lambdaが別サイトへリクエストを出さない。
+// hrefが相対パスだった場合もここでfalseになる(new URL()のTypeErrorを呼び出し元まで
+// 投げずに済む)。
+const KABUYUTAI_HOST_SUFFIX = 'kabuyutai.com';
+
+function isKabuyutaiUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  return parsed.hostname === KABUYUTAI_HOST_SUFFIX || parsed.hostname.endsWith(`.${KABUYUTAI_HOST_SUFFIX}`);
+}
+
 // 個別ページを1枚取得する。呼び出し元(yutai-detail-sync-batch)が銘柄ごとに
 // REQUEST_INTERVAL_MSの間隔を空ける責務を持つ。ここで間隔を取らないのは、
 // 単一ページの取得関数が自分で待つと呼び出し側の進捗管理と二重になるため。
+// ホスト違いはErrorで返す — 呼び出し元は銘柄ごとにtry/catchしているので、
+// 1銘柄のスキップ(failed扱い)になり実行全体は止まらない。
 export async function fetchDetailPage(url: string): Promise<string> {
+  if (!isKabuyutaiUrl(url)) {
+    throw new Error(`refusing to fetch a detail page outside ${KABUYUTAI_HOST_SUFFIX}: ${url}`);
+  }
   return fetchPage(url);
 }
 

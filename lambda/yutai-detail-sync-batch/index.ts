@@ -1,5 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import type { Context } from 'aws-lambda';
 import { fetchDetailPage, type ListBadge } from '../shared/kabuyutai-client';
 import { deriveBenefitScalars, parseBenefitDetail } from '../shared/kabuyutai-detail';
 
@@ -12,6 +13,13 @@ const COOLDOWN_DAYS = Number(process.env.YUTAI_DETAIL_COOLDOWN_DAYS ?? '90');
 // 274件)がこれを下回るため実際には発動しない。codePrefixを省いた全銘柄の手動実行と、
 // 将来バケットが育ったときの安全弁として置く。超えた分は次回実行に持ち越される。
 const MAX_DETAIL_FETCHES_PER_RUN = Number(process.env.MAX_DETAIL_FETCHES_PER_RUN ?? '300');
+// 残り実行時間がこれを下回ったらループを打ち切る。実際の制約は件数ではなく実行時間で、
+// Lambdaのタイムアウトは Lambda.Unknown として表に出てStep Functionsのリトライヤーに
+// 一致しない(lib/j-quants-stack.ts参照)。タイムアウトすると後続バケットが丸ごと
+// 走らなくなるため、進行中の1件(ページ取得 + DynamoDB書き込み)を終えて正常終了できる
+// だけの余裕を残して自分から止まる。打ち切った分はconditionCheckedAtが未更新なので
+// 次回実行に持ち越される。
+const TIME_BUDGET_MARGIN_MS = 60_000;
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -33,6 +41,16 @@ interface MasterRow {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// deadline(ミリ秒のエポック)を実際に過ぎるまで待つ。setTimeoutがタイマーの分解能の
+// ぶんだけ早く起きる環境があるため、1回のsleepで済ませず経過を見て待ち直す。
+// 1リクエスト/秒という外部への約束はこの関数だけが担保しているので、早起きの可能性を
+// 残さない。deadlineを既に過ぎていれば1度も待たない。
+async function sleepUntil(deadline: number): Promise<void> {
+  for (let remaining = deadline - Date.now(); remaining > 0; remaining = deadline - Date.now()) {
+    await sleep(remaining);
+  }
 }
 
 function todayIso(): string {
@@ -92,7 +110,11 @@ function selectTargets(rows: MasterRow[], event: DetailSyncEvent): MasterRow[] {
   });
 }
 
-export const handler = async (event: DetailSyncEvent = {}): Promise<void> => {
+// contextはLambdaランタイムが渡す第2引数。残り実行時間を見るためだけに使うので
+// 必要なメソッドだけを型に要求し、省略も許す(単体テストはeventだけで呼ぶ)。
+type RemainingTime = Pick<Context, 'getRemainingTimeInMillis'>;
+
+export const handler = async (event: DetailSyncEvent = {}, context?: RemainingTime): Promise<void> => {
   const limit = event.maxFetches ?? MAX_DETAIL_FETCHES_PER_RUN;
   const targets = selectTargets(await scanMaster(), event).slice(0, limit);
 
@@ -100,9 +122,27 @@ export const handler = async (event: DetailSyncEvent = {}): Promise<void> => {
   let skipped = 0;
   let failed = 0;
   let requested = 0;
+  let processed = 0;
+  let stoppedEarly = false;
+  // 直前のリクエストを開始した時刻。待つのは「前回の開始からREQUEST_INTERVAL_MS経過
+  // するまで」で、毎回まるごとREQUEST_INTERVAL_MS待つのではない。固定で待つとページ
+  // 取得の時間と直列に積み上がり(実測で1ページ約2秒 → 1銘柄3秒)、最大バケット274件が
+  // 約14分になってLambdaのタイムアウトに達してしまう。開始時刻を基準にすれば
+  // 「リクエスト開始の間隔 ≧ REQUEST_INTERVAL_MS」は保ったまま、274件が約274秒で済む。
+  let lastRequestStartedAt: number | undefined;
   const warningCounts = new Map<string, number>();
 
   for (const row of targets) {
+    if (context !== undefined && context.getRemainingTimeInMillis() < TIME_BUDGET_MARGIN_MS) {
+      stoppedEarly = true;
+      console.warn(
+        `yutai-detail-sync-batch: stopping early with ${targets.length - processed} targets left ` +
+          `(${context.getRemainingTimeInMillis()}ms remaining); the rest is picked up by the next run`,
+      );
+      break;
+    }
+    processed++;
+
     if (row.detailUrl === undefined) {
       // 一覧ページの再同期(yutai-master-sync-batch)がまだ走っていない行。
       console.warn(`${row.ticker}: no detailUrl on the master row; run yutai-master-sync-batch first`);
@@ -113,7 +153,11 @@ export const handler = async (event: DetailSyncEvent = {}): Promise<void> => {
     // 2回目以降のリクエストの前だけ待つ。先頭で待つと1件だけの単一銘柄モードが
     // 無駄に遅くなる。fetchが失敗しても待つ(待機はtryの外)ので、リクエスト間隔は
     // 成否によらずREQUEST_INTERVAL_MS以上になる。
-    if (requested > 0) await sleep(REQUEST_INTERVAL_MS);
+    if (lastRequestStartedAt !== undefined) {
+      await sleepUntil(lastRequestStartedAt + REQUEST_INTERVAL_MS);
+    }
+    // 待機後に記録する(= 実際にリクエストを出す直前の時刻)。次の待機はここから数える。
+    lastRequestStartedAt = Date.now();
     requested++;
 
     try {
@@ -163,6 +207,7 @@ export const handler = async (event: DetailSyncEvent = {}): Promise<void> => {
       : 'none';
   console.log(
     `yutai-detail-sync-batch: codePrefix=${event.codePrefix ?? 'all'} targets=${targets.length} ` +
-      `updated=${updated} skipped=${skipped} failed=${failed} warnings: ${warningSummary}`,
+      `updated=${updated} skipped=${skipped} failed=${failed} stoppedEarly=${stoppedEarly} ` +
+      `warnings: ${warningSummary}`,
   );
 };
