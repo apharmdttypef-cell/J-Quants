@@ -16,6 +16,16 @@ import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { Construct } from 'constructs';
 
+export interface JQuantsStackProps extends cdk.StackProps {
+  /**
+   * フロント/APIを守る共有パスワード。通常は`bin/j-quants.ts`がSecrets Managerの
+   * `JQuantsAppPassword`からsynth時に読んで渡す(デプロイ時に環境変数を毎回渡さずに済む)。
+   * 省略時は環境変数`APP_PASSWORD`にフォールバックする — 初回デプロイ(シークレットが
+   * まだ存在しない)とローテーション(新しい値を明示的に入れたい)がこの経路。
+   */
+  readonly appPassword?: string;
+}
+
 export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
   public readonly financialSummaryTable: dynamodb.Table;
@@ -29,7 +39,7 @@ export class JQuantsStack extends cdk.Stack {
   public readonly frontendBucket: s3.Bucket;
   public readonly distribution: cloudfront.Distribution;
 
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props?: JQuantsStackProps) {
     super(scope, id, props);
 
     // スタンダードプラン依存機能(東証信用残の取得・現在需給ベース予測・信用残トレンド)の
@@ -124,13 +134,17 @@ export class JQuantsStack extends cdk.Stack {
       description: 'J-Quants API key (V2)',
     });
 
-    // フロント/APIを未認証で公開しないための共有パスワード。CDKデプロイ時に
-    // 環境変数で必須入力させ、Secrets Managerとフロント配信の両方に同じ値を反映する。
-    const appPassword = process.env.APP_PASSWORD;
+    // フロント/APIを未認証で公開しないための共有パスワード。Secrets Managerとフロント配信
+    // (CloudFront FunctionのBasic認証)の両方に同じ値を反映するため、synth時に値が必要。
+    // 通常はbin/j-quants.tsがシークレットから読んでpropsで渡すので、デプロイ時に環境変数を
+    // 毎回打つ必要はない。環境変数は初回デプロイとローテーションのための明示指定経路。
+    const appPassword = props?.appPassword ?? process.env.APP_PASSWORD;
     if (!appPassword) {
       throw new Error(
-        'APP_PASSWORD environment variable is required (protects the frontend/API from being publicly open). ' +
-          'Example: APP_PASSWORD=xxxxx npx cdk deploy',
+        'appPassword prop or APP_PASSWORD environment variable is required ' +
+          '(protects the frontend/API from being publicly open). Normally bin/j-quants.ts supplies it ' +
+          'from the JQuantsAppPassword secret; for the first deploy or a rotation use ' +
+          'APP_PASSWORD=xxxxx npx cdk deploy',
       );
     }
 

@@ -195,7 +195,23 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 - API: `x-app-password`ヘッダーをLambdaオーソライザーが`JQuantsAppPassword`シークレットと照合。CORSはブラウザ制約に過ぎずサーバー側のアクセス制御にはならないため、API単体でも認証を必須にしている。
 - フロント側は`PasswordGate`コンポーネントがsessionStorageにパスワードを保持し、API呼び出し全てに自動付与。401が返れば保存値をクリアして再入力を促す。
 
-`cdk deploy`時に`APP_PASSWORD`未設定だとsynthの時点でエラーになり、無認証でのデプロイは構造上できない。
+### パスワードの渡し方
+
+CloudFront FunctionはSecrets Managerを実行時に参照できないため、パスワードの値は**synth時**に必要になる。普段は`bin/j-quants.ts`がAWS上のシークレット`JQuantsAppPassword`を読んでスタックへ渡すので、**デプロイ時に`APP_PASSWORD`を打つ必要はない**。
+
+```bash
+npx cdk deploy          # 通常。シークレットから読む
+```
+
+環境変数`APP_PASSWORD`を付けた場合はそちらが優先される。用途は2つだけ。
+
+```bash
+APP_PASSWORD=xxxxx npx cdk deploy   # 初回デプロイ(シークレットがまだ無い)/ ローテーション
+```
+
+ローテーションは1回このコマンドでデプロイすればシークレット側も新しい値に更新されるので、以降は環境変数なしで新しい値が使われる。
+
+シークレットも環境変数も無い状態ではsynthの時点でエラーになるため、無認証でのデプロイは構造上できない。
 
 ### 既知の残存リスク(許容範囲と判断)
 
