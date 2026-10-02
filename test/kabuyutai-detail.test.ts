@@ -276,6 +276,75 @@ test('warns when the badge disagrees with the parsed holding conditions', () => 
   expect(derived.crossEligible).toBe('ok');
 });
 
+// 継続保有条件の表記ゆれ。「以上」を伴わない書き方と、「ヶ月」「カ月」の2つの
+// 異字体は現在のfixture(「年」「か月」)に現れないため、個別に固定しておく。
+// 「以上」をrawに含める扱いは、このブランチで一度直した箇所でもある。
+test('reads a holding period written without 以上', () => {
+  const html = `
+<section id="yutai_detail">
+<h3>◎自社製品</h3>
+<div class="stit">【株式継続保有期間3年】</div>
+<table class="yutai_table"><tr><td>100株</td><td><b>1,000円</b>相当</td></tr></table>
+</section>
+<p>この企業の公式ホームページ</p>
+`;
+  const groups = parseBenefitDetail(html);
+  expect(groups).toHaveLength(1);
+  expect(groups[0].holdingMonths).toBe(36);
+  // 「以上」が無い原文には「以上」を足さない(原文のまま残す)
+  expect(groups[0].holdingRaw).toBe('継続保有期間3年');
+});
+
+test('reads the ヶ月 and カ月 spellings of a holding period', () => {
+  const sectionWith = (stit: string) => `
+<section id="yutai_detail">
+<h3>◎自社製品</h3>
+<div class="stit">${stit}</div>
+<table class="yutai_table"><tr><td>100株</td><td><b>1,000円</b>相当</td></tr></table>
+</section>
+<p>この企業の公式ホームページ</p>
+`;
+
+  const kyaGetsu = parseBenefitDetail(sectionWith('【株式継続保有期間6ヶ月以上】'));
+  expect(kyaGetsu[0].holdingMonths).toBe(6);
+  expect(kyaGetsu[0].holdingRaw).toBe('継続保有期間6ヶ月以上');
+
+  const kaGetsu = parseBenefitDetail(sectionWith('【株式継続保有期間12カ月以上】'));
+  expect(kaGetsu[0].holdingMonths).toBe(12);
+  expect(kaGetsu[0].holdingRaw).toBe('継続保有期間12カ月以上');
+});
+
+// バッジと個別ページの突き合わせは「1回のクロスで優待が取れるか」という本機能の
+// 中心的な問いに対する唯一の相互チェックなので、groupsが空の場合だけでなく
+// 解析できた場合についても4通りのバッジを固定する。
+test('cross-checks the badge against parsed groups for all four badge values', () => {
+  // マイタケは全グループが継続保有必須 = クロス不可。
+  const requiredGroups = parseBenefitDetail(MAITAKE_HTML);
+
+  // 「長期優遇あり」バッジはクロス可を意味するので、解析結果(不可)と食い違う。
+  const chouki = deriveBenefitScalars(requiredGroups, 'chouki');
+  expect(chouki.benefitParseWarning).toBe('badge-mismatch');
+  // 食い違っても採用するのは個別ページ側(保有条件の原文を読んでいる)。
+  expect(chouki.crossEligible).toBe('ng');
+  expect(chouki.holdingKind).toBe('required');
+
+  // バッジなし(継続保有条件なし)も同じ理由で食い違う。
+  expect(deriveBenefitScalars(requiredGroups, null).benefitParseWarning).toBe('badge-mismatch');
+
+  // 「長期優待のみ」は解析結果と一致するので警告は出ない。
+  expect(deriveBenefitScalars(requiredGroups, 'choukinomi').benefitParseWarning).toBeNull();
+
+  // バッジ自体が未取得(undefined)なら突き合わせられないので警告は出ない。
+  expect(deriveBenefitScalars(requiredGroups, undefined).benefitParseWarning).toBeNull();
+
+  // 逆向き: 条件なしで解析できた銘柄は、クロス可を意味するバッジと一致する。
+  const unconditionalGroups = parseBenefitDetail(DKKARAOKE_HTML);
+  expect(deriveBenefitScalars(unconditionalGroups, 'chouki').benefitParseWarning).toBeNull();
+  expect(deriveBenefitScalars(unconditionalGroups, null).benefitParseWarning).toBeNull();
+  expect(deriveBenefitScalars(unconditionalGroups, undefined).benefitParseWarning).toBeNull();
+  expect(deriveBenefitScalars(unconditionalGroups, 'choukinomi').benefitParseWarning).toBe('badge-mismatch');
+});
+
 test('joins several warnings with a comma', () => {
   const groups = [
     { title: '◎A', holdingMonths: 24, holdingRaw: '継続保有期間2年以上', tiers: [{ shares: 100, valueYen: null, rawText: 'ー' }] },

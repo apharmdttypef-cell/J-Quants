@@ -93,3 +93,36 @@ test('drops rows with NaN or Infinity so no cost can become NaN or Infinity', ()
   expect(last?.rightsDate).toBe('2025-09-26');
   expect(Number.isFinite(last?.cost)).toBe(true);
 });
+
+test('takes the greatest rights date even when the rows arrive newest first', () => {
+  // DynamoDBのQueryはScanIndexForward:falseで新しい順に返すことも、別の順で
+  // 返ることもある。「前回」は並び順に依存せず最大の権利日でなければならない。
+  const descending = [
+    { rightsDate: '2025-09-26', avgRate: 2.0, days: 3 },
+    { rightsDate: '2025-03-27', avgRate: 0.5, days: 1 },
+    { rightsDate: '2024-09-26', avgRate: 1.5, days: 3 },
+  ];
+  expect(summarizeActuals(descending, '2026-09-28', 300, 100).last?.rightsDate).toBe('2025-09-26');
+});
+
+test('takes the later of two rows in the same prior-year month', () => {
+  // 前年同月に2行ある場合は遅い方(より直近)を採る。入力の並び順に依存しない。
+  const sameMonthTwice = [
+    { rightsDate: '2025-09-26', avgRate: 2.0, days: 3 },
+    { rightsDate: '2025-09-05', avgRate: 9.0, days: 1 },
+  ];
+  const { sameMonthLastYear } = summarizeActuals(sameMonthTwice, '2026-09-28', 300, 100);
+  expect(sameMonthLastYear?.rightsDate).toBe('2025-09-26');
+  expect(sameMonthLastYear?.cost).toBe(1800);
+});
+
+test('never reads the stored totalAmount and recomputes the cost from avgRate and days', () => {
+  // JQuantsGyakuhibuActual.totalAmountは記録当時のunitSharesを掛けた値で、
+  // 必要株数とは別の株数を指している。読んでしまうと株数の意味が混ざるため、
+  // 行にtotalAmountがあっても必ずavgRate × days × 株数で組み直す。
+  const rows = [{ rightsDate: '2025-09-26', avgRate: 2.0, days: 3, totalAmount: 999_999 }];
+  const { last } = summarizeActuals(rows, '2026-09-28', 200, 100);
+  // 2.0 × 3 × 200 = 1,200円。保存値の999,999円ではない。
+  expect(last?.cost).toBe(1200);
+  expect(last?.perShareRate).toBe(6);
+});
