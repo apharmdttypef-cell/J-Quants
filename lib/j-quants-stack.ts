@@ -8,6 +8,8 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import * as stepfunctions_tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import * as scheduler from 'aws-cdk-lib/aws-scheduler';
+import * as scheduler_targets from 'aws-cdk-lib/aws-scheduler-targets';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { HttpLambdaAuthorizer, HttpLambdaResponseType } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
@@ -34,6 +36,7 @@ export class JQuantsStack extends cdk.Stack {
   public readonly gyakuhibuActualTable: dynamodb.Table;
   public readonly gyakuhibuForecastTable: dynamodb.Table;
   public readonly yutaiTdnetEventTable: dynamodb.Table;
+  public readonly gyakuhibuValidationBucket: s3.Bucket;
   public readonly apiKeySecret: secretsmanager.Secret;
   public readonly api: apigwv2.HttpApi;
   public readonly frontendBucket: s3.Bucket;
@@ -127,6 +130,21 @@ export class JQuantsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // 逆日歩予測の精度検証(2026-09-28権利付き最終日)用。予測を凍結後に書き換えられない
+    // ことを保証するためObject Lock(Governanceモード)を使う。保持期限は検証プロジェクトの
+    // 区切りとして2026-12-31固定(docs/superpowers/specs/2026-09-24-gyakuhibu-forecast-validation-design.md)。
+    // Lambdaロールには s3:BypassGovernanceRetention を付与しない(誤って上書き・削除できないように)。
+    this.gyakuhibuValidationBucket = new s3.Bucket(this, 'GyakuhibuValidationBucket', {
+      objectLockEnabled: true,
+      objectLockDefaultRetention: s3.ObjectLockRetention.governance(cdk.Duration.days(
+        Math.ceil((new Date('2026-12-31T23:59:59+09:00').getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
+      )),
+      versioned: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // APIキーの値自体はCDKに含めず、deploy後に
     // `aws secretsmanager put-secret-value` で投入する想定。
     this.apiKeySecret = new secretsmanager.Secret(this, 'JQuantsApiKeySecret', {
@@ -134,10 +152,11 @@ export class JQuantsStack extends cdk.Stack {
       description: 'J-Quants API key (V2)',
     });
 
-    // フロント/APIを未認証で公開しないための共有パスワード。Secrets Managerとフロント配信
-    // (CloudFront FunctionのBasic認証)の両方に同じ値を反映するため、synth時に値が必要。
-    // 通常はbin/j-quants.tsがシークレットから読んでpropsで渡すので、デプロイ時に環境変数を
-    // 毎回打つ必要はない。環境変数は初回デプロイとローテーションのための明示指定経路。
+    // フロント/APIを未認証で公開しないための共有パスワード。Secrets Managerとフロント配信の
+    // 両方に同じ値を反映する。通常は`bin/j-quants.ts`がSecrets Managerから読んでpropsで渡すので
+    // デプロイ時に環境変数を渡す必要はない。環境変数はフォールバック(初回デプロイ・
+    // ローテーション時)。CloudFront FunctionはSecrets Managerを実行時参照できないため、
+    // どちらの経路でもsynth時に値が確定していなければならない。
     const appPassword = props?.appPassword ?? process.env.APP_PASSWORD;
     if (!appPassword) {
       throw new Error(
@@ -474,6 +493,126 @@ export class JQuantsStack extends cdk.Stack {
 
     const referenceApiIntegration = new HttpLambdaIntegration('ReferenceApiIntegration', referenceApiFn);
 
+    // 逆日歩予測の精度検証(2026-09-28権利付き最終日)用スナップショットLambda。既存の
+    // 日次予測バッチ(gyakuhibuForecastBatchFn)とは完全に独立した別系統(lambda/gyakuhibu-forecast-validation/)。
+    // taisyaku.jpへの1銘柄1秒ペースの逐次フェッチ(約303銘柄・6分強、Task 0実測)を
+    // 見込んでtimeoutは既存バッチと同じ14分に余裕を持たせる。
+    const gyakuhibuForecastSnapshotFn = new nodejs.NodejsFunction(this, 'ForecastSnapshotFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'gyakuhibu-forecast-validation', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 512,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
+        STOCK_PRICES_TABLE_NAME: this.stockPricesTable.tableName,
+        VALIDATION_BUCKET_NAME: this.gyakuhibuValidationBucket.bucketName,
+        SECRET_ARN: this.apiKeySecret.secretArn,
+      },
+    });
+
+    this.yutaiMasterTable.grantReadData(gyakuhibuForecastSnapshotFn);
+    this.gyakuhibuActualTable.grantReadData(gyakuhibuForecastSnapshotFn);
+    this.stockPricesTable.grantReadData(gyakuhibuForecastSnapshotFn);
+    this.apiKeySecret.grantRead(gyakuhibuForecastSnapshotFn);
+    this.gyakuhibuValidationBucket.grantPut(gyakuhibuForecastSnapshotFn);
+    this.gyakuhibuValidationBucket.grantRead(gyakuhibuForecastSnapshotFn);
+
+    // scheduler.ScheduleExpression.at(date, timeZone)はdate.toISOString()の文字列(常にUTC
+    // 表記)をそのままat(...)リテラルとして使い、timeZoneは「そのリテラルの数字をどのタイム
+    // ゾーンの現地時刻として解釈するか」を別途指定する仕組み。つまりdateには「望む現地時刻の
+    // 数字をUTCとして偽装したもの」を渡す必要がある(例: JST 20:00を表すには'+09:00'ではなく
+    // 'Z'を使い、20:00という数字そのものをUTC表記に埋め込む)。'+09:00'を使うと
+    // toISOString()が実時刻のUTC変換(11:00Z)を返してしまい、そこにtimeZone: ASIA_TOKYOを
+    // 付けると「JST 11:00」に化けてしまう(意図の20:00から9時間ずれる)。実際に
+    // new Date('2026-09-25T20:00:00+09:00').toISOString()が'2026-09-25T11:00:00.000Z'に
+    // なることをnode -eで確認済み。
+    //
+    // スナップショットA(本命判断ポイント)。設計書は9/25 20:00 JSTを想定していたが、デプロイ
+    // 自体が20:00頃になる見込みのため、デプロイとの余裕を確保して9/26 00:00 JST(=9/25の
+    // 「24:00」)に後ろ倒しした(ユーザー指示、2026-09-25)。rightsDate/variant/asofDateは
+    // 変更しない(見る対象データは9/24確報のまま、発火時刻だけをずらす)。9/25終値は
+    // Task 0実測で18:03〜18:04 JST頃に反映済みなので、この変更後もタイミング上の余裕は
+    // むしろ広がる。1回限りの実行。
+    new scheduler.Schedule(this, 'ForecastSnapshotAScheduler', {
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-09-26T00:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastSnapshotFn, {
+        input: scheduler.ScheduleTargetInput.fromObject({
+          rightsDate: '2026-09-28',
+          asofLabel: '2026-09-26T0000JST',
+          runId: 'run=1',
+          variant: 'final',
+          asofDate: '2026-09-24',
+        }),
+      }),
+    });
+
+    // スナップショットB(参考上限、9/28 15:00 JST)。1回限りの実行。
+    // 設計書は「9/25確報が15:00時点で出ていれば確報、無ければ速報」という per-ticker
+    // フォールバックを想定していたが、9/25(金)夜のリハーサルで実際にticker 9024他307銘柄の
+    // 生CSVを確認した結果、当日分の品貸料率・応札ランクは常に空欄(確報は翌営業日になって
+    // 初めて入る)ことが再現確認された。9/25の次の営業日は9/28そのものであり、
+    // 9/28 11:30〜16:00頃の確報ウィンドウに間に合う想定のため、per-ticker
+    // フォールバックは実装せず「常に確報(final)を待つ」に単純化する(ユーザー指示、
+    // 2026-09-25、リハーサル結果を報告した上で確認済み)。asofDateは9/25のまま変更しない。
+    new scheduler.Schedule(this, 'ForecastSnapshotBScheduler', {
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-09-28T15:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastSnapshotFn, {
+        input: scheduler.ScheduleTargetInput.fromObject({
+          rightsDate: '2026-09-28',
+          asofLabel: '2026-09-28T1500JST',
+          runId: 'run=1',
+          variant: 'final',
+          asofDate: '2026-09-25',
+        }),
+      }),
+    });
+
+    const gyakuhibuForecastActualsFn = new nodejs.NodejsFunction(this, 'ForecastActualsFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'gyakuhibu-forecast-actuals', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.minutes(14),
+      memorySize: 512,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        VALIDATION_BUCKET_NAME: this.gyakuhibuValidationBucket.bucketName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
+      },
+    });
+
+    this.gyakuhibuActualTable.grantReadData(gyakuhibuForecastActualsFn);
+    this.gyakuhibuValidationBucket.grantPut(gyakuhibuForecastActualsFn);
+    this.gyakuhibuValidationBucket.grantRead(gyakuhibuForecastActualsFn);
+
+    // 実績取得(1回目、2026-09-29 20:00 JST)。1回限りの実行。
+    // scheduler.ScheduleExpression.at(date, timeZone)はdate.toISOString()の数字を
+    // そのままat(...)リテラルに埋め込み、timeZoneは「その数字をどのタイムゾーンの
+    // 現地時刻として解釈するか」を別途指定する仕組み(Task 3(旧)で実装・検証済み)。
+    // 望む現地時刻の数字をそのままUTCとして書く('Z'サフィックス、'+09:00'は使わない)。
+    new scheduler.Schedule(this, 'ForecastActualsFirstScheduler', {
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-09-29T20:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastActualsFn, {
+        input: scheduler.ScheduleTargetInput.fromObject({
+          rightsDate: '2026-09-28',
+          fetchedLabel: '2026-09-29T2000JST',
+        }),
+      }),
+    });
+
+    // 実績再取得(確報修正・再現性の確認、2026-10-02 20:00 JST)。1回限りの実行。
+    new scheduler.Schedule(this, 'ForecastActualsRefetchScheduler', {
+      schedule: scheduler.ScheduleExpression.at(new Date('2026-10-02T20:00:00Z'), cdk.TimeZone.ASIA_TOKYO),
+      target: new scheduler_targets.LambdaInvoke(gyakuhibuForecastActualsFn, {
+        input: scheduler.ScheduleTargetInput.fromObject({
+          rightsDate: '2026-09-28',
+          fetchedLabel: '2026-10-02T2000JST',
+        }),
+      }),
+    });
+
     // ビルド成果物を置くだけの静的ホスティング用バケット。セーブデータ等の
     // 永続資産ではないため、他テーブルと違いdestroy時に消えて構わない。
     this.frontendBucket = new s3.Bucket(this, 'FrontendBucket', {
@@ -577,6 +716,7 @@ function handler(event) {
     new cdk.CfnOutput(this, 'ApiEndpoint', { value: this.api.apiEndpoint });
     new cdk.CfnOutput(this, 'FrontendUrl', { value: `https://${this.distribution.distributionDomainName}` });
     new cdk.CfnOutput(this, 'FrontendBucketName', { value: this.frontendBucket.bucketName });
+    new cdk.CfnOutput(this, 'GyakuhibuValidationBucketName', { value: this.gyakuhibuValidationBucket.bucketName });
     new cdk.CfnOutput(this, 'DistributionId', { value: this.distribution.distributionId });
   }
 }

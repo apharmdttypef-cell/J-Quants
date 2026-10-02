@@ -10,6 +10,50 @@ function synth() {
   return Template.fromStack(stack);
 }
 
+// bin/j-quants.tsは通常Secrets Managerから読んだ値をappPasswordプロパティで渡す
+// (デプロイ時に毎回環境変数を打たずに済むようにするため)。環境変数は初回デプロイと
+// ローテーション時のフォールバック。両方の経路が同じ場所に反映されることを検証する。
+test('appPassword prop takes precedence over the APP_PASSWORD env var, and both reach the secret and the CloudFront Function', () => {
+  const app = new cdk.App();
+  const stack = new JQuantsStack(app, 'PropPasswordStack', { appPassword: 'from-prop' });
+  const template = Template.fromStack(stack);
+
+  // Secrets Manager側
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Name: 'JQuantsAppPassword',
+    SecretString: 'from-prop',
+  });
+
+  // CloudFront Function側(Basic認証は`jquants:<password>`のbase64を埋め込む)
+  const expected = Buffer.from('jquants:from-prop').toString('base64');
+  const functions = template.findResources('AWS::CloudFront::Function');
+  const codes = Object.values(functions).map(
+    (f) => (f as { Properties: { FunctionCode: string } }).Properties.FunctionCode,
+  );
+  expect(codes.some((c) => c.includes(expected))).toBe(true);
+  // 環境変数の値(test-app-password)が使われていないこと
+  expect(codes.some((c) => c.includes(Buffer.from('jquants:test-app-password').toString('base64')))).toBe(false);
+});
+
+test('falls back to the APP_PASSWORD env var when no appPassword prop is given', () => {
+  const template = synth(); // propsなし → process.env.APP_PASSWORD = 'test-app-password'
+
+  template.hasResourceProperties('AWS::SecretsManager::Secret', {
+    Name: 'JQuantsAppPassword',
+    SecretString: 'test-app-password',
+  });
+});
+
+test('throws when neither the appPassword prop nor the APP_PASSWORD env var is available', () => {
+  const saved = process.env.APP_PASSWORD;
+  delete process.env.APP_PASSWORD;
+  try {
+    expect(() => new JQuantsStack(new cdk.App(), 'NoPasswordStack')).toThrow(/appPassword prop or APP_PASSWORD/);
+  } finally {
+    process.env.APP_PASSWORD = saved;
+  }
+});
+
 test('creates the JQuantsStockPrices table with ticker/date key and RETAIN policy', () => {
   const template = synth();
 
@@ -680,4 +724,253 @@ test('the detail sync batch has no EventBridge schedule of its own', () => {
   const targets = Object.values(rules).flatMap((rule) => rule.Properties.Targets ?? []);
   const targetArns = JSON.stringify(targets);
   expect(targetArns).not.toContain('YutaiDetailSyncBatchFunction');
+});
+
+test('creates the gyakuhibu validation bucket with Object Lock (Governance, retain until 2026-12-31), versioning, and RETAIN policy', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::S3::Bucket', {
+    ObjectLockEnabled: true,
+    ObjectLockConfiguration: Match.objectLike({
+      ObjectLockEnabled: 'Enabled',
+      Rule: Match.objectLike({
+        DefaultRetention: Match.objectLike({
+          Mode: 'GOVERNANCE',
+        }),
+      }),
+    }),
+    VersioningConfiguration: Match.objectLike({ Status: 'Enabled' }),
+    PublicAccessBlockConfiguration: Match.objectLike({
+      BlockPublicAcls: true,
+      BlockPublicPolicy: true,
+      IgnorePublicAcls: true,
+      RestrictPublicBuckets: true,
+    }),
+    BucketEncryption: Match.objectLike({
+      ServerSideEncryptionConfiguration: Match.arrayWith([
+        Match.objectLike({ ServerSideEncryptionByDefault: Match.objectLike({ SSEAlgorithm: 'AES256' }) }),
+      ]),
+    }),
+  });
+  template.hasResource('AWS::S3::Bucket', {
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  });
+});
+
+test('creates the ForecastSnapshotFunction wired to master/actual/price tables, the api secret, and the validation bucket, with no schedule of its own', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Timeout: 840, // 14 minutes in seconds
+    MemorySize: 512,
+    Environment: {
+      Variables: Match.objectLike({
+        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
+        STOCK_PRICES_TABLE_NAME: Match.anyValue(),
+        VALIDATION_BUCKET_NAME: Match.anyValue(),
+        SECRET_ARN: Match.anyValue(),
+      }),
+    },
+  });
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const policyEntries = Object.entries(policies);
+
+  function hasStatement(namePrefix: string, predicate: (actions: string[], resourceStr: string) => boolean): boolean {
+    return policyEntries.some(([name, p]) => {
+      if (!name.includes(namePrefix)) return false;
+      const statements =
+        (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } })
+          .Properties?.PolicyDocument?.Statement || [];
+      return statements.some((stmt) => {
+        const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+        const resourceStr = JSON.stringify(stmt.Resource || '');
+        return predicate(actions, resourceStr);
+      });
+    });
+  }
+
+  const hasReadAccess = (resourceKeyword: string) =>
+    hasStatement(
+      'ForecastSnapshotFunction',
+      (actions, resourceStr) =>
+        actions.some((a) => a.includes('GetItem') || a.includes('Query') || a.includes('Scan')) && resourceStr.includes(resourceKeyword),
+    );
+  expect(hasReadAccess('YutaiMaster')).toBe(true);
+  expect(hasReadAccess('GyakuhibuActual')).toBe(true);
+  expect(hasReadAccess('StockPrices')).toBe(true);
+
+  expect(hasStatement('ForecastSnapshotFunction', (actions) => actions.some((a) => a.includes('secretsmanager:GetSecretValue')))).toBe(
+    true,
+  );
+
+  expect(
+    hasStatement(
+      'ForecastSnapshotFunction',
+      (actions, resourceStr) => actions.some((a) => a.includes('PutObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
+    ),
+  ).toBe(true);
+  expect(
+    hasStatement(
+      'ForecastSnapshotFunction',
+      (actions, resourceStr) => actions.some((a) => a.includes('GetObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
+    ),
+  ).toBe(true);
+
+  // Task 2の時点ではスケジュールを追加しない(EventBridge SchedulerでのTask 3の対象)。
+  // 既存7スケジュール(price/financial-summary/margin-balance/gyakuhibu-history/
+  // tdnet-watch/yutai-risk-precompute/gyakuhibu-forecast)から増えていないことを確認する。
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(7);
+});
+
+test('schedules the two one-time forecast validation snapshots via EventBridge Scheduler at the correct JST wall-clock times', () => {
+  const template = synth();
+
+  // scheduler.ScheduleExpression.at(date, timeZone)は「dateのtoISOString()の数字」をat(...)
+  // リテラルにそのまま埋め込み、timeZoneはその数字をどのタイムゾーンの現地時刻として解釈
+  // するかを別途指定する。つまりScheduleExpressionの文字列自体はJSTの壁時計表記(00:00/15:00)
+  // のまま、Timezoneフィールドで'Asia/Tokyo'を指定して初めて正しい実時刻(UTC 15:00/06:00)に
+  // なる。この2つが揃っていることを確認しないと、UTC変換を誤って9時間ずれるバグ
+  // (実装時に発見・修正済み)を再発検知できない。
+  // スナップショットAは当初9/25 20:00 JST予定だったが、デプロイ自体が20:00頃になる見込みの
+  // ため9/26 00:00 JST(=9/25の「24:00」)に後ろ倒しした(ユーザー指示、2026-09-25)。
+  template.hasResourceProperties('AWS::Scheduler::Schedule', {
+    ScheduleExpression: 'at(2026-09-26T00:00:00)',
+    ScheduleExpressionTimezone: 'Asia/Tokyo',
+    Target: Match.objectLike({
+      Input: Match.serializedJson(
+        Match.objectLike({
+          rightsDate: '2026-09-28',
+          asofLabel: '2026-09-26T0000JST',
+          variant: 'final',
+          asofDate: '2026-09-24',
+        }),
+      ),
+    }),
+  });
+
+  // スナップショットBは当初variant:'prelim'を想定していたが、9/25リハーサルで同日分の
+  // 品貸料率が常に空欄(確報は翌営業日)であることが再現確認されたため、per-tickerの
+  // 確報/速報フォールバックは実装せず「常にfinal(確報)を待つ」に単純化した。
+  template.hasResourceProperties('AWS::Scheduler::Schedule', {
+    ScheduleExpression: 'at(2026-09-28T15:00:00)',
+    ScheduleExpressionTimezone: 'Asia/Tokyo',
+    Target: Match.objectLike({
+      Input: Match.serializedJson(
+        Match.objectLike({
+          rightsDate: '2026-09-28',
+          asofLabel: '2026-09-28T1500JST',
+          variant: 'final',
+          asofDate: '2026-09-25',
+        }),
+      ),
+    }),
+  });
+
+  // 合計のAWS::Scheduler::Scheduleリソース数(2→4)の確認はTask 2で追加した
+  // 「schedules the two one-time actuals-fetch runs...」テストが担う。このテストは
+  // スナップショットA/Bの2つのプロパティ検証にスコープを絞る。
+});
+
+test('creates the ForecastActualsFunction wired to the actual table and the validation bucket (read+write)', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Handler: 'index.handler',
+    Runtime: 'nodejs22.x',
+    Timeout: 840, // 14 minutes in seconds
+    MemorySize: 512,
+    Environment: {
+      Variables: Match.objectLike({
+        VALIDATION_BUCKET_NAME: Match.anyValue(),
+        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
+      }),
+    },
+  });
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const policyEntries = Object.entries(policies);
+
+  function hasStatement(namePrefix: string, predicate: (actions: string[], resourceStr: string) => boolean): boolean {
+    return policyEntries.some(([name, p]) => {
+      if (!name.includes(namePrefix)) return false;
+      const statements =
+        (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: any }> } } })
+          .Properties?.PolicyDocument?.Statement || [];
+      return statements.some((stmt) => {
+        const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
+        const resourceStr = JSON.stringify(stmt.Resource || '');
+        return predicate(actions, resourceStr);
+      });
+    });
+  }
+
+  expect(
+    hasStatement(
+      'ForecastActualsFunction',
+      (actions, resourceStr) =>
+        actions.some((a) => a.includes('GetItem') || a.includes('Query') || a.includes('Scan')) &&
+        resourceStr.includes('GyakuhibuActual'),
+    ),
+  ).toBe(true);
+
+  expect(
+    hasStatement(
+      'ForecastActualsFunction',
+      (actions, resourceStr) => actions.some((a) => a.includes('PutObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
+    ),
+  ).toBe(true);
+  expect(
+    hasStatement(
+      'ForecastActualsFunction',
+      (actions, resourceStr) => actions.some((a) => a.includes('GetObject')) && resourceStr.includes('GyakuhibuValidationBucket'),
+    ),
+  ).toBe(true);
+});
+
+test('schedules the two one-time actuals-fetch runs via EventBridge Scheduler at the correct JST wall-clock times', () => {
+  const template = synth();
+
+  // ForecastSnapshotA/Bと同じ仕組み: scheduler.ScheduleExpression.at(date, timeZone)は
+  // dateのtoISOString()の数字をat(...)リテラルにそのまま埋め込み、timeZoneはその数字を
+  // どのタイムゾーンの現地時刻として解釈するかを別途指定する。ScheduleExpressionの文字列
+  // 自体はJSTの壁時計表記(20:00)のまま、Timezoneフィールドで'Asia/Tokyo'を指定して初めて
+  // 正しい実時刻(UTC 11:00)になる。この2つが揃っていることを確認しないと、UTC変換を
+  // 誤って9時間ずれるバグを再発検知できない。
+  template.hasResourceProperties('AWS::Scheduler::Schedule', {
+    ScheduleExpression: 'at(2026-09-29T20:00:00)',
+    ScheduleExpressionTimezone: 'Asia/Tokyo',
+    Target: Match.objectLike({
+      Input: Match.serializedJson(
+        Match.objectLike({
+          rightsDate: '2026-09-28',
+          fetchedLabel: '2026-09-29T2000JST',
+        }),
+      ),
+    }),
+  });
+
+  template.hasResourceProperties('AWS::Scheduler::Schedule', {
+    ScheduleExpression: 'at(2026-10-02T20:00:00)',
+    ScheduleExpressionTimezone: 'Asia/Tokyo',
+    Target: Match.objectLike({
+      Input: Match.serializedJson(
+        Match.objectLike({
+          rightsDate: '2026-09-28',
+          fetchedLabel: '2026-10-02T2000JST',
+        }),
+      ),
+    }),
+  });
+
+  const schedules = template.findResources('AWS::Scheduler::Schedule');
+  expect(Object.keys(schedules)).toHaveLength(4);
 });
