@@ -12,3 +12,6 @@ cdk.out
 
 # git worktrees for isolated implementation sessions
 .claude/worktrees/
+
+# Playwright MCPがブラウザ確認のたびに吐くコンソールログ
+.playwright-mcp/
