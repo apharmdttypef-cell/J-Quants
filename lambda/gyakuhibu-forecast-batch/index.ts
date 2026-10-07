@@ -5,7 +5,16 @@
 // 設計: docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { buildPool, chooseScenario, forecast, toSample, type ForecastSample, type GyakuhibuActualRow } from '../shared/gyakuhibu-forecast';
+import {
+  buildPool,
+  chooseScenario,
+  forecast,
+  toSample,
+  type ForecastResult,
+  type ForecastSample,
+  type GyakuhibuActualRow,
+} from '../shared/gyakuhibu-forecast';
+import { isGeneralMarginOnly } from '../shared/margin-name';
 import { nextRightsDate } from '../shared/trading-calendar';
 import { buildTsePools, buildTseSamples, computeTseForecast, scanMarginSnapshots, type TsePools } from './tse-forecast';
 
@@ -45,7 +54,28 @@ interface MasterRow {
   unitShares: number;
   rightsMonths: number[];
   maxGyakuhibu: number | null;
+  // yutai-risk-precompute-batchが毎日J-Quantsから取り込む貸借区分。
+  marginName: string | null;
 }
+
+// 制度信用で売れない銘柄の予測行。逆日歩が発生しえないので分布は出さない。
+// 過去に貸借だった頃の実績があっても使わない(今はその条件でクロスできないため)。
+const GENERAL_MARGIN_ONLY_RESULT: ForecastResult = {
+  scenario: 'none',
+  excessRatio: null,
+  bin: null,
+  pOccur: null,
+  fillP50: null,
+  fillP90: null,
+  fillMean: null,
+  forecastP50: null,
+  forecastP90: null,
+  forecastMean: null,
+  expectedNet: null,
+  forecastStatus: 'general-only',
+  tickerSamples: 0,
+  poolSamples: 0,
+};
 
 async function scanYutaiMaster(): Promise<MasterRow[]> {
   const rows: MasterRow[] = [];
@@ -63,6 +93,7 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
           unitShares: item.unitShares,
           rightsMonths: Array.isArray(item.rightsMonths) ? item.rightsMonths : [],
           maxGyakuhibu: typeof item.maxGyakuhibu === 'number' ? item.maxGyakuhibu : null,
+          marginName: typeof item.marginName === 'string' ? item.marginName : null,
         });
       }
     }
@@ -165,6 +196,7 @@ export const handler = async (): Promise<void> => {
         continue;
       }
 
+      const generalMarginOnly = isGeneralMarginOnly(row.marginName);
       const tickerSamples = samplesByTicker.get(row.ticker) ?? [];
       // 過去実績ベース予測は東証信用残(スタンダードプラン依存)を使わない。実績が無い銘柄は
       // 'none'(対象外)になり、現在需給ベース予測(tse-forecast.ts)側が補う。
@@ -172,14 +204,16 @@ export const handler = async (): Promise<void> => {
       const { scenario, excessRatio } = chooseScenario(tickerSamples, nextRightsMonth, null);
 
       // poolSamplesは「ビンで絞り込まない全件」を渡す契約(forecast内部で絞り込む)。
-      const result = forecast({
-        tickerSamples,
-        poolSamples: allSamples,
-        scenario,
-        excessRatio,
-        maxGyakuhibu: row.maxGyakuhibu,
-        value: row.value,
-      });
+      const result = generalMarginOnly
+        ? GENERAL_MARGIN_ONLY_RESULT
+        : forecast({
+            tickerSamples,
+            poolSamples: allSamples,
+            scenario,
+            excessRatio,
+            maxGyakuhibu: row.maxGyakuhibu,
+            value: row.value,
+          });
 
       const item: Record<string, unknown> = {
         ticker: row.ticker,
@@ -188,7 +222,9 @@ export const handler = async (): Promise<void> => {
         excessRatio: finiteOrNull(result.excessRatio),
         computedAt,
       };
-      if (tse) {
+      if (tse && generalMarginOnly) {
+        item.tseForecast = null;
+      } else if (tse) {
         const tseForecast = computeTseForecast({
           ticker: row.ticker,
           today: computedAt,

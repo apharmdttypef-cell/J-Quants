@@ -40,7 +40,9 @@ export interface PoolBin {
   fillMean: number;
 }
 
-export type ForecastStatus = 'safe' | 'caution' | 'danger' | 'na';
+// 'general-only'は制度信用で売れない銘柄(貸借区分が信用・その他)。逆日歩が発生しえないので
+// 予測せず、クロスは一般信用でしか組めないことを示す。'na'(実績が無く予測できない)とは別物。
+export type ForecastStatus = 'safe' | 'caution' | 'danger' | 'general-only' | 'na';
 export type Scenario = 'last-rights' | 'current-tse' | 'none';
 
 export interface ForecastResult {

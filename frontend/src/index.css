@@ -366,6 +366,13 @@ a {
   background: color-mix(in srgb, var(--caution) 14%, transparent);
 }
 
+/* 制度信用で売れない銘柄。リスクの高低ではないので、判定色とは別の中立色にする */
+.risk-badge--general-only {
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px dashed var(--border);
+}
+
 /* 単元株数と必要株数が違う銘柄(第一興商の200株など)は見落とすと優待が取れない */
 .shares-above-unit {
   font-weight: 700;

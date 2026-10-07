@@ -69,7 +69,7 @@ export interface YutaiListParams {
   rightsDateFrom?: string;
   rightsDateTo?: string;
   keyword?: string;
-  riskStatus?: 'safe' | 'caution' | 'danger' | 'na' | 'all';
+  riskStatus?: 'safe' | 'caution' | 'danger' | 'general-only' | 'na' | 'all';
   priceMin?: number;
   priceMax?: number;
   investmentMin?: number;

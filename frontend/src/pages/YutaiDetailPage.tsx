@@ -94,7 +94,9 @@ export function YutaiDetailPage() {
   if (!detailState.data) return null;
 
   const { data } = detailState;
-  const riskLabel = { safe: '安全', caution: '注意', danger: '危険', na: '対象外' }[data.risk.riskStatus];
+  const riskLabel = { safe: '安全', caution: '注意', danger: '危険', 'general-only': '一般信用のみ', na: '対象外' }[
+    data.risk.riskStatus
+  ];
   // 過去の実績逆日歩を出す株数。必要株数が未取得なら単元株数で代用する
   // (lambda/shared/gyakuhibu-actual-summary.tsと同じ規則)。必要株数が200株・300株の
   // 銘柄で単元株数を使うと、一覧画面の「前回逆日歩」の半分・3分の1の金額が並んでしまう。

@@ -24,10 +24,16 @@ function monthRange(): { from: string; to: string } {
   return { from: `${y}-${pad(m + 1)}-01`, to: `${y}-${pad(m + 1)}-${pad(lastDay)}` };
 }
 
-const RISK_LABEL: Record<YutaiRiskStatus, string> = { safe: '安全', caution: '注意', danger: '危険', na: '対象外' };
+const RISK_LABEL: Record<YutaiRiskStatus, string> = {
+  safe: '安全',
+  caution: '注意',
+  danger: '危険',
+  'general-only': '一般信用のみ',
+  na: '対象外',
+};
 // リスクは危険→注意→安全→対象外の順に並ぶ方が意味があるため、文字列の並び順ではなく
 // このランクでソートする。
-const RISK_SORT_RANK: Record<YutaiRiskStatus, number> = { danger: 0, caution: 1, safe: 2, na: 3 };
+const RISK_SORT_RANK: Record<YutaiRiskStatus, number> = { danger: 0, caution: 1, safe: 2, 'general-only': 3, na: 4 };
 
 const columns: ColumnDef<YutaiListItem>[] = [
   {
@@ -169,7 +175,7 @@ export function YutaiListPage() {
       <h1 className="page-title">優待クロス スクリーニング</h1>
       <p className="page-subtitle">
         権利日と逆日歩リスクで絞り込みます。リスクは、最悪ケースの想定逆日歩が最大逆日歩(入札上限)の何割か
-        で判定します(危険=50%以上・注意=20〜50%・安全=20%未満・対象外=過去実績が無く予測不可)。
+        で判定します(危険=50%以上・注意=20〜50%・安全=20%未満・一般信用のみ=制度信用で売れない銘柄・対象外=過去実績が無く予測不可)。
       </p>
 
       {listState.data && (
@@ -201,6 +207,7 @@ export function YutaiListPage() {
             <option value="safe">安全</option>
             <option value="caution">注意</option>
             <option value="danger">危険</option>
+            <option value="general-only">一般信用のみ</option>
             <option value="na">対象外</option>
           </select>
         </label>

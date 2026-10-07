@@ -48,6 +48,7 @@ const FORECAST_STATUS_LABEL: Record<YutaiForecastStatus, string> = {
   danger: '危険',
   caution: '注意',
   safe: '安全',
+  'general-only': '一般信用のみ',
   na: '対象外',
 };
 // 判定は危険→注意→安全→対象外の順に並ぶ方が意味があるため、文字列の並び順ではなく
@@ -56,7 +57,8 @@ const FORECAST_STATUS_SORT_RANK: Record<YutaiForecastStatus, number> = {
   danger: 0,
   caution: 1,
   safe: 2,
-  na: 3,
+  'general-only': 3,
+  na: 4,
 };
 
 // デフォルトソート: 判定ランク→expectedNet昇順(=優待価値と予測逆日歩の差が小さい=
@@ -209,7 +211,7 @@ function buildColumns(tseEnabled: boolean): ColumnDef<YutaiForecastListItem>[] {
     header: () => (
       <HeaderTooltip
         label="判定"
-        tooltip="想定逆日歩(最悪)が最大逆日歩(入札上限)の何割か、で判定した目安。危険=50%以上、注意=20〜50%、安全=20%未満、対象外=過去実績が無く予測できない。優待価値は判定に使いません。"
+        tooltip="想定逆日歩(最悪)が最大逆日歩(入札上限)の何割か、で判定した目安。危険=50%以上、注意=20〜50%、安全=20%未満、一般信用のみ=制度信用で売れない銘柄(逆日歩は付かないが一般信用の在庫が必要)、対象外=過去実績が無く予測できない。優待価値は判定に使いません。"
       />
     ),
     accessorFn: (row) => row.forecast.forecastStatus,
@@ -307,8 +309,8 @@ function KeywordFilterInput({ onDebouncedChange }: { onDebouncedChange: (value: 
 
 // 実運用では「危険を除いたものを見て購入判断する」使い方になるため、危険だけ
 // デフォルトで外し、注意・安全・対象外はデフォルトで選択しておく。
-const DEFAULT_STATUSES: ReadonlySet<YutaiForecastStatus> = new Set(['caution', 'safe', 'na']);
-const ALL_STATUSES: readonly YutaiForecastStatus[] = ['danger', 'caution', 'safe', 'na'];
+const DEFAULT_STATUSES: ReadonlySet<YutaiForecastStatus> = new Set(['caution', 'safe', 'general-only', 'na']);
+const ALL_STATUSES: readonly YutaiForecastStatus[] = ['danger', 'caution', 'safe', 'general-only', 'na'];
 
 export function YutaiForecastListPage() {
   const navigate = useNavigate();

@@ -2,6 +2,8 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, QueryCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { calcMaxGyakuhibu, calcMaxRate, RIGHTS_DAY_RATE_MULTIPLIER } from '../shared/gyakuhibu-calc';
 import { summarizeActuals } from '../shared/gyakuhibu-actual-summary';
+import { getApiKey } from '../shared/jquants-batch-client';
+import { fetchMarginNames, isGeneralMarginOnly } from '../shared/margin-name';
 import {
   getLocalTradingCalendar,
   settlementDate,
@@ -15,6 +17,8 @@ const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const TABLE_NAME = process.env.TABLE_NAME!; // 株価(JQuantsStockPrices)
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
+const SECRET_ARN = process.env.SECRET_ARN!;
+const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -23,6 +27,8 @@ interface MasterRow {
   unitShares: number;
   requiredShares: number | null;
   rightsMonths: number[];
+  // 前回の実行で記録した貸借区分。J-Quantsからの取得に失敗した日はこれを使い続ける。
+  marginName: string | null;
 }
 
 async function scanYutaiMaster(): Promise<MasterRow[]> {
@@ -33,11 +39,11 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
     const result = await ddbDocClient.send(
       new ScanCommand({
         TableName: YUTAI_MASTER_TABLE_NAME,
-        // MasterRowが読む4項目だけを取る。特にbenefitGroups(1銘柄0.7〜2KB × 1,642銘柄)は
+        // MasterRowが読む5項目だけを取る。特にbenefitGroups(1銘柄0.7〜2KB × 1,642銘柄)は
         // ここでは使わないのに、Scanの1MBページングの往復回数を押し上げる。
         // MasterRowに項目を足すときはこの射影にも足すこと(足し忘れると黙ってundefinedに
         // なる)。
-        ProjectionExpression: 'ticker, unitShares, requiredShares, rightsMonths',
+        ProjectionExpression: 'ticker, unitShares, requiredShares, rightsMonths, marginName',
         ExclusiveStartKey: exclusiveStartKey,
       }),
     );
@@ -50,6 +56,7 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
           // 未取得の銘柄ではnullになり、単元株数で代用する。
           requiredShares: typeof item.requiredShares === 'number' ? item.requiredShares : null,
           rightsMonths: item.rightsMonths ?? [],
+          marginName: typeof item.marginName === 'string' ? item.marginName : null,
         });
       }
     }
@@ -156,8 +163,36 @@ async function calcRisk(
   return { maxGyakuhibu, maxRate, days, closePrice, requiredInvestment: closePrice * shares };
 }
 
+// 制度信用で売れない銘柄(信用・その他)には逆日歩が発生しえないので、最大逆日歩は出さない。
+// クロスは一般信用で組むことになり、その場合も必要資金は要るので終値と必要資金だけ出す。
+async function calcGeneralMarginOnlyRisk(ticker: string, shares: number): Promise<RiskResult> {
+  const closePrice = await latestClose(ticker);
+  return {
+    ...NA_RISK,
+    closePrice: closePrice ?? null,
+    requiredInvestment: closePrice !== undefined ? closePrice * shares : null,
+  };
+}
+
+// J-Quantsの上場一覧から最新の貸借区分を取る。失敗した場合や、空の一覧が返った場合は
+// nullを返し、呼び出し側は前回までに記録した区分を使い続ける(全銘柄の区分を消さない)。
+async function loadMarginNames(): Promise<Map<string, string> | null> {
+  try {
+    const names = await fetchMarginNames(await getApiKey(SECRET_ARN), API_BASE_URL);
+    if (names.size === 0) {
+      console.error('yutai-risk-precompute-batch: J-Quants returned an empty listing; keeping the stored margin names');
+      return null;
+    }
+    return names;
+  } catch (error) {
+    console.error('yutai-risk-precompute-batch: failed to fetch margin names; keeping the stored values', error);
+    return null;
+  }
+}
+
 export const handler = async (): Promise<void> => {
   const rows = await scanYutaiMaster();
+  const marginNames = await loadMarginNames();
   const calendarCache = new Map<string, CalendarDay[]>();
 
   let updated = 0;
@@ -168,10 +203,18 @@ export const handler = async (): Promise<void> => {
       // 単元株数で代用する。代用したことはsummarizeActualsがbasedOnUnitSharesで
       // 画面に伝える。
       const shares = row.requiredShares ?? row.unitShares;
-      const risk = await calcRisk(row, shares, rightsDate, calendarCache);
+      // 上場一覧に無い銘柄(東証外上場など)は区分不明としてnull。
+      const marginName = marginNames ? (marginNames.get(row.ticker) ?? null) : row.marginName;
+      const generalMarginOnly = isGeneralMarginOnly(marginName);
+      const risk = generalMarginOnly
+        ? await calcGeneralMarginOnlyRisk(row.ticker, shares)
+        : await calcRisk(row, shares, rightsDate, calendarCache);
       // 実績の集計は最大逆日歩の計算とは独立(信用残が無く最大逆日歩が出せない銘柄でも、
-      // 過去に実際に取られたコストは出す価値がある)。
-      const actuals = summarizeActuals(await fetchActualRows(row.ticker), rightsDate, row.requiredShares, row.unitShares);
+      // 過去に実際に取られたコストは出す価値がある)。ただし制度信用で売れない銘柄の実績は
+      // 全て「発生しなかった」記録なので、「前回0円」と見せると誤解を招くため出さない。
+      const actuals = generalMarginOnly
+        ? { last: null, sameMonthLastYear: null }
+        : summarizeActuals(await fetchActualRows(row.ticker), rightsDate, row.requiredShares, row.unitShares);
 
       await ddbDocClient.send(
         new UpdateCommand({
@@ -183,10 +226,12 @@ export const handler = async (): Promise<void> => {
           UpdateExpression:
             'SET maxGyakuhibu = :maxGyakuhibu, maxRate = :maxRate, #days = :days, ' +
             'closePrice = :closePrice, requiredInvestment = :requiredInvestment, ' +
-            'lastGyakuhibu = :lastGyakuhibu, sameMonthLastYearGyakuhibu = :sameMonthLastYearGyakuhibu ' +
+            'lastGyakuhibu = :lastGyakuhibu, sameMonthLastYearGyakuhibu = :sameMonthLastYearGyakuhibu, ' +
+            'marginName = :marginName ' +
             'REMOVE riskStatus',
           ExpressionAttributeNames: { '#days': 'days' },
           ExpressionAttributeValues: {
+            ':marginName': marginName,
             ':maxGyakuhibu': risk.maxGyakuhibu,
             ':maxRate': risk.maxRate,
             ':days': risk.days,

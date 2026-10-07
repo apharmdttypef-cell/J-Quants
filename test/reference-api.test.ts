@@ -199,6 +199,17 @@ test('GET /yutai returns each ticker with its next rights date and the forecast 
   });
 });
 
+test('GET /yutai passes the general-only judgement (制度信用で売れない銘柄) through as riskStatus', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1380', content: 'A', value: 1000, unitShares: 100, rightsMonths: [8] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '1380', forecastStatus: 'general-only' }] });
+
+  const result = await handler(makeEvent('GET /yutai', { queryStringParameters: { riskStatus: 'general-only' } }));
+
+  const parsed = body(result) as { tickers: Array<{ ticker: string; riskStatus: string }> };
+  expect(parsed.tickers).toEqual([expect.objectContaining({ ticker: '1380', riskStatus: 'general-only' })]);
+});
+
 test('GET /yutai filters by riskStatus using the forecast judgement', async () => {
   mockSend
     .mockResolvedValueOnce({

@@ -69,6 +69,54 @@ test('does not fall back to current-tse: a ticker with no history gets scenario 
   });
 });
 
+test('marks a ticker that cannot be shorted under 制度信用 (信用/その他) as general-only instead of forecasting it', async () => {
+  await withFixedNow(async () => {
+    mockSend
+      .mockResolvedValueOnce({
+        Items: [
+          { ticker: '8798', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: null, marginName: '信用' },
+          { ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000, marginName: '貸借' },
+        ],
+      }) // yutai master scan
+      .mockResolvedValueOnce({
+        Items: [
+          // 8798は貸借だった頃の実績を持つが、今は制度信用で売れないので予測しない
+          {
+            ticker: '8798', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
+            avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
+          },
+        ],
+      }) // gyakuhibu actual scan
+      .mockResolvedValueOnce({}) // _POOL_ put
+      .mockResolvedValueOnce({}) // 8798のforecast put
+      .mockResolvedValueOnce({}); // 1234のforecast put
+
+    await handler();
+
+    const itemOf = (ticker: string) =>
+      (putCalls().find((c) => (c[0] as { Item: { ticker: string } }).Item.ticker === ticker)![0] as { Item: Record<string, unknown> }).Item;
+    const generalOnly = itemOf('8798');
+    expect(generalOnly.forecastStatus).toBe('general-only');
+    expect(generalOnly.fillP90).toBeNull();
+    expect(generalOnly.forecastP90).toBeNull();
+    expect(itemOf('1234').forecastStatus).not.toBe('general-only');
+  });
+});
+
+test('forecasts a ticker whose margin classification is unknown (東証外上場など) as usual', async () => {
+  await withFixedNow(async () => {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '9942', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: null }] }) // marginNameなし
+      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
+      .mockResolvedValueOnce({}) // _POOL_ put
+      .mockResolvedValueOnce({}); // 9942のforecast put
+
+    await handler();
+
+    expect((putCalls()[1][0] as { Item: Record<string, unknown> }).Item.forecastStatus).toBe('na');
+  });
+});
+
 test('computes a forecast per ticker using its own rights history and the pool', async () => {
   await withFixedNow(async () => {
     mockSend

@@ -100,10 +100,11 @@ async function getSummary(ticker: string): Promise<APIGatewayProxyResultV2> {
 
 // 優待一覧・詳細の「リスク」は逆日歩予測の判定(JQuantsGyakuhibuForecastのforecastStatus)を
 // そのまま使う。判定の正本を予測テーブル1か所にして、画面ごとに基準が食い違わないようにする。
-type RiskStatus = 'safe' | 'caution' | 'danger' | 'na';
+// 'general-only'は制度信用で売れない銘柄(一般信用でしかクロスできない)。
+type RiskStatus = 'safe' | 'caution' | 'danger' | 'general-only' | 'na';
 
 function toRiskStatus(raw: unknown): RiskStatus {
-  return raw === 'safe' || raw === 'caution' || raw === 'danger' ? raw : 'na';
+  return raw === 'safe' || raw === 'caution' || raw === 'danger' || raw === 'general-only' ? raw : 'na';
 }
 type CrossEligible = 'ok' | 'ng' | 'unknown';
 type HoldingKind = 'none' | 'bonus' | 'required' | 'unknown';

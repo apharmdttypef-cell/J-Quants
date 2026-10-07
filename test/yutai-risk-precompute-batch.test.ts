@@ -14,16 +14,31 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   UpdateCommand: jest.fn((input: unknown) => input),
 }));
 
+// 貸借区分はJ-Quantsから取る。取得そのもの(HTTP)はここでは差し替え、判定ロジック
+// (isGeneralMarginOnly)は本物を使う。
+const mockFetchMarginNames = jest.fn();
+jest.mock('../lambda/shared/margin-name', () => ({
+  ...jest.requireActual('../lambda/shared/margin-name'),
+  fetchMarginNames: (...args: unknown[]) => mockFetchMarginNames(...args),
+}));
+jest.mock('../lambda/shared/jquants-batch-client', () => ({
+  getApiKey: jest.fn(async () => 'test-api-key'),
+}));
+
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.TABLE_NAME = 'JQuantsStockPrices';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
+process.env.SECRET_ARN = 'arn:aws:secretsmanager:test';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/yutai-risk-precompute-batch/index') as { handler: () => Promise<void> };
 
 beforeEach(() => {
   mockSend.mockReset();
+  mockFetchMarginNames.mockReset();
+  // 既定は「どの銘柄も区分不明」(=従来どおり最大逆日歩を計算する経路)。
+  mockFetchMarginNames.mockResolvedValue(new Map([['0000', '貸借']]));
 });
 
 function updateCalls() {
@@ -66,6 +81,7 @@ test('the master scan projects only the attributes the batch reads', async () =>
     'unitShares',
     'requiredShares',
     'rightsMonths',
+    'marginName',
   ]);
   // 判定をやめたので優待価値(value)は読まない
   expect(scanInput.ExpressionAttributeNames).toBeUndefined();
@@ -295,4 +311,99 @@ test('skips a row missing unitShares without crashing', async () => {
 
   await expect(handler()).resolves.not.toThrow();
   expect(updateCalls()).toHaveLength(0);
+});
+
+function updateValues(): Record<string, unknown> {
+  return (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
+}
+
+test('records the J-Quants margin classification and computes the gyakuhibu amounts for a 貸借 ticker', async () => {
+  mockFetchMarginNames.mockResolvedValue(new Map([['1234', '貸借']]));
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234' }] }) // margin balance presence: yes
+    .mockResolvedValueOnce({ Items: [{ close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
+    .mockResolvedValueOnce({}); // update
+
+  await handler();
+
+  expect(mockFetchMarginNames).toHaveBeenCalledWith('test-api-key', 'https://api.jquants.com/v2');
+  const values = updateValues();
+  expect(values[':marginName']).toBe('貸借');
+  expect(typeof values[':maxGyakuhibu']).toBe('number');
+});
+
+test('for a 信用 ticker (cannot be shorted under 制度信用), writes no gyakuhibu amounts or past costs but keeps the investment amount', async () => {
+  mockFetchMarginNames.mockResolvedValue(new Map([['1380', '信用']]));
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, requiredShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ close: 800 }] }) // latest close
+    .mockResolvedValueOnce({}); // update
+
+  await handler();
+
+  const values = updateValues();
+  expect(values[':marginName']).toBe('信用');
+  expect(values[':maxGyakuhibu']).toBeNull();
+  expect(values[':maxRate']).toBeNull();
+  expect(values[':days']).toBeNull();
+  // 発生しえない逆日歩の「前回0円」を出さない
+  expect(values[':lastGyakuhibu']).toBeNull();
+  expect(values[':sameMonthLastYearGyakuhibu']).toBeNull();
+  // 一般信用でクロスする場合も必要資金は要る
+  expect(values[':closePrice']).toBe(800);
+  expect(values[':requiredInvestment']).toBe(80000);
+  // 信用残の有無も逆日歩実績も見に行かない(scan・終値・updateの3回だけ)
+  expect(mockSend).toHaveBeenCalledTimes(3);
+});
+
+test('treats a ticker missing from the J-Quants listing (東証外上場など) as unknown, not as 一般信用のみ', async () => {
+  mockFetchMarginNames.mockResolvedValue(new Map([['1234', '貸借']]));
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '9942', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }) // margin balance presence: none
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
+    .mockResolvedValueOnce({}); // update
+
+  await handler();
+
+  expect(updateValues()[':marginName']).toBeNull();
+});
+
+test('keeps the stored margin classification when the J-Quants fetch fails', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    mockFetchMarginNames.mockRejectedValue(new Error('J-Quants API error 500'));
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, rightsMonths: [8], marginName: '信用' }] }) // 前回までの値
+      .mockResolvedValueOnce({ Items: [{ close: 800 }] }) // latest close
+      .mockResolvedValueOnce({}); // update
+
+    await handler();
+
+    const values = updateValues();
+    expect(values[':marginName']).toBe('信用');
+    expect(values[':maxGyakuhibu']).toBeNull();
+    expect(errorSpy).toHaveBeenCalled();
+  } finally {
+    errorSpy.mockRestore();
+  }
+});
+
+test('treats an empty J-Quants listing as a failed fetch rather than wiping every classification', async () => {
+  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    mockFetchMarginNames.mockResolvedValue(new Map());
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, rightsMonths: [8], marginName: '信用' }] })
+      .mockResolvedValueOnce({ Items: [{ close: 800 }] })
+      .mockResolvedValueOnce({});
+
+    await handler();
+
+    expect(updateValues()[':marginName']).toBe('信用');
+  } finally {
+    errorSpy.mockRestore();
+  }
 });

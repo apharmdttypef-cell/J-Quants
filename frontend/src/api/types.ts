@@ -26,7 +26,7 @@ export interface FinancialSummary {
 }
 
 // 逆日歩予測の判定(充足率P90)と同じ4段階。APIが予測テーブルの判定をそのまま返す。
-export type YutaiRiskStatus = 'safe' | 'caution' | 'danger' | 'na';
+export type YutaiRiskStatus = 'safe' | 'caution' | 'danger' | 'general-only' | 'na';
 
 export type YutaiCrossEligible = 'ok' | 'ng' | 'unknown';
 export type YutaiHoldingKind = 'none' | 'bonus' | 'required' | 'unknown';
@@ -147,7 +147,8 @@ export interface MarginTrendResponse {
   points: MarginTrendPoint[];
 }
 
-export type YutaiForecastStatus = 'safe' | 'caution' | 'danger' | 'na';
+// 'general-only'は制度信用で売れない銘柄(貸借区分が信用・その他)。一般信用でしかクロスできない。
+export type YutaiForecastStatus = 'safe' | 'caution' | 'danger' | 'general-only' | 'na';
 export type YutaiForecastScenario = 'last-rights' | 'current-tse' | 'none';
 
 export interface YutaiForecast {

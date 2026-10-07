@@ -19,7 +19,13 @@ import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 
-const FORECAST_STATUS_LABEL: Record<string, string> = { danger: '危険', caution: '注意', safe: '安全', na: '対象外' };
+const FORECAST_STATUS_LABEL: Record<string, string> = {
+  danger: '危険',
+  caution: '注意',
+  safe: '安全',
+  'general-only': '一般信用のみ',
+  na: '対象外',
+};
 
 // lambda/shared/gyakuhibu-forecast.tsのBIN_EDGESと同じ6区分。フロントはバックエンドの
 // 純粋関数を直接importできない(別npmパッケージ)ため、この境界値をこのファイル内に複製する
@@ -152,7 +158,12 @@ export function YutaiForecastDetailPage() {
         </div>
       </div>
 
-      {forecast.forecastStatus === 'na' ? (
+      {forecast.forecastStatus === 'general-only' ? (
+        <StatusNote
+          kind="empty"
+          message="制度信用で売れない銘柄(貸借区分が貸借ではない)のため、逆日歩は発生しません。クロスは一般信用(証券会社の在庫)で組む必要があります。"
+        />
+      ) : forecast.forecastStatus === 'na' ? (
         <StatusNote kind="empty" message="予測計算中です(まだ十分な実績データがありません)。" />
       ) : (
         <div className="forecast-cards">
