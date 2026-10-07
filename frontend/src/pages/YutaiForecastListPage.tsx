@@ -209,7 +209,7 @@ function buildColumns(tseEnabled: boolean): ColumnDef<YutaiForecastListItem>[] {
     header: () => (
       <HeaderTooltip
         label="判定"
-        tooltip="優待価値と想定逆日歩を比較した目安。安全=優待価値が想定逆日歩(最悪)を上回る、注意=中央値は上回るが最悪は上回らない、危険=中央値以下、対象外=判定に必要な情報が不足。"
+        tooltip="想定逆日歩(最悪)が最大逆日歩(入札上限)の何割か、で判定した目安。危険=50%以上、注意=20〜50%、安全=20%未満、対象外=過去実績が無く予測できない。優待価値は判定に使いません。"
       />
     ),
     accessorFn: (row) => row.forecast.forecastStatus,

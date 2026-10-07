@@ -24,10 +24,10 @@ function monthRange(): { from: string; to: string } {
   return { from: `${y}-${pad(m + 1)}-01`, to: `${y}-${pad(m + 1)}-${pad(lastDay)}` };
 }
 
-const RISK_LABEL: Record<YutaiRiskStatus, string> = { safe: '安全', danger: '危険', na: '対象外' };
-// リスクは危険→安全→対象外の順に並ぶ方が意味があるため、文字列の並び順ではなく
+const RISK_LABEL: Record<YutaiRiskStatus, string> = { safe: '安全', caution: '注意', danger: '危険', na: '対象外' };
+// リスクは危険→注意→安全→対象外の順に並ぶ方が意味があるため、文字列の並び順ではなく
 // このランクでソートする。
-const RISK_SORT_RANK: Record<YutaiRiskStatus, number> = { danger: 0, safe: 1, na: 2 };
+const RISK_SORT_RANK: Record<YutaiRiskStatus, number> = { danger: 0, caution: 1, safe: 2, na: 3 };
 
 const columns: ColumnDef<YutaiListItem>[] = [
   {
@@ -167,7 +167,10 @@ export function YutaiListPage() {
   return (
     <>
       <h1 className="page-title">優待クロス スクリーニング</h1>
-      <p className="page-subtitle">権利日・優待価値と最大逆日歩の見積りを比較して絞り込みます。</p>
+      <p className="page-subtitle">
+        権利日と逆日歩リスクで絞り込みます。リスクは、最悪ケースの想定逆日歩が最大逆日歩(入札上限)の何割か
+        で判定します(危険=50%以上・注意=20〜50%・安全=20%未満・対象外=過去実績が無く予測不可)。
+      </p>
 
       {listState.data && (
         <div className="cutoff-banner">
@@ -196,6 +199,7 @@ export function YutaiListPage() {
           <select value={riskStatus} onChange={(e) => setRiskStatus(e.target.value as typeof riskStatus)}>
             <option value="all">すべて</option>
             <option value="safe">安全</option>
+            <option value="caution">注意</option>
             <option value="danger">危険</option>
             <option value="na">対象外</option>
           </select>

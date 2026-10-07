@@ -267,9 +267,25 @@ export function chooseScenario(
   return { scenario: 'none', excessRatio: null };
 }
 
-// value(優待価値)に対する判定。safe: 9割のケースで優待価値が逆日歩を上回る
-// (value > p90)。caution: p50 < value <= p90。danger: value <= p50(中央値以下のケースでも
-// 逆日歩が優待価値を上回りうる)。境界はちょうどp90/p50のときそれぞれcaution/dangerに倒す。
+// 逆日歩予測の判定のしきい値(充足率P90 = 想定逆日歩(最悪) ÷ 最大逆日歩)。
+// 実データ(2026-10-07、1,045銘柄)の分布を見て決めた。53.6%に132銘柄が集中しており、
+// 50%で切るとそれらは危険側に入る。
+export const FILL_RATIO_CAUTION = 0.2;
+export const FILL_RATIO_DANGER = 0.5;
+
+// 最悪ケース(P90)で入札が上限の何割まで決着しそうか、で判定する。優待価値にも
+// 最大逆日歩の金額にも依存しないので、どちらかが欠けた銘柄でも判定できる。
+// 境界はちょうど20%/50%のときそれぞれcaution/dangerに倒す。
+export function fillRatioStatus(fillP90: number): ForecastStatus {
+  if (fillP90 >= FILL_RATIO_DANGER) return 'danger';
+  if (fillP90 >= FILL_RATIO_CAUTION) return 'caution';
+  return 'safe';
+}
+
+// 旧方式の判定(優待価値と想定逆日歩の比較)。2026-09-28権利日の精度検証
+// (gyakuhibu-forecast-actuals)が、旧方式で凍結したスナップショットと実績を同じ基準で
+// 突き合わせるためだけに残している。画面の判定はfillRatioStatusを使う。
+// safe: value > p90。caution: p50 < value <= p90。danger: value <= p50。
 export function forecastStatus(value: number, p50: number, p90: number): ForecastStatus {
   if (value > p90) return 'safe';
   if (value > p50) return 'caution';
@@ -281,8 +297,8 @@ export function forecastStatus(value: number, p50: number, p90: number): Forecas
 // 重み = (1-w)/n_p。n_p=0(採用ビンにプールサンプルが無い、またはシナリオがnoneで
 // ビン自体が無い)なら銘柄のみ(w=1相当)、n_t=0ならプールのみ(w=0相当)に自然に倒れる
 // (どちらか片方のサンプルしか重み付き配列に積まないため、式でwを求めるまでもなく
-// そのまま等価になる)。両方0ならna。maxGyakuhibuが無い場合も判定はnaにする
-// (充足率分布そのものは計算できてもforecastStatusは金額比較のため未定義)。
+// そのまま等価になる)。両方0ならna。判定は充足率P90だけで決まる(fillRatioStatus)ため、
+// maxGyakuhibuやvalueが無くても判定は出る(金額系の項目だけがnullになる)。
 //
 // `args.poolSamples`の契約: 呼び出し側は**全銘柄横断のプールサンプル全体**(buildPoolに
 // 渡すのと同じ、ビンで絞り込んでいない生の配列)を渡すこと。この関数が内部で
@@ -361,7 +377,6 @@ export function forecast(args: {
   let forecastP90: number | null = null;
   let forecastMean: number | null = null;
   let expectedNet: number | null = null;
-  let status: ForecastStatus = 'na';
 
   if (maxGyakuhibu !== null) {
     forecastP50 = fillP50 * maxGyakuhibu;
@@ -369,9 +384,9 @@ export function forecast(args: {
     forecastMean = fillMean * maxGyakuhibu;
     if (value !== null) {
       expectedNet = value - forecastMean;
-      status = forecastStatus(value, forecastP50, forecastP90);
     }
   }
+  const status = fillRatioStatus(fillP90);
 
   return {
     scenario,

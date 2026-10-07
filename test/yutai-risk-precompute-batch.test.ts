@@ -32,7 +32,7 @@ function updateCalls() {
   );
 }
 
-test('writes riskStatus na when rightsMonths is empty (no upcoming rights date)', async () => {
+test('writes null risk amounts when rightsMonths is empty (no upcoming rights date)', async () => {
   mockSend.mockResolvedValueOnce({
     Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [] }],
   }); // yutai master scan
@@ -45,7 +45,7 @@ test('writes riskStatus na when rightsMonths is empty (no upcoming rights date)'
   expect(calls[0][0]).toMatchObject({
     TableName: 'JQuantsYutaiMaster',
     Key: { ticker: '1234' },
-    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
+    ExpressionAttributeValues: { ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
   });
 });
 
@@ -63,16 +63,15 @@ test('the master scan projects only the attributes the batch reads', async () =>
   };
   expect(scanInput.ProjectionExpression.split(',').map((name) => name.trim())).toEqual([
     'ticker',
-    '#value',
     'unitShares',
     'requiredShares',
     'rightsMonths',
   ]);
-  // valueはDynamoDBの予約語なので素のままでは射影に書けない
-  expect(scanInput.ExpressionAttributeNames).toEqual({ '#value': 'value' });
+  // 判定をやめたので優待価値(value)は読まない
+  expect(scanInput.ExpressionAttributeNames).toBeUndefined();
 });
 
-test('writes riskStatus na when there is no margin balance data for the ticker', async () => {
+test('writes null risk amounts when there is no margin balance data for the ticker', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [] }) // margin balance presence: none
@@ -83,11 +82,11 @@ test('writes riskStatus na when there is no margin balance data for the ticker',
   const calls = updateCalls();
   expect(calls).toHaveLength(1);
   expect(calls[0][0]).toMatchObject({
-    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
+    ExpressionAttributeValues: { ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
   });
 });
 
-test('writes riskStatus na when there is no price data for the ticker', async () => {
+test('writes null risk amounts when there is no price data for the ticker', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10' }] }) // margin balance presence: yes
@@ -99,11 +98,11 @@ test('writes riskStatus na when there is no price data for the ticker', async ()
   const calls = updateCalls();
   expect(calls).toHaveLength(1);
   expect(calls[0][0]).toMatchObject({
-    ExpressionAttributeValues: { ':riskStatus': 'na', ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
+    ExpressionAttributeValues: { ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
   });
 });
 
-test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric fields, including closePrice', async () => {
+test('writes the numeric risk fields including closePrice, and removes the old riskStatus verdict', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-10' }] }) // margin balance presence: yes
@@ -114,15 +113,18 @@ test('computes safe/danger based on value vs maxGyakuhibu and writes the numeric
 
   const calls = updateCalls();
   expect(calls).toHaveLength(1);
-  const values = (calls[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
-  expect(values[':riskStatus']).toBe('safe'); // value=100000は十分大きいのでmaxGyakuhibuを上回るはず
+  const update = calls[0][0] as { UpdateExpression: string; ExpressionAttributeValues: Record<string, unknown> };
+  const values = update.ExpressionAttributeValues;
+  // 判定は逆日歩予測バッチが出す。旧方式の判定が残らないよう属性ごと消す
+  expect(update.UpdateExpression).toContain('REMOVE riskStatus');
+  expect(values).not.toHaveProperty(':riskStatus');
   expect(typeof values[':maxGyakuhibu']).toBe('number');
   expect(typeof values[':maxRate']).toBe('number');
   expect(typeof values[':days']).toBe('number');
   expect(values[':closePrice']).toBe(500); // 前日株価(latestCloseの値)がそのまま書き込まれる
 });
 
-test('computes maxGyakuhibu/maxRate/days but writes riskStatus na when value is null (優待価値が抽出できない銘柄)', async () => {
+test('computes maxGyakuhibu/maxRate/days even when value is null (優待価値が抽出できない銘柄)', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9001', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan (valueフィールド無し = 東武鉄道のような銘柄)
     .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-10' }] }) // margin balance presence: yes
@@ -134,7 +136,6 @@ test('computes maxGyakuhibu/maxRate/days but writes riskStatus na when value is 
   const calls = updateCalls();
   expect(calls).toHaveLength(1);
   const values = (calls[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
-  expect(values[':riskStatus']).toBe('na'); // valueが無いので比較できずna
   expect(typeof values[':maxGyakuhibu']).toBe('number'); // valueの有無に関わらず計算される
   expect(typeof values[':maxRate']).toBe('number');
   expect(typeof values[':days']).toBe('number');
@@ -215,12 +216,12 @@ test('writes null summaries for a ticker with no actual history', async () => {
   expect(values[':sameMonthLastYearGyakuhibu']).toBeNull();
 });
 
-test('still aggregates the actual history when the risk verdict is na', async () => {
-  // 信用残が無くリスク判定ができない銘柄でも、過去に実際に取られたコストは
+test('still aggregates the actual history when maxGyakuhibu cannot be computed', async () => {
+  // 信用残が無く最大逆日歩が出せない銘柄でも、過去に実際に取られたコストは
   // 独立した事実なので一覧に出す価値がある。
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1111', value: 3000, unitShares: 100, requiredShares: 100, rightsMonths: [3] }] })
-    .mockResolvedValueOnce({ Items: [] }) // margin balance なし → riskStatus 'na'(価格Queryはスキップ)
+    .mockResolvedValueOnce({ Items: [] }) // margin balance なし → 最大逆日歩はnull(価格Queryはスキップ)
     .mockResolvedValueOnce({ Items: [{ rightsDate: '2025-03-27', avgRate: 1.0, days: 2 }] })
     .mockResolvedValueOnce({});
 
@@ -228,7 +229,7 @@ test('still aggregates the actual history when the risk verdict is na', async ()
 
   const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> })
     .ExpressionAttributeValues;
-  expect(values[':riskStatus']).toBe('na');
+  expect(values[':maxGyakuhibu']).toBeNull();
   expect((values[':lastGyakuhibu'] as { cost: number }).cost).toBe(200);
   expect(values[':requiredInvestment']).toBeNull();
 });

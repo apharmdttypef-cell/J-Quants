@@ -98,7 +98,13 @@ async function getSummary(ticker: string): Promise<APIGatewayProxyResultV2> {
   });
 }
 
-type RiskStatus = 'safe' | 'danger' | 'na';
+// 優待一覧・詳細の「リスク」は逆日歩予測の判定(JQuantsGyakuhibuForecastのforecastStatus)を
+// そのまま使う。判定の正本を予測テーブル1か所にして、画面ごとに基準が食い違わないようにする。
+type RiskStatus = 'safe' | 'caution' | 'danger' | 'na';
+
+function toRiskStatus(raw: unknown): RiskStatus {
+  return raw === 'safe' || raw === 'caution' || raw === 'danger' ? raw : 'na';
+}
 type CrossEligible = 'ok' | 'ng' | 'unknown';
 type HoldingKind = 'none' | 'bonus' | 'required' | 'unknown';
 
@@ -114,7 +120,6 @@ interface YutaiMasterRow {
   value: number | null;
   unitShares: number;
   rightsMonths: number[];
-  riskStatus: RiskStatus;
   maxGyakuhibu: number | null;
   maxRate: number | null;
   days: number | null;
@@ -142,7 +147,6 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
     value: item.value ?? null,
     unitShares: item.unitShares,
     rightsMonths: item.rightsMonths ?? [],
-    riskStatus: item.riskStatus ?? 'na',
     maxGyakuhibu: item.maxGyakuhibu ?? null,
     maxRate: item.maxRate ?? null,
     days: item.days ?? null,
@@ -172,7 +176,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
 // この射影にも足すこと(足し忘れは型エラーにならず、黙ってnullになる)。
 // content / value はDynamoDBの予約語なので#名で逃がす。
 const YUTAI_LIST_PROJECTION =
-  'ticker, companyName, #content, #value, unitShares, rightsMonths, riskStatus, maxGyakuhibu, closePrice, ' +
+  'ticker, companyName, #content, #value, unitShares, rightsMonths, maxGyakuhibu, closePrice, ' +
   'requiredShares, crossEligible, holdingKind, holdingMinMonths, minTierValueYen, benefitParseWarning, ' +
   'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu';
 
@@ -216,6 +220,30 @@ async function scanForecastTable(): Promise<Array<Record<string, unknown>>> {
   } while (exclusiveStartKey);
 
   return rows;
+}
+
+// 優待一覧(GET /yutai)用に、予測テーブルから銘柄ごとの判定だけを読む。射影で返却量を
+// 絞っても、Scanの1MBページングは射影前の行サイズで数えるため呼び出し回数は
+// scanForecastTableと同じ(それでも銘柄数によらず一定の回数で済む)。
+async function scanRiskStatuses(): Promise<Map<string, RiskStatus>> {
+  const statuses = new Map<string, RiskStatus>();
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const result = await ddbDocClient.send(
+      new ScanCommand({
+        TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
+        ProjectionExpression: 'ticker, forecastStatus',
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+    for (const item of result.Items ?? []) {
+      if (typeof item.ticker === 'string') statuses.set(item.ticker, toRiskStatus(item.forecastStatus));
+    }
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  return statuses;
 }
 
 // 逆日歩予測(lambda/shared/gyakuhibu-forecast.tsのForecastResult)のAPIレスポンス形状。
@@ -426,14 +454,18 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
   const filters = parseYutaiListFilters(query);
   const riskStatusFilter = query.riskStatus && query.riskStatus !== 'all' ? query.riskStatus : undefined;
 
+  // 呼び出し順はテストのmockResolvedValueOnce順(master scan → forecast scan)と
+  // 一致させるため、この順で逐次await(Promise.allは使わない)。
   const rows = await scanYutaiMaster();
+  const riskStatuses = await scanRiskStatuses();
 
   const items = [];
   for (const row of rows) {
     const rightsDate = nextRightsDate(row.rightsMonths);
     if (!passesYutaiFilters(row, rightsDate, filters)) continue;
 
-    if (riskStatusFilter && row.riskStatus !== riskStatusFilter) continue;
+    const riskStatus = riskStatuses.get(row.ticker) ?? 'na';
+    if (riskStatusFilter && riskStatus !== riskStatusFilter) continue;
 
     items.push({
       ticker: row.ticker,
@@ -441,7 +473,7 @@ async function listYutai(query: Record<string, string | undefined>): Promise<API
       content: row.content,
       value: row.value,
       rightsDate: rightsDate ?? null,
-      riskStatus: row.riskStatus,
+      riskStatus,
       maxGyakuhibu: row.maxGyakuhibu,
       ...buildCrossFields(row),
     });
@@ -486,7 +518,7 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
       content: row.content,
       value: row.value,
       rightsDate: rightsDate ?? null,
-      riskStatus: row.riskStatus,
+      riskStatus: toRiskStatus(forecast.forecastStatus),
       maxGyakuhibu: row.maxGyakuhibu,
       forecast,
       tseForecast: buildTseForecast(forecastByTicker.get(row.ticker)),
@@ -574,6 +606,9 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
 
   const rightsDate = nextRightsDate(master.rightsMonths);
   const history = await gyakuhibuHistory(ticker);
+  const forecastResult = await ddbDocClient.send(
+    new GetCommand({ TableName: GYAKUHIBU_FORECAST_TABLE_NAME, Key: { ticker }, ProjectionExpression: 'forecastStatus' }),
+  );
 
   return jsonResponse(200, {
     ticker: master.ticker,
@@ -591,7 +626,7 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
       eps: summary?.eps ?? null,
     },
     risk: {
-      riskStatus: master.riskStatus,
+      riskStatus: toRiskStatus(forecastResult.Item?.forecastStatus),
       maxGyakuhibu: master.maxGyakuhibu,
       maxRate: master.maxRate,
       days: master.days,

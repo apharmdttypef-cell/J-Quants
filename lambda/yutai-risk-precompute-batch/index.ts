@@ -20,7 +20,6 @@ const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 interface MasterRow {
   ticker: string;
-  value: number | null;
   unitShares: number;
   requiredShares: number | null;
   rightsMonths: number[];
@@ -34,12 +33,11 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
     const result = await ddbDocClient.send(
       new ScanCommand({
         TableName: YUTAI_MASTER_TABLE_NAME,
-        // MasterRowが読む5項目だけを取る。特にbenefitGroups(1銘柄0.7〜2KB × 1,642銘柄)は
+        // MasterRowが読む4項目だけを取る。特にbenefitGroups(1銘柄0.7〜2KB × 1,642銘柄)は
         // ここでは使わないのに、Scanの1MBページングの往復回数を押し上げる。
         // MasterRowに項目を足すときはこの射影にも足すこと(足し忘れると黙ってundefinedに
-        // なる)。valueはDynamoDBの予約語なので#valueで逃がす。
-        ProjectionExpression: 'ticker, #value, unitShares, requiredShares, rightsMonths',
-        ExpressionAttributeNames: { '#value': 'value' },
+        // なる)。
+        ProjectionExpression: 'ticker, unitShares, requiredShares, rightsMonths',
         ExclusiveStartKey: exclusiveStartKey,
       }),
     );
@@ -47,7 +45,6 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
       if (typeof item.ticker === 'string' && typeof item.unitShares === 'number') {
         rows.push({
           ticker: item.ticker,
-          value: typeof item.value === 'number' ? item.value : null,
           unitShares: item.unitShares,
           // yutai-detail-sync-batchが個別ページから取った正確な必要株数。
           // 未取得の銘柄ではnullになり、単元株数で代用する。
@@ -100,10 +97,10 @@ async function fetchActualRows(ticker: string): Promise<Array<Record<string, unk
   return result.Items ?? [];
 }
 
-type RiskStatus = 'safe' | 'danger' | 'na';
-
+// リスクの判定(安全/注意/危険)はここでは出さない。逆日歩予測バッチが充足率P90で判定し、
+// reference-apiがそれを優待一覧・詳細のriskStatusとして返す。このバッチはその土台となる
+// 最大逆日歩(入札上限で決着した場合の上限額)などの金額を事前計算する。
 interface RiskResult {
-  riskStatus: RiskStatus;
   maxGyakuhibu: number | null;
   maxRate: number | null;
   days: number | null;
@@ -112,7 +109,6 @@ interface RiskResult {
 }
 
 const NA_RISK: RiskResult = {
-  riskStatus: 'na',
   maxGyakuhibu: null,
   maxRate: null,
   days: null,
@@ -133,7 +129,7 @@ function fetchTradingCalendarCached(from: string, to: string, cache: Map<string,
 }
 
 async function calcRisk(
-  row: { ticker: string; value: number | null },
+  row: { ticker: string },
   shares: number,
   rightsDate: string | undefined,
   calendarCache: Map<string, CalendarDay[]>,
@@ -157,8 +153,7 @@ async function calcRisk(
   // 最高料率は無条件に4倍で見積もる(docs/superpowers/notes/2026-09-03-taisyaku-rights-day-rate-multiplier.md参照)。
   const maxRate = calcMaxRate(closePrice, shares) * RIGHTS_DAY_RATE_MULTIPLIER;
   const maxGyakuhibu = calcMaxGyakuhibu(closePrice, shares, days) * RIGHTS_DAY_RATE_MULTIPLIER;
-  const riskStatus: RiskStatus = row.value === null ? 'na' : row.value > maxGyakuhibu ? 'safe' : 'danger';
-  return { riskStatus, maxGyakuhibu, maxRate, days, closePrice, requiredInvestment: closePrice * shares };
+  return { maxGyakuhibu, maxRate, days, closePrice, requiredInvestment: closePrice * shares };
 }
 
 export const handler = async (): Promise<void> => {
@@ -174,7 +169,7 @@ export const handler = async (): Promise<void> => {
       // 画面に伝える。
       const shares = row.requiredShares ?? row.unitShares;
       const risk = await calcRisk(row, shares, rightsDate, calendarCache);
-      // 実績の集計はリスク判定とは独立(信用残が無くriskStatusがnaの銘柄でも、
+      // 実績の集計は最大逆日歩の計算とは独立(信用残が無く最大逆日歩が出せない銘柄でも、
       // 過去に実際に取られたコストは出す価値がある)。
       const actuals = summarizeActuals(await fetchActualRows(row.ticker), rightsDate, row.requiredShares, row.unitShares);
 
@@ -184,13 +179,14 @@ export const handler = async (): Promise<void> => {
           Key: { ticker: row.ticker },
           // unitSharesはもう書かない。単元株数(100株固定)はyutai-master-sync-batchが持ち、
           // 優待に必要な株数はyutai-detail-sync-batchのrequiredSharesが持つ。
+          // riskStatusは旧方式(優待価値 vs 最大逆日歩)の判定が残っていると紛らわしいので消す。
           UpdateExpression:
-            'SET riskStatus = :riskStatus, maxGyakuhibu = :maxGyakuhibu, maxRate = :maxRate, #days = :days, ' +
+            'SET maxGyakuhibu = :maxGyakuhibu, maxRate = :maxRate, #days = :days, ' +
             'closePrice = :closePrice, requiredInvestment = :requiredInvestment, ' +
-            'lastGyakuhibu = :lastGyakuhibu, sameMonthLastYearGyakuhibu = :sameMonthLastYearGyakuhibu',
+            'lastGyakuhibu = :lastGyakuhibu, sameMonthLastYearGyakuhibu = :sameMonthLastYearGyakuhibu ' +
+            'REMOVE riskStatus',
           ExpressionAttributeNames: { '#days': 'days' },
           ExpressionAttributeValues: {
-            ':riskStatus': risk.riskStatus,
             ':maxGyakuhibu': risk.maxGyakuhibu,
             ':maxRate': risk.maxRate,
             ':days': risk.days,

@@ -99,7 +99,7 @@ test('computes a forecast per ticker using its own rights history and the pool',
   });
 });
 
-test('writes a forecast row (with forecastStatus na) for a ticker whose yutai value is unknown', async () => {
+test('judges a ticker whose yutai value is unknown (the status depends only on the fill ratio)', async () => {
   await withFixedNow(async () => {
     mockSend
       .mockResolvedValueOnce({ Items: [{ ticker: '9001', unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan (valueフィールド無し)
@@ -120,8 +120,9 @@ test('writes a forecast row (with forecastStatus na) for a ticker whose yutai va
     expect(puts).toHaveLength(2);
     const item = (puts[1][0] as { Item: Record<string, unknown> }).Item;
     expect(item.ticker).toBe('9001');
-    expect(item.forecastStatus).toBe('na'); // valueが無いので判定不能
-    expect(typeof item.forecastP50).toBe('number'); // 分布自体は計算される
+    expect(item.forecastStatus).toBe('danger'); // 充足率1.0の実績1件 → P90=100%
+    expect(item.expectedNet).toBeNull(); // 優待価値との差額だけは出せない
+    expect(typeof item.forecastP50).toBe('number');
   });
 });
 
@@ -152,7 +153,7 @@ test('continues with the next ticker when one ticker throws', async () => {
   }
 });
 
-test('marks tickers without maxGyakuhibu as na even when sample history exists', async () => {
+test('judges tickers without maxGyakuhibu by fill ratio, leaving only the yen amounts null', async () => {
   await withFixedNow(async () => {
     mockSend
       .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: null }] }) // risk-precompute未実行(maxGyakuhibuがまだ無い)
@@ -163,7 +164,7 @@ test('marks tickers without maxGyakuhibu as na even when sample history exists',
             avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
           },
         ],
-      }) // 履歴自体はある(n_t=1) -- naの原因がサンプル不足ではなくmaxGyakuhibu欠落そのものであることを分離するため
+      }) // 履歴はある(n_t=1)
       .mockResolvedValueOnce({}) // _POOL_ put
       .mockResolvedValueOnce({}); // 1234のforecast put
 
@@ -171,8 +172,9 @@ test('marks tickers without maxGyakuhibu as na even when sample history exists',
 
     const tickerPut = putCalls().find((c) => (c[0] as { Item: { ticker: string } }).Item.ticker === '1234')!;
     const item = (tickerPut[0] as { Item: Record<string, unknown> }).Item;
-    expect(item.tickerSamples).toBe(1); // サンプルはある
-    expect(item.forecastStatus).toBe('na'); // それでもmaxGyakuhibuが無いのでna
+    expect(item.tickerSamples).toBe(1);
+    expect(item.forecastStatus).toBe('danger'); // 充足率1.0の実績1件 → P90=100%
+    expect(item.forecastP90).toBeNull(); // 金額は出せない
   });
 });
 

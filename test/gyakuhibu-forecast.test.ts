@@ -7,6 +7,7 @@ import {
   forecast,
   chooseScenario,
   forecastStatus,
+  fillRatioStatus,
   ForecastSample,
   lagBucketFor,
   snapshotAtOrBefore,
@@ -139,31 +140,49 @@ test('forecastStatus boundaries: value == p90 is caution, value == p50 is danger
   expect(forecastStatus(1000, 1000, 4000)).toBe('danger');
 });
 
-test('forecast returns na when maxGyakuhibu is null or there are no samples at all', () => {
-  const result1 = forecast({
-    tickerSamples: [sample(0.5)], poolSamples: [], scenario: 'last-rights', excessRatio: 1.5, maxGyakuhibu: null, value: 500,
-  });
-  expect(result1.forecastStatus).toBe('na');
-
-  const result2 = forecast({
-    tickerSamples: [], poolSamples: [], scenario: 'none', excessRatio: null, maxGyakuhibu: 1000, value: 500,
-  });
-  expect(result2.forecastStatus).toBe('na');
+test('fillRatioStatus boundaries: 50% is danger, 20% is caution, below 20% is safe', () => {
+  expect(fillRatioStatus(1.0)).toBe('danger');
+  expect(fillRatioStatus(0.5)).toBe('danger');
+  expect(fillRatioStatus(0.4999)).toBe('caution');
+  expect(fillRatioStatus(0.2)).toBe('caution');
+  expect(fillRatioStatus(0.1999)).toBe('safe');
+  expect(fillRatioStatus(0)).toBe('safe');
 });
 
-test('forecast computes forecastP50/forecastP90 but forecastStatus na and expectedNet null when value is null (優待価値不明)', () => {
+test('forecast judges by fillP90 alone, so a ticker with no maxGyakuhibu still gets a status', () => {
+  const result = forecast({
+    tickerSamples: [sample(0.5)], poolSamples: [], scenario: 'last-rights', excessRatio: 1.5, maxGyakuhibu: null, value: 500,
+  });
+  expect(result.fillP90).toBeCloseTo(0.5);
+  expect(result.forecastP90).toBeNull(); // 金額は出せない
+  expect(result.forecastStatus).toBe('danger');
+});
+
+test('forecast returns na when there are no samples at all', () => {
+  const result = forecast({
+    tickerSamples: [], poolSamples: [], scenario: 'none', excessRatio: null, maxGyakuhibu: 1000, value: 500,
+  });
+  expect(result.forecastStatus).toBe('na');
+});
+
+test('forecast status does not depend on value: a high-value ticker with fillP90 >= 50% is still danger', () => {
+  const result = forecast({
+    tickerSamples: [sample(0.6)], poolSamples: [], scenario: 'last-rights', excessRatio: 1.5, maxGyakuhibu: 1000, value: 1_000_000,
+  });
+  expect(result.forecastStatus).toBe('danger');
+});
+
+test('forecast judges a ticker whose value is null (優待価値不明), leaving only expectedNet null', () => {
   // poolSamplesのfill=[0, 0.5, 1.0] (既存の「forecast with no ticker samples」テストと同じ入力)。
   const poolSamples = [0, 0.5, 1.0].map((f) => sample(f));
   const result = forecast({
     tickerSamples: [], poolSamples, scenario: 'last-rights', excessRatio: 1.5, maxGyakuhibu: 1000, value: null,
   });
-  // maxGyakuhibuがあるので分布そのもの(fillP50/fillP90/forecastP50/forecastP90)は計算される。
   expect(result.fillP50).toBeCloseTo(0.5);
   expect(result.forecastP50).toBeCloseTo(500); // 0.5 * 1000
   expect(result.forecastP90).toBeCloseTo(1000); // 1.0 * 1000
-  // valueが無いので優待価値との比較は不能。
-  expect(result.expectedNet).toBeNull();
-  expect(result.forecastStatus).toBe('na');
+  expect(result.expectedNet).toBeNull(); // 優待価値との差額だけは出せない
+  expect(result.forecastStatus).toBe('danger'); // fillP90 = 100%
 });
 
 test('lagBucketFor splits at 7/8 and 21/22 days', () => {

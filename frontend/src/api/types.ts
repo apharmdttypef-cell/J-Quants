@@ -25,7 +25,8 @@ export interface FinancialSummary {
   eps: string;
 }
 
-export type YutaiRiskStatus = 'safe' | 'danger' | 'na';
+// 逆日歩予測の判定(充足率P90)と同じ4段階。APIが予測テーブルの判定をそのまま返す。
+export type YutaiRiskStatus = 'safe' | 'caution' | 'danger' | 'na';
 
 export type YutaiCrossEligible = 'ok' | 'ng' | 'unknown';
 export type YutaiHoldingKind = 'none' | 'bonus' | 'required' | 'unknown';

@@ -42,6 +42,9 @@ function body(result: APIGatewayProxyResultV2): unknown {
 
 beforeEach(() => {
   mockSend.mockReset();
+  // mockResolvedValueOnceで指定していない呼び出しは空の応答にする(例: 判定を検証しない
+  // 優待一覧テストでの予測テーブルScan)。判定や呼び出し回数を検証するテストは明示的に積む。
+  mockSend.mockResolvedValue({});
 });
 
 test('GET /tickers/{ticker}/prices returns 404 for a ticker not in JQuantsYutaiMaster', async () => {
@@ -159,23 +162,25 @@ test('unknown route returns 404', async () => {
   expect((result as { statusCode: number }).statusCode).toBe(404);
 });
 
-test('GET /yutai returns each ticker with its next rights date and its precomputed risk badge', async () => {
-  mockSend.mockResolvedValueOnce({
-    Items: [
-      {
-        ticker: '1234',
-        companyName: '○○HD',
-        content: 'QUOカード',
-        value: 1000,
-        unitShares: 100,
-        rightsMonths: [8],
-        riskStatus: 'safe',
-        maxGyakuhibu: 200,
-        maxRate: 2,
-        days: 1,
-      },
-    ],
-  }); // yutai master scan (precomputed risk fields already present)
+test('GET /yutai returns each ticker with its next rights date and the forecast judgement as its risk badge', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        {
+          ticker: '1234',
+          companyName: '○○HD',
+          content: 'QUOカード',
+          value: 1000,
+          unitShares: 100,
+          rightsMonths: [8],
+          riskStatus: 'safe', // 旧方式で事前計算バッチが書いた値。もう読まない
+          maxGyakuhibu: 200,
+          maxRate: 2,
+          days: 1,
+        },
+      ],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', forecastStatus: 'caution' }] }); // forecast scan
 
   const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
 
@@ -184,11 +189,37 @@ test('GET /yutai returns each ticker with its next rights date and its precomput
     tickers: Array<{ ticker: string; riskStatus: string; maxGyakuhibu: number | null }>;
     currentMonthLastTradableDate: string;
   };
-  expect(parsed.tickers[0]).toMatchObject({ ticker: '1234', riskStatus: 'safe', maxGyakuhibu: 200 });
+  expect(parsed.tickers[0]).toMatchObject({ ticker: '1234', riskStatus: 'caution', maxGyakuhibu: 200 });
   expect(parsed.currentMonthLastTradableDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-  // calcRiskが無くなったため、リクエスト全体でDynamoDBへのアクセスはyutai masterの
-  // スキャン1回だけになる(N銘柄でも呼び出し回数が増えないことの確認、スケール対応の核心)。
-  expect(mockSend).toHaveBeenCalledTimes(1);
+  // 銘柄数によらず、DynamoDBへのアクセスはyutai masterと予測テーブルのScan各1回(スケール対応の核心)。
+  expect(mockSend).toHaveBeenCalledTimes(2);
+  expect(mockSend.mock.calls[1][0]).toMatchObject({
+    TableName: 'JQuantsGyakuhibuForecast',
+    ProjectionExpression: 'ticker, forecastStatus',
+  });
+});
+
+test('GET /yutai filters by riskStatus using the forecast judgement', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '1111', content: 'A', value: 1000, unitShares: 100, rightsMonths: [8] },
+        { ticker: '2222', content: 'B', value: 1000, unitShares: 100, rightsMonths: [8] },
+        { ticker: '3333', content: 'C', value: null, unitShares: 100, rightsMonths: [8] },
+      ],
+    }) // yutai master scan
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '1111', forecastStatus: 'danger' },
+        { ticker: '2222', forecastStatus: 'safe' },
+        { ticker: '3333', forecastStatus: 'danger' }, // 優待価値が無くても判定される
+      ],
+    }); // forecast scan
+
+  const result = await handler(makeEvent('GET /yutai', { queryStringParameters: { riskStatus: 'danger' } }));
+
+  const parsed = body(result) as { tickers: Array<{ ticker: string }> };
+  expect(parsed.tickers.map((t) => t.ticker)).toEqual(['1111', '3333']);
 });
 
 test('the yutai list scan projects only the attributes the list returns', async () => {
@@ -211,7 +242,6 @@ test('the yutai list scan projects only the attributes the list returns', async 
     '#value',
     'unitShares',
     'rightsMonths',
-    'riskStatus',
     'maxGyakuhibu',
     'closePrice',
     'requiredShares',
@@ -260,10 +290,12 @@ test('GET /yutai returns rightsDate: null and riskStatus: na (not a missing key)
   expect(parsed.tickers[0].riskStatus).toBe('na');
 });
 
-test('GET /yutai falls back to riskStatus na for a row the precompute batch has not touched yet', async () => {
-  mockSend.mockResolvedValueOnce({
-    Items: [{ ticker: '8888', companyName: '新規上場HD', content: '未計算', value: 500, unitShares: 100, rightsMonths: [8] }],
-  }); // no riskStatus/maxGyakuhibu/maxRate/days keys at all
+test('GET /yutai falls back to riskStatus na for a ticker that has no forecast row yet', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '8888', companyName: '新規上場HD', content: '未計算', value: 500, unitShares: 100, rightsMonths: [8] }],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', forecastStatus: 'safe' }] }); // forecast scan: 8888の行は無い
 
   const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
 
@@ -282,16 +314,17 @@ test('GET /yutai returns value: null (not a missing key) for a row where the val
   expect(parsed.tickers[0]).toHaveProperty('value', null);
 });
 
-test('GET /yutai/{ticker} returns basic info, precomputed risk, and rights history', async () => {
+test('GET /yutai/{ticker} returns basic info, the forecast judgement as risk, and rights history', async () => {
   mockSend
     .mockResolvedValueOnce({
-      Item: { ticker: '1234', companyName: '○○HD', content: 'QUOカード', value: 1000, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 200, maxRate: 2, days: 1 },
+      Item: { ticker: '1234', companyName: '○○HD', content: 'QUOカード', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 200, maxRate: 2, days: 1 },
     }) // yutai master get
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500, volume: 10000 }] }) // latest price (basicInfo)
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', discDate: '2026-05-08', eps: '10.0', sales: '100', operatingProfit: '10', netProfit: '5' }] }) // financial summary
     .mockResolvedValueOnce({
       Items: [{ ticker: '1234', rightsDate: '2026-03-30', totalAmount: 680, days: 2, avgRate: 0.4 }],
-    }); // gyakuhibu actual history
+    }) // gyakuhibu actual history
+    .mockResolvedValueOnce({ Item: { forecastStatus: 'safe' } }); // forecast get
 
   const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '1234' } }));
 
@@ -304,9 +337,14 @@ test('GET /yutai/{ticker} returns basic info, precomputed risk, and rights histo
   expect(parsed.basicInfo.closePrice).toBe(500);
   expect(parsed.risk).toEqual({ riskStatus: 'safe', maxGyakuhibu: 200, maxRate: 2, days: 1 });
   expect(parsed.rightsHistory).toEqual([{ rightsDate: '2026-03-30', totalAmount: 680, days: 2, avgRate: 0.4 }]);
-  // calcRiskの逐次クエリ(信用残の有無・前日終値)が無くなったため、リクエストあたりの
-  // DynamoDBアクセスは4回(yutai master get・latest price・financial summary・gyakuhibu history)。
-  expect(mockSend).toHaveBeenCalledTimes(4);
+  // リクエストあたりのDynamoDBアクセスは5回(yutai master get・latest price・
+  // financial summary・gyakuhibu history・forecast get)。
+  expect(mockSend).toHaveBeenCalledTimes(5);
+  expect(mockSend.mock.calls[4][0]).toMatchObject({
+    TableName: 'JQuantsGyakuhibuForecast',
+    Key: { ticker: '1234' },
+    ProjectionExpression: 'forecastStatus',
+  });
 });
 
 test('GET /yutai/{ticker} rightsHistory excludes noGyakuhibu marker rows (checked-but-no-shortage dates from Fix 2)', async () => {
@@ -329,14 +367,15 @@ test('GET /yutai/{ticker} rightsHistory excludes noGyakuhibu marker rows (checke
   expect(parsed.rightsHistory).toEqual([{ rightsDate: '2026-03-30', totalAmount: 680, days: 2, avgRate: 0.4 }]);
 });
 
-test('GET /yutai/{ticker} returns the precomputed risk fields verbatim, including the danger case', async () => {
+test('GET /yutai/{ticker} returns the forecast judgement as riskStatus, ignoring the stale master value', async () => {
   mockSend
     .mockResolvedValueOnce({
-      Item: { ticker: '1234', companyName: '○○HD', content: 'QUOカード', value: 99, unitShares: 100, rightsMonths: [8], riskStatus: 'danger', maxGyakuhibu: 100, maxRate: 1, days: 1 },
-    }) // yutai master get
+      Item: { ticker: '1234', companyName: '○○HD', content: 'QUOカード', value: 99, unitShares: 100, rightsMonths: [8], riskStatus: 'safe', maxGyakuhibu: 100, maxRate: 1, days: 1 },
+    }) // yutai master get (riskStatusは旧方式で書かれた値。もう読まない)
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500, volume: 10000 }] }) // latest price
     .mockResolvedValueOnce({ Items: [] }) // financial summary
-    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actual history
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual history
+    .mockResolvedValueOnce({ Item: { forecastStatus: 'danger' } }); // forecast get
 
   const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '1234' } }));
 
@@ -774,8 +813,8 @@ test('GET /yutai returns the cross-eligibility and cost fields', async () => {
   const response = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
   const item = (body(response) as { tickers: AnyItem[] }).tickers[0];
 
-  // 一覧は銘柄数に関係なくマスタのスキャン1回だけ(銘柄ごとのクエリを足さない)
-  expect(mockSend).toHaveBeenCalledTimes(1);
+  // 一覧は銘柄数に関係なくマスタと予測テーブルのスキャン各1回だけ(銘柄ごとのクエリを足さない)
+  expect(mockSend).toHaveBeenCalledTimes(2);
   expect(item.unitShares).toBe(100);
   expect(item.requiredShares).toBe(200);
   expect(item.crossEligible).toBe('ok');
