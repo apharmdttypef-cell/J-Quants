@@ -3,14 +3,62 @@ import type { ColumnDef } from '@tanstack/react-table';
 import type { YutaiCrossEligible, YutaiCrossFields } from '../api/types';
 import { formatFinancialYen } from './format';
 
-const CROSS_LABEL: Record<YutaiCrossEligible, string> = { ok: '可', ng: '長期のみ', unknown: '—' };
-// クロス可否は「不可→可→不明」の順に並ぶ方が意味がある(避けたい銘柄を先頭に出せる)。
-const CROSS_SORT_RANK: Record<YutaiCrossEligible, number> = { ng: 0, ok: 1, unknown: 2 };
-const CROSS_BADGE_CLASS: Record<YutaiCrossEligible, string> = {
-  ok: 'risk-badge risk-badge--safe',
-  ng: 'risk-badge risk-badge--danger',
+// 長期保有の要否。保存値は2つあり、crossEligible(権利日だけの保有=1回のクロスで取れるか)と
+// holdingKind(長期保有の条件が「必須」か「上乗せ」か)を組み合わせて表示する。
+//   none     不要: 保有期間の条件が無い
+//   bonus    優遇のみ: 無くても貰えるが、長期保有なら上乗せ(クロスでは上乗せ分は取れない)
+//   required 必須: 長期保有者限定(クロスでは取れない)
+//   unknown  不明
+export type HoldingRequirement = 'none' | 'bonus' | 'required' | 'unknown';
+
+const HOLDING_LABEL: Record<HoldingRequirement, string> = {
+  none: '不要',
+  bonus: '優遇のみ',
+  required: '必須',
+  unknown: '不明',
+};
+// 避けたい銘柄(必須)を先頭に出せる順。
+const HOLDING_SORT_RANK: Record<HoldingRequirement, number> = { required: 0, bonus: 1, none: 2, unknown: 3 };
+const HOLDING_BADGE_CLASS: Record<HoldingRequirement, string> = {
+  none: 'risk-badge risk-badge--safe',
+  bonus: 'risk-badge risk-badge--safe',
+  required: 'risk-badge risk-badge--danger',
   unknown: 'risk-badge risk-badge--na',
 };
+
+type HoldingFields = Pick<YutaiCrossFields, 'crossEligible' | 'holdingKind' | 'holdingMinMonths' | 'benefitParseWarning'>;
+
+// 一覧ページのバッジと個別ページの解析が食い違っている銘柄は、保存値の優先順位
+// (個別ページ優先)は変えずに、表示だけ安全側に倒して「不明」にする。誤りの
+// コストが非対称だから — 誤った「不要」はクロスして逆日歩を払った上で優待が
+// 取れないが、誤った「必須」は機会損失で済む。
+function isBadgeMismatch(fields: HoldingFields): boolean {
+  return fields.benefitParseWarning !== null && fields.benefitParseWarning.includes('badge-mismatch');
+}
+
+export function holdingRequirement(fields: HoldingFields): HoldingRequirement {
+  if (isBadgeMismatch(fields)) return 'unknown';
+  if (fields.crossEligible === 'ng') return 'required';
+  if (fields.crossEligible === 'unknown') return 'unknown';
+  return fields.holdingKind === 'bonus' ? 'bonus' : 'none';
+}
+
+// 長期保有のバッジ(+必須なら最低保有月数)。一覧の列と詳細ページで共用する。
+export function HoldingBadge({ fields }: { fields: HoldingFields }) {
+  const requirement = holdingRequirement(fields);
+  const months =
+    requirement === 'required' && fields.holdingKind === 'required' && fields.holdingMinMonths !== null
+      ? `${fields.holdingMinMonths}ヶ月`
+      : null;
+  // 食い違いによる「不明」は、データが無いだけの「不明」と区別して目立たせる。
+  const className = isBadgeMismatch(fields) ? 'risk-badge risk-badge--caution' : HOLDING_BADGE_CLASS[requirement];
+  return (
+    <>
+      <span className={className}>{HOLDING_LABEL[requirement]}</span>
+      {months !== null && <span className="cross-months">{months}</span>}
+    </>
+  );
+}
 
 function formatShares(shares: number, unitShares: number): string {
   const units = unitShares > 0 ? shares / unitShares : null;
@@ -42,31 +90,19 @@ export function crossColumns<T extends YutaiCrossFields>(): ColumnDef<T>[] {
     },
     {
       id: 'crossEligible',
-      header: 'クロス',
-      accessorFn: (row) => row.crossEligible,
+      header: '長期保有',
+      accessorFn: (row) => holdingRequirement(row),
       sortingFn: (rowA, rowB) =>
-        CROSS_SORT_RANK[rowA.original.crossEligible] - CROSS_SORT_RANK[rowB.original.crossEligible],
-      cell: ({ row }) => {
-        const { crossEligible, holdingKind, holdingMinMonths, benefitParseWarning } = row.original;
-        const months = holdingKind === 'required' && holdingMinMonths !== null ? `${holdingMinMonths}ヶ月` : null;
-        // 一覧ページのバッジと個別ページの解析が食い違っている銘柄は、保存値の優先順位
-        // (個別ページ優先)は変えずに、表示だけ安全側に倒して「不明」にする。誤りの
-        // コストが非対称だから — 誤った「可」はクロスして逆日歩を払った上で優待が
-        // 取れないが、誤った「長期のみ」は機会損失で済む。
-        const mismatched = benefitParseWarning !== null && benefitParseWarning.includes('badge-mismatch');
-        return (
-          <>
-            {mismatched ? (
-              <span className="risk-badge risk-badge--caution">不明</span>
-            ) : (
-              <span className={CROSS_BADGE_CLASS[crossEligible]}>{CROSS_LABEL[crossEligible]}</span>
-            )}
-            {months !== null && <span className="cross-months">{months}</span>}
-            {/* 解析が不完全な銘柄は詳細ページで原文を確かめてほしい */}
-            {benefitParseWarning !== null && <span className="cross-warning" title={benefitParseWarning}>⚠</span>}
-          </>
-        );
-      },
+        HOLDING_SORT_RANK[holdingRequirement(rowA.original)] - HOLDING_SORT_RANK[holdingRequirement(rowB.original)],
+      cell: ({ row }) => (
+        <>
+          <HoldingBadge fields={row.original} />
+          {/* 解析が不完全な銘柄は詳細ページで原文を確かめてほしい */}
+          {row.original.benefitParseWarning !== null && (
+            <span className="cross-warning" title={row.original.benefitParseWarning}>⚠</span>
+          )}
+        </>
+      ),
     },
     {
       id: 'requiredInvestment',
@@ -252,7 +288,7 @@ export function YutaiCrossFilters({
         />
       </label>
       <label>
-        クロス可否:{' '}
+        長期保有:{' '}
         {/* <select>は1操作で値が確定するのでデバウンスしない(待たせる意味がない)。 */}
         <select
           value={state.crossEligible}
@@ -262,8 +298,9 @@ export function YutaiCrossFilters({
           }}
         >
           <option value="all">すべて</option>
-          <option value="ok">可</option>
-          <option value="ng">長期のみ</option>
+          {/* APIの絞り込みはcrossEligible単位なので、「不要」と「優遇のみ」はまとめて扱う */}
+          <option value="ok">不要・優遇のみ(クロスで取得可)</option>
+          <option value="ng">必須(クロス不可)</option>
           <option value="unknown">不明</option>
         </select>
       </label>

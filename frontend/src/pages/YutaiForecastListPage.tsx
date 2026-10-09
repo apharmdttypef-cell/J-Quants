@@ -8,6 +8,7 @@ import type { YutaiForecastListItem, YutaiForecastStatus, YutaiTseForecast } fro
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+import { RISK_STATUS_LABEL, riskStatusTitle } from '../lib/risk-status';
 import {
   crossColumns,
   EMPTY_CROSS_FILTERS,
@@ -44,13 +45,7 @@ function monthRange(): { from: string; to: string } {
   return { from: `${y}-${pad(m + 1)}-01`, to: `${y}-${pad(m + 1)}-${pad(lastDay)}` };
 }
 
-const FORECAST_STATUS_LABEL: Record<YutaiForecastStatus, string> = {
-  danger: '危険',
-  caution: '注意',
-  safe: '安全',
-  'general-only': '一般信用のみ',
-  na: '対象外',
-};
+const FORECAST_STATUS_LABEL = RISK_STATUS_LABEL;
 // 判定は危険→注意→安全→対象外の順に並ぶ方が意味があるため、文字列の並び順ではなく
 // このランクでソートする(既存YutaiListPageのRISK_SORT_RANKと同じ考え方)。
 const FORECAST_STATUS_SORT_RANK: Record<YutaiForecastStatus, number> = {
@@ -211,14 +206,17 @@ function buildColumns(tseEnabled: boolean): ColumnDef<YutaiForecastListItem>[] {
     header: () => (
       <HeaderTooltip
         label="判定"
-        tooltip="想定逆日歩(最悪)が最大逆日歩(入札上限)の何割か、で判定した目安。危険=50%以上、注意=20〜50%、安全=20%未満、一般信用のみ=制度信用で売れない銘柄(逆日歩は付かないが一般信用の在庫が必要)、対象外=過去実績が無く予測できない。優待価値は判定に使いません。"
+        tooltip="想定逆日歩(最悪)が最大逆日歩(入札上限)の何割か、で判定した目安。危険=50%以上、注意=20〜50%、安全=20%未満、制度信用不可=制度信用では売れない銘柄(逆日歩は付かない。一般信用の売り在庫は証券会社ごとに要確認)、対象外=過去実績が無く予測できない。優待価値は判定に使いません。"
       />
     ),
     accessorFn: (row) => row.forecast.forecastStatus,
     sortingFn: (rowA, rowB) =>
       FORECAST_STATUS_SORT_RANK[rowA.original.forecast.forecastStatus] - FORECAST_STATUS_SORT_RANK[rowB.original.forecast.forecastStatus],
     cell: ({ row }) => (
-      <span className={`risk-badge risk-badge--${row.original.forecast.forecastStatus}`}>
+      <span
+        className={`risk-badge risk-badge--${row.original.forecast.forecastStatus}`}
+        title={riskStatusTitle(row.original.forecast.forecastStatus)}
+      >
         {FORECAST_STATUS_LABEL[row.original.forecast.forecastStatus]}
       </span>
     ),

@@ -6,6 +6,15 @@ import type { BenefitGroup } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen, formatPrice, formatVolume } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+import { HoldingBadge, holdingRequirement, type HoldingRequirement } from '../lib/yutai-cross';
+import { RISK_STATUS_LABEL, riskStatusTitle } from '../lib/risk-status';
+
+const HOLDING_NOTE: Record<HoldingRequirement, string> = {
+  none: '権利日だけ保有すれば取得できます(クロスで取得可)',
+  bonus: '長期保有で上乗せがあります。基本の優待はクロスでも取得可',
+  required: '長期保有者限定です(クロスでは取得不可)',
+  unknown: '判定できません。下の優待条件の原文を確認してください',
+};
 
 function holdingLabel(group: BenefitGroup): string {
   if (group.holdingMonths === null) return '継続保有条件なし';
@@ -94,9 +103,7 @@ export function YutaiDetailPage() {
   if (!detailState.data) return null;
 
   const { data } = detailState;
-  const riskLabel = { safe: '安全', caution: '注意', danger: '危険', 'general-only': '一般信用のみ', na: '対象外' }[
-    data.risk.riskStatus
-  ];
+  const riskLabel = RISK_STATUS_LABEL[data.risk.riskStatus];
   // 過去の実績逆日歩を出す株数。必要株数が未取得なら単元株数で代用する
   // (lambda/shared/gyakuhibu-actual-summary.tsと同じ規則)。必要株数が200株・300株の
   // 銘柄で単元株数を使うと、一覧画面の「前回逆日歩」の半分・3分の1の金額が並んでしまう。
@@ -163,12 +170,12 @@ export function YutaiDetailPage() {
             </div>
           </div>
           <div className="summary-item">
-            <div className="summary-item__label">1回のクロスで取得</div>
+            <div className="summary-item__label">長期保有</div>
             <div className="summary-item__value">
-              {data.crossEligible === 'ok' ? '可' : data.crossEligible === 'ng' ? '不可(長期保有者限定)' : '不明'}
-              {data.holdingKind === 'required' && data.holdingMinMonths !== null && (
-                <span className="cross-months">最低{data.holdingMinMonths}ヶ月</span>
-              )}
+              <HoldingBadge fields={data} />
+              <div style={{ fontSize: '0.8rem', fontWeight: 400, color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                {HOLDING_NOTE[holdingRequirement(data)]}
+              </div>
             </div>
           </div>
         </div>
@@ -233,7 +240,9 @@ export function YutaiDetailPage() {
           {data.risk.maxRate !== null ? `最高料率 ${data.risk.maxRate}円 ・ ` : ''}
           {data.risk.days !== null ? `${data.risk.days}日分` : ''}
         </p>
-        <span className={`risk-badge risk-badge--${data.risk.riskStatus}`}>{riskLabel}</span>
+        <span className={`risk-badge risk-badge--${data.risk.riskStatus}`} title={riskStatusTitle(data.risk.riskStatus)}>
+          {riskLabel}
+        </span>
       </div>
 
       {data.features.tseMargin && (

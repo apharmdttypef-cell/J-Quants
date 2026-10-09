@@ -7,6 +7,7 @@ import type { YutaiListItem, YutaiRiskStatus } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
+import { RISK_STATUS_LABEL, riskStatusTitle } from '../lib/risk-status';
 import {
   crossColumns,
   EMPTY_CROSS_FILTERS,
@@ -24,13 +25,6 @@ function monthRange(): { from: string; to: string } {
   return { from: `${y}-${pad(m + 1)}-01`, to: `${y}-${pad(m + 1)}-${pad(lastDay)}` };
 }
 
-const RISK_LABEL: Record<YutaiRiskStatus, string> = {
-  safe: '安全',
-  caution: '注意',
-  danger: '危険',
-  'general-only': '一般信用のみ',
-  na: '対象外',
-};
 // リスクは危険→注意→安全→対象外の順に並ぶ方が意味があるため、文字列の並び順ではなく
 // このランクでソートする。
 const RISK_SORT_RANK: Record<YutaiRiskStatus, number> = { danger: 0, caution: 1, safe: 2, 'general-only': 3, na: 4 };
@@ -98,7 +92,9 @@ const columns: ColumnDef<YutaiListItem>[] = [
     header: 'リスク',
     sortingFn: (rowA, rowB) => RISK_SORT_RANK[rowA.original.riskStatus] - RISK_SORT_RANK[rowB.original.riskStatus],
     cell: ({ row }) => (
-      <span className={`risk-badge risk-badge--${row.original.riskStatus}`}>{RISK_LABEL[row.original.riskStatus]}</span>
+      <span className={`risk-badge risk-badge--${row.original.riskStatus}`} title={riskStatusTitle(row.original.riskStatus)}>
+        {RISK_STATUS_LABEL[row.original.riskStatus]}
+      </span>
     ),
   },
   // 必要株数・クロス・必要資金・前回逆日歩(逆日歩予測画面と共通の列)
@@ -140,7 +136,7 @@ export function YutaiListPage() {
   // depsはオブジェクトを渡すと毎レンダーで参照が変わり無限ループになるため、
   // crossFiltersは個々の文字列に展開して並べる。
   // 数値欄(株価・必要資金)の値はYutaiCrossFilters側でデバウンスされてから届くので、
-  // 1文字ごとに全表スキャンのリクエストが飛ぶことはない。クロス可否の<select>は即時。
+  // 1文字ごとに全表スキャンのリクエストが飛ぶことはない。長期保有の<select>は即時。
   const listState = useAsync(
     () =>
       fetchYutaiList({
@@ -175,7 +171,7 @@ export function YutaiListPage() {
       <h1 className="page-title">優待クロス スクリーニング</h1>
       <p className="page-subtitle">
         権利日と逆日歩リスクで絞り込みます。リスクは、最悪ケースの想定逆日歩が最大逆日歩(入札上限)の何割か
-        で判定します(危険=50%以上・注意=20〜50%・安全=20%未満・一般信用のみ=制度信用で売れない銘柄・対象外=過去実績が無く予測不可)。
+        で判定します(危険=50%以上・注意=20〜50%・安全=20%未満・制度信用不可=制度信用では売れない銘柄(一般信用の在庫は証券会社ごとに要確認)・対象外=過去実績が無く予測不可)。
       </p>
 
       {listState.data && (
@@ -207,7 +203,7 @@ export function YutaiListPage() {
             <option value="safe">安全</option>
             <option value="caution">注意</option>
             <option value="danger">危険</option>
-            <option value="general-only">一般信用のみ</option>
+            <option value="general-only">制度信用不可</option>
             <option value="na">対象外</option>
           </select>
         </label>
