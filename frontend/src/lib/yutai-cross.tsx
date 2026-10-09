@@ -67,8 +67,7 @@ function formatShares(shares: number, unitShares: number): string {
   return `${shares.toLocaleString('ja-JP')}株${unitLabel}`;
 }
 
-// 2つの一覧画面(YutaiListPage / YutaiForecastListPage)で共用する列。片方だけに
-// 足すと「同じ判断が両方の画面でできる」という要件が崩れるため、必ずここに置く。
+// 優待クロス一覧(YutaiListPage)の優待条件・コストまわりの列。
 export function crossColumns<T extends YutaiCrossFields>(): ColumnDef<T>[] {
   return [
     {

@@ -1,13 +1,21 @@
 import { Link, useParams } from 'react-router-dom';
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts';
-import * as HoverCard from '@radix-ui/react-hover-card';
-import { fetchYutaiDetail, fetchYutaiMarginTrend } from '../api/client';
+import { fetchYutaiDetail, fetchYutaiForecastDetail } from '../api/client';
 import type { BenefitGroup } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
+import {
+  ForecastBasis,
+  ForecastSummary,
+  MarginTrendSection,
+  TseForecastSection,
+} from '../components/YutaiForecastSections';
 import { formatFinancialYen, formatPrice, formatVolume } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 import { HoldingBadge, holdingRequirement, type HoldingRequirement } from '../lib/yutai-cross';
-import { RISK_STATUS_LABEL, riskStatusTitle } from '../lib/risk-status';
+
+// 銘柄詳細。旧「優待クロス」の詳細(/yutai/:ticker)と旧「逆日歩予測」の詳細
+// (/yutai/:ticker/forecast)を統合した画面。データは2つのAPIを並行して取る:
+//   GET /yutai/{ticker}          銘柄基本情報・優待内容・株数段階・最高料率/品貸日数
+//   GET /yutai/{ticker}/forecast 判定・予測分布・過去権利日・現在需給
 
 const HOLDING_NOTE: Record<HoldingRequirement, string> = {
   none: '権利日だけ保有すれば取得できます(クロスで取得可)',
@@ -93,9 +101,9 @@ export function YutaiDetailPage() {
     return fetchYutaiDetail(ticker);
   }, [ticker]);
 
-  const trendState = useAsync(async () => {
+  const forecastState = useAsync(async () => {
     if (!ticker) throw new Error('ticker is missing');
-    return fetchYutaiMarginTrend(ticker);
+    return fetchYutaiForecastDetail(ticker);
   }, [ticker]);
 
   if (detailState.loading) return <StatusNote kind="loading" message="読み込み中…" />;
@@ -103,11 +111,7 @@ export function YutaiDetailPage() {
   if (!detailState.data) return null;
 
   const { data } = detailState;
-  const riskLabel = RISK_STATUS_LABEL[data.risk.riskStatus];
-  // 過去の実績逆日歩を出す株数。必要株数が未取得なら単元株数で代用する
-  // (lambda/shared/gyakuhibu-actual-summary.tsと同じ規則)。必要株数が200株・300株の
-  // 銘柄で単元株数を使うと、一覧画面の「前回逆日歩」の半分・3分の1の金額が並んでしまう。
-  const shares = data.requiredShares ?? data.unitShares;
+  const forecast = forecastState.data;
 
   return (
     <>
@@ -120,33 +124,12 @@ export function YutaiDetailPage() {
         </Link>
       </div>
 
-      <div className="section-heading">銘柄基本情報</div>
-      <div className="card summary-grid">
-        <div className="summary-item">
-          <div className="summary-item__label">前日終値</div>
-          <div className="summary-item__value">{formatPrice(data.basicInfo.closePrice)}</div>
-        </div>
-        <div className="summary-item">
-          <div className="summary-item__label">出来高</div>
-          <div className="summary-item__value">{formatVolume(data.basicInfo.volume)}</div>
-        </div>
-        <div className="summary-item">
-          <div className="summary-item__label">PER</div>
-          <div className="summary-item__value">{data.basicInfo.per !== null ? `${data.basicInfo.per.toFixed(1)}倍` : '—'}</div>
-        </div>
-        <div className="summary-item">
-          <div className="summary-item__label">決算サマリ</div>
-          <div className="summary-item__value" style={{ fontSize: '0.85rem', lineHeight: 1.6 }}>
-            売上 {formatFinancialYen(data.basicInfo.sales ?? undefined)}
-            <br />
-            営業利益 {formatFinancialYen(data.basicInfo.operatingProfit ?? undefined)}
-            <br />
-            純利益 {formatFinancialYen(data.basicInfo.netProfit ?? undefined)}
-            <br />
-            EPS {data.basicInfo.eps ?? '—'}
-          </div>
-        </div>
-      </div>
+      <div className="section-heading">逆日歩の判定</div>
+      {forecastState.loading && <StatusNote kind="loading" message="予測を読み込み中…" />}
+      {forecastState.error && (
+        <StatusNote kind="error" message={`予測の取得に失敗しました: ${forecastState.error.message}`} />
+      )}
+      {forecast && <ForecastSummary data={forecast} maxRate={data.risk.maxRate} days={data.risk.days} />}
 
       <div className="section-heading">優待内容</div>
       <div className="card">
@@ -184,91 +167,39 @@ export function YutaiDetailPage() {
       <div className="section-heading">株数段階別の優待条件</div>
       <BenefitGroupsCard groups={data.benefitGroups} warning={data.benefitParseWarning} />
 
-      <div className="section-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <span>逆日歩リスク計算</span>
-        <Link to={`/yutai/${data.ticker}/forecast`} style={{ fontSize: '0.85rem', fontWeight: 400 }}>
-          予測を見る →
-        </Link>
-      </div>
-      <div className="card">
-        <div className="summary-item__label">最大逆日歩(概算・次回権利日の予測)</div>
-        {data.risk.maxGyakuhibu !== null ? (
-          <HoverCard.Root openDelay={0}>
-            <HoverCard.Trigger asChild>
-              <div tabIndex={0} className="gyakuhibu-hover summary-item__value">
-                {formatFinancialYen(String(data.risk.maxGyakuhibu))}
-              </div>
-            </HoverCard.Trigger>
-            <HoverCard.Portal>
-              <HoverCard.Content className="gyakuhibu-tooltip" side="bottom" sideOffset={8}>
-                <div className="summary-item__label" style={{ marginBottom: '0.5rem' }}>
-                  過去の権利日の実績逆日歩(taisyaku.jp確報ベース、直近3年分)
-                </div>
-                {data.rightsHistory.length === 0 ? (
-                  <p style={{ color: 'var(--text-muted)' }}>データがありません</p>
-                ) : (
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>権利日</th>
-                        {/* 金額は必要株数ベース。未取得なら単元株数で概算していることを示す。 */}
-                        <th>
-                          実績逆日歩({shares.toLocaleString('ja-JP')}株{data.requiredShares === null ? '・概算' : ''})
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.rightsHistory.map((h) => (
-                        <tr key={h.rightsDate}>
-                          <td>{h.rightsDate}</td>
-                          {/* 保存済みのtotalAmountは読まない — 記録当時のunitShares(移行期には
-                              200や300)を掛けた値で、必要株数とは別の株数を指している。
-                              avgRate・daysは株数に依存しないのでここから組み直す。 */}
-                          <td className="num">{formatFinancialYen(String(Math.round(h.avgRate * h.days * shares)))}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </HoverCard.Content>
-            </HoverCard.Portal>
-          </HoverCard.Root>
-        ) : (
-          <div className="summary-item__value">—</div>
-        )}
-        <p style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-          {data.risk.maxRate !== null ? `最高料率 ${data.risk.maxRate}円 ・ ` : ''}
-          {data.risk.days !== null ? `${data.risk.days}日分` : ''}
-        </p>
-        <span className={`risk-badge risk-badge--${data.risk.riskStatus}`} title={riskStatusTitle(data.risk.riskStatus)}>
-          {riskLabel}
-        </span>
+      <div className="section-heading">銘柄基本情報</div>
+      <div className="card summary-grid">
+        <div className="summary-item">
+          <div className="summary-item__label">前日終値</div>
+          <div className="summary-item__value">{formatPrice(data.basicInfo.closePrice)}</div>
+        </div>
+        <div className="summary-item">
+          <div className="summary-item__label">出来高</div>
+          <div className="summary-item__value">{formatVolume(data.basicInfo.volume)}</div>
+        </div>
+        <div className="summary-item">
+          <div className="summary-item__label">PER</div>
+          <div className="summary-item__value">{data.basicInfo.per !== null ? `${data.basicInfo.per.toFixed(1)}倍` : '—'}</div>
+        </div>
+        <div className="summary-item">
+          <div className="summary-item__label">決算サマリ</div>
+          <div className="summary-item__value" style={{ fontSize: '0.85rem', lineHeight: 1.6 }}>
+            売上 {formatFinancialYen(data.basicInfo.sales ?? undefined)}
+            <br />
+            営業利益 {formatFinancialYen(data.basicInfo.operatingProfit ?? undefined)}
+            <br />
+            純利益 {formatFinancialYen(data.basicInfo.netProfit ?? undefined)}
+            <br />
+            EPS {data.basicInfo.eps ?? '—'}
+          </div>
+        </div>
       </div>
 
-      {data.features.tseMargin && (
+      {forecast && (
         <>
-          <div className="section-heading">信用残トレンド(過去1年)</div>
-          {trendState.loading && <StatusNote kind="loading" message="読み込み中…" />}
-          {trendState.error && (
-            <StatusNote kind="error" message={`取得に失敗しました: ${trendState.error.message}`} />
-          )}
-          {trendState.data && trendState.data.points.length === 0 && (
-            <StatusNote kind="empty" message="まだ信用残データがありません(取得中です)。" />
-          )}
-          {trendState.data && trendState.data.points.length > 0 && (
-            <div className="card" style={{ height: 220 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={trendState.data.points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                  <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-                  <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
-                  <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
-                  <Line type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
-                  <Line type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
+          <ForecastBasis data={forecast} />
+          <TseForecastSection data={forecast} />
+          <MarginTrendSection data={forecast} />
         </>
       )}
     </>

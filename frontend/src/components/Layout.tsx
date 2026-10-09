@@ -2,7 +2,6 @@ import { NavLink, Outlet } from 'react-router-dom';
 
 const NAV_ITEMS = [
   { to: '/yutai', label: '優待クロス', end: true },
-  { to: '/yutai/forecast', label: '逆日歩予測' },
   { to: '/yutai/tdnet-events', label: '優待変更履歴' },
 ];
 

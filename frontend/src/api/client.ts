@@ -4,7 +4,6 @@ import type {
   MarginTrendResponse,
   PricesResponse,
   YutaiDetail,
-  YutaiListResponse,
   YutaiForecastStatus,
   YutaiForecastListResponse,
   YutaiForecastDetail,
@@ -69,7 +68,6 @@ export interface YutaiListParams {
   rightsDateFrom?: string;
   rightsDateTo?: string;
   keyword?: string;
-  riskStatus?: 'safe' | 'caution' | 'danger' | 'general-only' | 'na' | 'all';
   priceMin?: number;
   priceMax?: number;
   investmentMin?: number;
@@ -82,23 +80,12 @@ function setNumberParam(query: URLSearchParams, key: string, value: number | und
   if (value !== undefined) query.set(key, String(value));
 }
 
-// 2つの一覧fetcherで同じ絞り込みを同じ書き方で出す。
 function setCrossParams(query: URLSearchParams, params: YutaiListParams): void {
   setNumberParam(query, 'priceMin', params.priceMin);
   setNumberParam(query, 'priceMax', params.priceMax);
   setNumberParam(query, 'investmentMin', params.investmentMin);
   setNumberParam(query, 'investmentMax', params.investmentMax);
   if (params.crossEligible) query.set('crossEligible', params.crossEligible);
-}
-
-export function fetchYutaiList(params: YutaiListParams): Promise<YutaiListResponse> {
-  const query = new URLSearchParams();
-  if (params.rightsDateFrom) query.set('rightsDateFrom', params.rightsDateFrom);
-  if (params.rightsDateTo) query.set('rightsDateTo', params.rightsDateTo);
-  if (params.keyword) query.set('keyword', params.keyword);
-  if (params.riskStatus) query.set('riskStatus', params.riskStatus);
-  setCrossParams(query, params);
-  return request(`/yutai?${query}`);
 }
 
 export function fetchYutaiDetail(ticker: string): Promise<YutaiDetail> {

@@ -80,21 +80,6 @@ export interface YutaiCrossFields extends YutaiBenefitFields {
   sameMonthLastYearGyakuhibu: GyakuhibuActualRef | null;
 }
 
-export interface YutaiListItem extends YutaiCrossFields {
-  ticker: string;
-  companyName?: string;
-  content: string;
-  value: number | null;
-  rightsDate: string | null;
-  riskStatus: YutaiRiskStatus;
-  maxGyakuhibu: number | null;
-}
-
-export interface YutaiListResponse {
-  tickers: YutaiListItem[];
-  currentMonthLastTradableDate: string;
-}
-
 export interface YutaiRiskInfo {
   maxGyakuhibu: number | null;
   maxRate: number | null;
