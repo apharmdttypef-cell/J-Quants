@@ -25,9 +25,6 @@ export interface FinancialSummary {
   eps: string;
 }
 
-// 逆日歩予測の判定(充足率P90)と同じ4段階。APIが予測テーブルの判定をそのまま返す。
-export type YutaiRiskStatus = 'safe' | 'caution' | 'danger' | 'general-only' | 'na';
-
 export type YutaiCrossEligible = 'ok' | 'ng' | 'unknown';
 export type YutaiHoldingKind = 'none' | 'bonus' | 'required' | 'unknown';
 
@@ -80,11 +77,11 @@ export interface YutaiCrossFields extends YutaiBenefitFields {
   sameMonthLastYearGyakuhibu: GyakuhibuActualRef | null;
 }
 
+// 最大逆日歩の計算結果。判定(forecastStatus)はYutaiForecastDetail側にある。
 export interface YutaiRiskInfo {
   maxGyakuhibu: number | null;
   maxRate: number | null;
   days: number | null;
-  riskStatus: YutaiRiskStatus;
 }
 
 export interface YutaiRightsHistoryPoint {
@@ -175,7 +172,6 @@ export interface YutaiForecastListItem extends YutaiCrossFields {
   content: string;
   value: number | null;
   rightsDate: string | null;
-  riskStatus: YutaiRiskStatus;
   maxGyakuhibu: number | null;
   forecast: YutaiForecast;
   tseForecast: YutaiTseForecast | null;

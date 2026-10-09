@@ -366,7 +366,7 @@ export class JQuantsStack extends cdk.Stack {
     this.gyakuhibuActualTable.grantReadData(yutaiRiskPrecomputeBatchFn);
     this.apiKeySecret.grantRead(yutaiRiskPrecomputeBatchFn);
 
-    // GET /yutai一覧のリスク判定を事前計算し、reference-apiでの逐次クエリ(銘柄数に比例して
+    // 優待一覧の最大逆日歩などを事前計算し、reference-apiでの逐次クエリ(銘柄数に比例して
     // 増える)を無くす。PriceBatchFunction(daily 09:00 UTC)の後に実行する。JST 18:20 = UTC 09:20。
     new events.Rule(this, 'YutaiRiskPrecomputeBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '20', hour: '9' }),
@@ -695,11 +695,7 @@ function handler(event) {
       methods: [apigwv2.HttpMethod.GET],
       integration: referenceApiIntegration,
     });
-    this.api.addRoutes({
-      path: '/yutai',
-      methods: [apigwv2.HttpMethod.GET],
-      integration: referenceApiIntegration,
-    });
+    // 優待クロス一覧はGET /yutai/forecastに一本化した(旧GET /yutaiは2026-10に削除)。
     this.api.addRoutes({
       path: '/yutai/tdnet-events',
       methods: [apigwv2.HttpMethod.GET],

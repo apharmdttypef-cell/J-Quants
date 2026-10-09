@@ -1,7 +1,7 @@
 import type { YutaiForecastStatus } from '../api/types';
 
-// 判定の表示名。優待一覧のriskStatusと逆日歩予測のforecastStatusは同じ値なので、
-// 全画面でこれを使う(画面ごとに書くと文言がずれる)。
+// 判定(逆日歩予測のforecastStatus)の表示名。一覧・詳細の全画面でこれを使う
+// (画面ごとに書くと文言がずれる)。
 export const RISK_STATUS_LABEL: Record<YutaiForecastStatus, string> = {
   danger: '危険',
   caution: '注意',

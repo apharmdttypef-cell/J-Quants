@@ -174,7 +174,6 @@ test('creates the HTTP API with the price/summary and yutai routes', () => {
   const routeKeys = [
     'GET /tickers/{ticker}/prices',
     'GET /tickers/{ticker}/summary',
-    'GET /yutai',
     'GET /yutai/{ticker}',
     'GET /yutai/{ticker}/margin-trend',
     'GET /yutai/forecast',
@@ -190,6 +189,8 @@ test('creates the HTTP API with the price/summary and yutai routes', () => {
   expect(actualRouteKeys).not.toContain('GET /tickers');
   expect(actualRouteKeys).not.toContain('POST /tickers');
   expect(actualRouteKeys).not.toContain('DELETE /tickers/{ticker}');
+  // 優待クロス一覧はGET /yutai/forecastに一本化した
+  expect(actualRouteKeys).not.toContain('GET /yutai');
 });
 
 test('protects every route with the shared-password Lambda authorizer', () => {
