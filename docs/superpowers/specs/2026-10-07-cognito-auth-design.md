@@ -151,9 +151,15 @@ APIとフロントを同時に切り替える一括移行とし、`cdk deploy` �
 6. 自分のアカウントで確認：ログイン、一覧・詳細の表示、詳細ページを直接開いてログイン後にそのページへ戻ること、ログアウト
 7. テスト用ユーザーを作り、`admin-disable-user` 後にログインできないことを確認し、削除
 8. (J-Quants・taisyaku.jpの規約確認後に)友人を招待
-9. 不要になった `JQuantsAppPassword` シークレットを `--force-delete-without-recovery` で即時削除
+9. 不要になった `JQuantsAppPassword` シークレットを `--force-delete-without-recovery` で即時削除(実施結果: シークレットの削除ポリシーが`Delete`だったため、手順2の`cdk deploy`でCloudFormationが猶予期間なしで削除した。手動の作業は不要)
 
-ロールバック：シークレットが削除保留中だと同名で再作成できないため、手順9はベータが安定してから行う。必要なら \`aws secretsmanager restore-secret\` で戻したうえで、変更をgit revertし、`APP_PASSWORD=xxxxx npx cdk deploy` と旧フロントの再配信で元に戻す。User Poolは `RETAIN` のため残り、再移行時に招待済みユーザーをそのまま使える。
+実施記録(2026-10-14):
+
+- 1回目の`cdk deploy`は失敗してロールバックした。新しいJWTオーソライザーに旧Lambdaオーソライザーと同じ論理ID(`ApiAuthorizer`)を付けていたため、CloudFormationが既存オーソライザーをその場でJWT型に更新しようとし、旧設定のキャッシュTTL(JWTオーソライザーでは使えない)が残ってエラーになった。IDを`CognitoAuthorizer`に変えて新規作成させて解消
+- ロールバック時、`RETAIN`+削除保護のUser Poolが空のまま孤立して残ったため、削除保護を外して手動で削除した。初回作成に失敗したデプロイでは同じことが起きうる
+- テスト用ユーザー(パスワードはCLIで設定、招待メールなし)で、詳細ページの直接表示→ログイン→元のページへ戻る、アクセストークンの`email`クレーム、ログアウト、停止ユーザーのログイン拒否を本番で確認し、ユーザーは削除した
+
+ロールバック：旧シークレットは完全に削除済みなので、変更をgit revertし、`APP_PASSWORD=<旧パスワード> npx cdk deploy`(同名のシークレットが作り直される)と旧フロントの再配信で元に戻す。User Poolは `RETAIN` のため残り、再移行時に招待済みユーザーをそのまま使える。
 
 ## テスト方針
 
