@@ -178,7 +178,7 @@ test('getCaller identifies the user by sub and passes email through when the tok
   expect(getCaller(makeEvent('GET /yutai/forecast'))).toEqual({ sub: 'test-sub-0001', email: 'tester@example.com' });
 });
 
-test('getCaller returns email: null when the token has no email claim (Cognito access tokens do not)', () => {
+test('getCaller returns email: null when the token has no email claim', () => {
   const event = makeEvent('GET /yutai/forecast', { claims: { sub: 'test-sub-0002', client_id: 'abc', token_use: 'access' } });
   expect(getCaller(event)).toEqual({ sub: 'test-sub-0002', email: null });
 });

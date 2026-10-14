@@ -709,7 +709,8 @@ export interface Caller {
   // CognitoのユーザーID。メールアドレスと違って変わらないので、ユーザー別データの
   // パーティションキーにはこれを使う。
   sub: string;
-  // トークンにemailクレームがある場合だけ入る(Cognitoのアクセストークンには入らない)。
+  // アクセストークンのemailクレーム(Pre Token Generationトリガーが足している)。
+  // 無ければnull。表示・連絡用で、識別には使わない。
   email: string | null;
 }
 

@@ -633,6 +633,22 @@ export class JQuantsStack extends cdk.Stack {
       },
     });
 
+    // アクセストークンにemailを足す(既定ではIDトークンにしか入らない)。
+    // V2トリガーはEssentialsプラン以上で使える。
+    const preTokenGenerationFn = new nodejs.NodejsFunction(this, 'PreTokenGenerationFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'pre-token-generation', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(5),
+      memorySize: 128,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+    });
+    this.userPool.addTrigger(
+      cognito.UserPoolOperation.PRE_TOKEN_GENERATION_CONFIG,
+      preTokenGenerationFn,
+      cognito.LambdaVersion.V2_0,
+    );
+
     this.userPool.addDomain('JQuantsUserPoolDomain', {
       cognitoDomain: { domainPrefix: COGNITO_DOMAIN_PREFIX },
       managedLoginVersion: cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,

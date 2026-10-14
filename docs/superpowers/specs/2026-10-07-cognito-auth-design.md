@@ -8,6 +8,7 @@ Oct 7, 2026 · @ryo
 
 - ウォッチリストの変更ルート(`POST /tickers`・`DELETE /tickers/{ticker}`)と`JQuantsWatchlist`は起票前のリファクタで削除済みで、現在のAPIは全ルートがGET。守る対象が無いため、`admin`グループと403判定は作らない(次に作るユーザー別データの機能で必要になった時点で入れる)
 - ユーザー識別は`sub`を使う(メールアドレスは変更されうる)。`getCaller`は将来DynamoDBのパーティションキーに使える前提で`{ sub, email }`を返す
+- Cognitoのアクセストークンには既定で`email`が入らないため、Pre Token Generationトリガー(V2、Essentials以上)でアクセストークンに`email`クレームを足す(`lambda/pre-token-generation/`)。APIに送るのは引き続きアクセストークン
 - ログイン後は元のページに戻す。戻り先は`/`で始まり`//`で始まらない相対パスだけを許可する(外部URLへのオープンリダイレクト防止)
 - Cognitoドメインのプレフィックスは`jquants-beta-vqvfk`(友人全員にログイン画面のURLとして見えるため、アカウントIDを含めない)
 - `bin/j-quants.ts`がsynth時にシークレット`JQuantsAppPassword`を読んでいる(起票後に追加)ため、これも削除する。削除しないとシークレット削除後に`cdk deploy`が失敗する
@@ -75,6 +76,7 @@ Cognito User Pool（招待制）＋Managed Loginの認可コードフロー（PK
 | `UserPoolDomain` | Cognitoプレフィックスドメイン `jquants-beta-vqvfk`、`managedLoginVersion: NEWER_MANAGED_LOGIN` |
 | `UserPoolClient` | `generateSecret: false`、`oAuth.flows.authorizationCodeGrant: true`、scopes は `openid` / `email`、`callbackUrls` と `logoutUrls` に `https://<CloudFrontドメイン>/` と `http://localhost:5173/`、`accessTokenValidity: 1時間`、`idTokenValidity: 1時間`、`refreshTokenValidity: 7日`、`enableTokenRevocation: true`、`preventUserExistenceErrors: true` |
 | Managed Loginブランディング | `CfnManagedLoginBranding` を `useCognitoProvidedValues: true` で作成（新Managed Loginはこれが無いとログイン画面が表示されない） |
+| `PreTokenGenerationFunction` | User PoolのPre Token Generationトリガー(`LambdaVersion.V2_0`)。アクセストークンに`email`クレームを足す |
 
 変更：
 
@@ -118,7 +120,7 @@ Cognito User Pool（招待制）＋Managed Loginの認可コードフロー（PK
 
 `lambda/reference-api/index.ts` にユーザー識別とアクセスログを加える。権限による出し分けは無い(全ルートがGET)。
 
-- `event.requestContext.authorizer.jwt.claims` から呼び出し元を取り出す関数 `getCaller(event)` を追加し、`{ sub, email }` を返す。`sub`は将来ユーザー別データのパーティションキーに使う。`email`はクレームにあれば入れ、無ければ`null`(Cognitoのアクセストークンには`email`が入らないため。IDトークンを送るかPre Token Generationトリガーで足すかは別途決める)
+- `event.requestContext.authorizer.jwt.claims` から呼び出し元を取り出す関数 `getCaller(event)` を追加し、`{ sub, email }` を返す。`sub`は将来ユーザー別データのパーティションキーに使う。`email`はPre Token Generationトリガーがアクセストークンに足したクレームを使い、無ければ`null`
 - 全リクエストで `sub`、`routeKey` を構造化ログ（`console.log(JSON.stringify(...))`）に出し、誰がアクセスしたかをCloudWatch Logsで追えるようにする
 - クレームが無い場合（authorizerの設定漏れ）は401を返して処理しない
 

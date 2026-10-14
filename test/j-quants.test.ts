@@ -30,6 +30,19 @@ describe('Cognito user authentication', () => {
     template.hasResource('AWS::Cognito::UserPool', { DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' });
   });
 
+  test('a V2 Pre Token Generation trigger adds email to the access token', () => {
+    template.hasResourceProperties('AWS::Cognito::UserPool', {
+      LambdaConfig: {
+        PreTokenGenerationConfig: { LambdaArn: Match.anyValue(), LambdaVersion: 'V2_0' },
+      },
+    });
+    // Cognitoがトリガーを呼べること
+    template.hasResourceProperties('AWS::Lambda::Permission', {
+      Action: 'lambda:InvokeFunction',
+      Principal: 'cognito-idp.amazonaws.com',
+    });
+  });
+
   test('the SPA client uses the authorization code flow without a secret, and allows the CloudFront and local dev URLs', () => {
     template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
       GenerateSecret: false,

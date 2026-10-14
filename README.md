@@ -166,6 +166,7 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし最大逆日歩・貸借区分などを事前計算・書き戻し。一覧API(`GET /yutai/forecast`)が銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため |
 | `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 10 * * ? *)` = JST 19:40 毎日、逆日歩実績・信用残バッチの後) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`を読み、貸株超過率のビン別充足率分布から次回権利日の予測逆日歩(過去実績ベース)を算出し`JQuantsGyakuhibuForecast`へupsert。`TSE_MARGIN_FEATURES_ENABLED=true`のときは`JQuantsMarginBalance`も読み、東証信用残ベースの現在需給予測(`tseForecast`属性・`_POOL_TSE_`行)も併せて書く |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理。呼び出し元(`sub`)と`routeKey`を構造化ログに出す |
+| `PreTokenGenerationFunction` | Cognito User PoolのPre Token Generationトリガー(V2) | アクセストークンに`email`クレームを足す |
 
 ### API(HTTP API、全ルートにCognito JWT authorizerが既定で適用される)
 
@@ -192,7 +193,7 @@ APIは全ルートがGET(書き込み系は無い)。CORSの`allowOrigins`はClo
 
 - ログイン: Cognito Managed Login(`https://jquants-beta-vqvfk.auth.ap-northeast-1.amazoncognito.com`)。認可コード+PKCE、クライアントシークレットなし。初回ログインで招待時の仮パスワードを変更、パスワードリセットもManaged Loginの画面で行う。
 - フロント: `oidc-client-ts` + `react-oidc-context`。`AuthGate`が未ログインならログイン画面へ送り、ログイン後は元のページへ戻す(戻り先は`/`で始まり`//`で始まらない相対パスだけを許可。外部URLへのオープンリダイレクト防止)。トークンは`sessionStorage`(タブごと)に置き、リフレッシュトークン(7日)でアクセストークン(1時間)を自動更新する。ログアウトはCognitoの`/logout`へ遷移する。
-- API: HTTP APIのJWT authorizer(`HttpUserPoolAuthorizer`)がアクセストークンの署名・有効期限・`client_id`を全ルートで検証する。`ReferenceApiFunction`は検証済みクレームから`getCaller`で`{ sub, email }`を取り出し(ユーザー別データのキーには変わらない`sub`を使う)、`sub`と`routeKey`を構造化ログ(`event: 'api-access'`)に出す。クレームが無ければ401。
+- API: HTTP APIのJWT authorizer(`HttpUserPoolAuthorizer`)がアクセストークンの署名・有効期限・`client_id`を全ルートで検証する。アクセストークンには既定で`email`が入らないため、Pre Token Generationトリガー(`PreTokenGenerationFunction`、V2)で足している。`ReferenceApiFunction`は検証済みクレームから`getCaller`で`{ sub, email }`を取り出し(ユーザー別データのキーには変わらない`sub`を使う)、`sub`と`routeKey`を構造化ログ(`event: 'api-access'`)に出す。クレームが無ければ401。
 - 権限の差は無い(全ルートがGET)。
 
 ### ユーザー管理(AWS CLI)
