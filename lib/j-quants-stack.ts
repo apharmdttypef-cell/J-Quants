@@ -679,7 +679,10 @@ export class JQuantsStack extends cdk.Stack {
     });
 
     // 全ルートでアクセストークンの署名・有効期限・client_idを検証する(Lambda不要)。
-    const apiAuthorizer = new HttpUserPoolAuthorizer('ApiAuthorizer', this.userPool, {
+    // IDは旧Lambdaオーソライザー('ApiAuthorizer')と変える。同じIDだとCloudFormationが既存の
+    // オーソライザーをJWT型へその場で更新しようとし、旧設定のキャッシュTTL(JWTでは使えない)
+    // が残って失敗するため、別リソースとして作り直させる。
+    const apiAuthorizer = new HttpUserPoolAuthorizer('CognitoAuthorizer', this.userPool, {
       userPoolClients: [userPoolClient],
     });
 
