@@ -1,6 +1,8 @@
 *.js
 !jest.config.js
 *.d.ts
+# tscの生成物ではなく手書きの型定義(Viteの環境変数)なので追跡する
+!frontend/src/vite-env.d.ts
 node_modules
 
 # CDK asset staging directory

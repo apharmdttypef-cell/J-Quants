@@ -59,9 +59,10 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
       → JQuantsGyakuhibuForecast に upsert(銘柄行 + 全銘柄横断のプール曲線行`_POOL_`、`tseMarginFeatures`有効時は東証超過率ベースの`tseForecast`行`_POOL_TSE_`も追加)
 
 ブラウザ
-  → CloudFront(Basic認証: CloudFront Function)
+  → CloudFront(静的ファイルは公開配信)
       → S3(静的ホスティング、React SPA)
-  → API Gateway(HTTP API, Lambdaオーソライザーで x-app-password ヘッダー検証)
+  → Cognito User Pool(Managed Loginでログイン、認可コード+PKCE)
+  → API Gateway(HTTP API, Cognito JWT authorizerでアクセストークン検証)
       → ReferenceApiFunction(Lambda)
           → DynamoDB(読み書き)
 ```
@@ -88,7 +89,6 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
 | シークレット名 | 内容 | 投入方法 |
 |---|---|---|
 | `JQuantsApiKey` | J-Quants APIキー(V2) | `cdk deploy`後に手動: `aws secretsmanager put-secret-value --secret-id JQuantsApiKey --secret-string <APIキー>` |
-| `JQuantsAppPassword` | フロント/APIの共有パスワード | `cdk deploy`時の`APP_PASSWORD`環境変数の値がそのまま入る(手動投入不要) |
 
 ### J-Quants Freeプランの実際の挙動(実機で判明)
 
@@ -163,12 +163,11 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
 | `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert。開示ごとに`JQuantsYutaiTdnetEvent`へイベント(`start`/`update`/`abolition`)を記録する(マスタが実際に変わらなかった場合は記録しない)。廃止検知による`JQuantsYutaiMaster`からの削除は、`PriceBatchFunction`/`FinancialSummaryBatchFunction`の対象銘柄取得も`ReferenceApiFunction`の`isKnownTicker`判定も同テーブルを参照する設計のため、その銘柄の株価・決算サマリ収集を止め、`GET /tickers/{ticker}/prices`・`summary`も404にする(意図した副作用だが、単一の削除操作が複数の挙動に波及する点に注意) |
-| `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし逆日歩リスクを事前計算・書き戻し。`GET /yutai`一覧APIが銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため |
+| `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし最大逆日歩・貸借区分などを事前計算・書き戻し。一覧API(`GET /yutai/forecast`)が銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため |
 | `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 10 * * ? *)` = JST 19:40 毎日、逆日歩実績・信用残バッチの後) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`を読み、貸株超過率のビン別充足率分布から次回権利日の予測逆日歩(過去実績ベース)を算出し`JQuantsGyakuhibuForecast`へupsert。`TSE_MARGIN_FEATURES_ENABLED=true`のときは`JQuantsMarginBalance`も読み、東証信用残ベースの現在需給予測(`tseForecast`属性・`_POOL_TSE_`行)も併せて書く |
-| `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理 |
-| `AuthorizerFunction` | API GatewayのLambdaオーソライザー | `x-app-password` ヘッダーを `JQuantsAppPassword` と照合(結果は5分キャッシュ) |
+| `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理。呼び出し元(`sub`)と`routeKey`を構造化ログに出す |
 
-### API(HTTP API、全ルートに`AuthorizerFunction`が既定で適用される)
+### API(HTTP API、全ルートにCognito JWT authorizerが既定で適用される)
 
 | メソッド/パス | 内容 |
 |---|---|
@@ -180,44 +179,40 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `GET /yutai/{ticker}/forecast` | 銘柄別の予測詳細。予測分布・過去権利日ごとの実績(残高・超過率・充足率・応札・措置)・全銘柄プールのビン別統計・信用残トレンド直近値をまとめて返す。`tseForecast`と`features`を含む |
 | `GET /yutai/tdnet-events` | TDnet監視で検知した優待関連イベント(開始/変更/廃止)の一覧。開示日降順、全件返却(ページネーション無し) |
 
-書き込み系(POST/PUT/DELETE)は`/yutai`系には無い(読み取り専用画面のため)。CORSの`allowOrigins`はCloudFrontの配信ドメインと`http://localhost:5173`(ローカル開発用)のみ。
+APIは全ルートがGET(書き込み系は無い)。CORSの`allowOrigins`はCloudFrontの配信ドメインと`http://localhost:5173`(ローカル開発用)のみ、`allowHeaders`は`Content-Type`・`Authorization`。
 
 ### フロント配信
 
 - S3(`BlockPublicAccess.BLOCK_ALL`、CloudFrontからのみOAC経由でアクセス可)+ CloudFront(SPA用に403/404を`index.html`にフォールバック)。
-- CloudFront FunctionでBasic認証(ユーザー名`jquants`固定、パスワードは`APP_PASSWORD`をsynth時に埋め込み)。
+- 静的ファイルは認証なしで配信する(バンドルに秘密情報は無く、データは全てAPI側で守っている)。
 
 ## 認証モデル
 
-フロント・APIとも未認証で公開しないよう、**`APP_PASSWORD`という1つの共有パスワードで両方を保護**している。
+管理者が招待したユーザーだけが使えるベータ。Cognito User Pool(機能プランEssentials、セルフサインアップ無効)でユーザーごとにログインし、ユーザー単位でアクセスを止められる。設計は`docs/superpowers/specs/2026-10-07-cognito-auth-design.md`。
 
-- フロント: CloudFront FunctionによるBasic認証(ブラウザ標準のログインダイアログ)。
-- API: `x-app-password`ヘッダーをLambdaオーソライザーが`JQuantsAppPassword`シークレットと照合。CORSはブラウザ制約に過ぎずサーバー側のアクセス制御にはならないため、API単体でも認証を必須にしている。
-- フロント側は`PasswordGate`コンポーネントがsessionStorageにパスワードを保持し、API呼び出し全てに自動付与。401が返れば保存値をクリアして再入力を促す。
+- ログイン: Cognito Managed Login(`https://jquants-beta-vqvfk.auth.ap-northeast-1.amazoncognito.com`)。認可コード+PKCE、クライアントシークレットなし。初回ログインで招待時の仮パスワードを変更、パスワードリセットもManaged Loginの画面で行う。
+- フロント: `oidc-client-ts` + `react-oidc-context`。`AuthGate`が未ログインならログイン画面へ送り、ログイン後は元のページへ戻す(戻り先は`/`で始まり`//`で始まらない相対パスだけを許可。外部URLへのオープンリダイレクト防止)。トークンは`sessionStorage`(タブごと)に置き、リフレッシュトークン(7日)でアクセストークン(1時間)を自動更新する。ログアウトはCognitoの`/logout`へ遷移する。
+- API: HTTP APIのJWT authorizer(`HttpUserPoolAuthorizer`)がアクセストークンの署名・有効期限・`client_id`を全ルートで検証する。`ReferenceApiFunction`は検証済みクレームから`getCaller`で`{ sub, email }`を取り出し(ユーザー別データのキーには変わらない`sub`を使う)、`sub`と`routeKey`を構造化ログ(`event: 'api-access'`)に出す。クレームが無ければ401。
+- 権限の差は無い(全ルートがGET)。
 
-### パスワードの渡し方
+### ユーザー管理(AWS CLI)
 
-CloudFront FunctionはSecrets Managerを実行時に参照できないため、パスワードの値は**synth時**に必要になる。普段は`bin/j-quants.ts`がAWS上のシークレット`JQuantsAppPassword`を読んでスタックへ渡すので、**デプロイ時に`APP_PASSWORD`を打つ必要はない**。
+`<id>`はCfnOutputの`UserPoolId`。
 
-```bash
-npx cdk deploy          # 通常。シークレットから読む
-```
+| 操作 | コマンド | 効果 |
+|---|---|---|
+| 招待 | `aws cognito-idp admin-create-user --user-pool-id <id> --username <email> --user-attributes Name=email,Value=<email> Name=email_verified,Value=true --desired-delivery-mediums EMAIL` | 仮パスワード付きの招待メールが届く。初回ログイン時にパスワード変更 |
+| 一時停止 | `aws cognito-idp admin-disable-user --user-pool-id <id> --username <email>` → `aws cognito-idp admin-user-global-sign-out --user-pool-id <id> --username <email>` | 新規ログインとトークン更新が止まる。発行済みアクセストークンは最大1時間有効 |
+| 再開 | `aws cognito-idp admin-enable-user --user-pool-id <id> --username <email>` | ログインできる状態に戻る |
+| 削除 | `aws cognito-idp admin-delete-user --user-pool-id <id> --username <email>` | ユーザーを完全に削除 |
+| 一覧 | `aws cognito-idp list-users --user-pool-id <id>` | 招待済みユーザーと状態の確認 |
 
-環境変数`APP_PASSWORD`を付けた場合はそちらが優先される。用途は2つだけ。
-
-```bash
-APP_PASSWORD=xxxxx npx cdk deploy   # 初回デプロイ(シークレットがまだ無い)/ ローテーション
-```
-
-ローテーションは1回このコマンドでデプロイすればシークレット側も新しい値に更新されるので、以降は環境変数なしで新しい値が使われる。
-
-シークレットも環境変数も無い状態ではsynthの時点でエラーになるため、無認証でのデプロイは構造上できない。
+招待メールはCognito既定の送信元を使う(1日あたりの送信数に上限があるが、数名の招待には十分)。User Poolは削除保護+`RETAIN`なので、スタックを作り直しても招待済みユーザーは残る。
 
 ### 既知の残存リスク(許容範囲と判断)
 
-- Basic認証・APIパスワードとも総当たり対策(レート制限/ロックアウト)なし。
-- WAF・API Gatewayのスロットリング設定なし。
-- ただしCloudFront/API Gatewayのドメインはランダムな英数字IDで実質推測不可能なため、発見されにくい。仮に叩かれても1リクエストあたりの課金は極小でAWS既定のスロットリング上限もあり、被害は頭打ちになる。
+- WAF・API Gatewayのスロットリング設定なし(ログイン画面の総当たりはCognito側のロックアウトで抑止される)。
+- 停止したユーザーも、発行済みアクセストークンの有効期限(最大1時間)まではAPIを使える。
 - コスト監視はAWS Budgetsの日次メール通知で代替(個人運用で許容範囲と判断)。
 
 ## フロントエンド(`frontend/`)
@@ -245,14 +240,14 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 
 ## 主要コマンド
 
-事前に仮想環境変数として`APP_PASSWORD`(共有パスワード)と、deploy後に`JQuantsApiKey`へ投入するJ-Quants APIキーが必要。
+deploy後に`JQuantsApiKey`へ投入するJ-Quants APIキーが必要。
 
 ```bash
 # バックエンド(ルート)
 npm run build          # tsc
 npm test               # jest(スタック合成テスト + Lambda単体テスト)
-APP_PASSWORD=xxxxx npx cdk synth    # 合成確認
-APP_PASSWORD=xxxxx npx cdk deploy   # デプロイ
+npx cdk synth          # 合成確認
+npx cdk deploy         # デプロイ
 
 # デプロイ後、J-Quants APIキーを投入(初回のみ)
 aws secretsmanager put-secret-value \
@@ -260,7 +255,7 @@ aws secretsmanager put-secret-value \
 
 # フロントエンド(frontend/)
 cd frontend
-cp .env.example .env   # VITE_API_BASE_URL に CfnOutput ApiEndpoint の値を設定
+cp .env.example .env   # VITE_API_BASE_URL・VITE_COGNITO_* に CfnOutput の値を設定(.env.example参照)
 npm run dev            # ローカル開発サーバー
 npm run build           # 本番ビルド(dist/)
 npm run lint            # oxlint
@@ -281,16 +276,15 @@ J-Quantsの`mkt-margin-int`/`mkt-margin-alert`はスタンダードプラン以�
 ライトプラン等へ落とす場合:
 
 ```
-APP_PASSWORD=xxxxx npx cdk deploy -c tseMarginFeatures=false
+npx cdk deploy -c tseMarginFeatures=false
 ```
 
 この1回で、`MarginBalanceBatchSchedule`が削除され(Lambdaは残る)、`GyakuhibuForecastBatchFunction`は現在需給予測をスキップし、`ReferenceApiFunction`は`features.tseMargin: false`と`tseForecast: null`を返し、フロントはそれを見て列・カード・信用残トレンドを非表示にする(フロントの再ビルドは不要)。テーブルとデータは残るので、`-c tseMarginFeatures=true`(または指定なし)で再デプロイすれば元に戻る。過去実績ベース予測(判定・想定逆日歩)はこのフラグの影響を受けない。
 
 ## コスト目安
 
-- 稼働中: 月$1程度(内訳はほぼ`JQuantsApiKey` / `JQuantsAppPassword`の固定費 $0.40×2)。DynamoDB・Lambda・API Gateway・CloudFrontはこの利用規模ではほぼ無料枠内。
-- `cdk destroy`後: DynamoDB(RETAIN)のストレージ代のみでほぼ$0。ただしシークレット2つは既定で最大30日「削除保留」状態のまま$0.80/月が発生し続ける。即ゼロにしたい場合:
+- 稼働中: 月$1未満(内訳はほぼ`JQuantsApiKey`の固定費 $0.40)。DynamoDB・Lambda・API Gateway・CloudFront・Cognito(Essentialsの無料枠内)はこの利用規模ではほぼ無料。
+- `cdk destroy`後: DynamoDB・User Pool(RETAIN)のストレージ代のみでほぼ$0。ただしシークレットは既定で最大30日「削除保留」状態のまま$0.40/月が発生し続ける。即ゼロにしたい場合:
   ```bash
   aws secretsmanager delete-secret --secret-id JQuantsApiKey --force-delete-without-recovery
-  aws secretsmanager delete-secret --secret-id JQuantsAppPassword --force-delete-without-recovery
   ```

@@ -1,4 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom';
+import { useAuth } from 'react-oidc-context';
+import { signOut } from '../lib/auth';
 
 const NAV_ITEMS = [
   { to: '/yutai', label: '優待クロス', end: true },
@@ -6,6 +8,9 @@ const NAV_ITEMS = [
 ];
 
 export function Layout() {
+  const auth = useAuth();
+  const email = auth.user?.profile.email;
+
   return (
     <div className="app-shell">
       <nav className="app-nav">
@@ -16,6 +21,12 @@ export function Layout() {
               {item.label}
             </NavLink>
           ))}
+        </div>
+        <div className="app-nav__user">
+          {email && <span className="app-nav__email">{email}</span>}
+          <button type="button" className="btn" onClick={() => void signOut()}>
+            ログアウト
+          </button>
         </div>
       </nav>
       <main className="app-main">

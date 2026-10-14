@@ -9,7 +9,7 @@ import type {
   YutaiForecastDetail,
   YutaiTdnetEventsResponse,
 } from './types';
-import { clearStoredAppPassword, getStoredAppPassword } from '../lib/appPassword';
+import { getAccessToken, signIn } from '../lib/auth';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string | undefined;
 
@@ -28,18 +28,26 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error('VITE_API_BASE_URL is not configured. See frontend/.env.example.');
   }
 
+  const accessToken = await getAccessToken();
+  if (!accessToken) {
+    // ログインが切れている(リフレッシュにも失敗した)。ログイン画面へ戻す。
+    signIn();
+    throw new ApiError(401, 'ログインの有効期限が切れました。ログイン画面へ移動します');
+  }
+
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      'x-app-password': getStoredAppPassword() ?? '',
+      Authorization: `Bearer ${accessToken}`,
       ...init?.headers,
     },
   });
 
   if (response.status === 401) {
-    clearStoredAppPassword();
-    throw new ApiError(401, 'パスワードが正しくありません');
+    // トークンが無効になった(管理者による停止・失効など)。ログインし直してもらう。
+    signIn();
+    throw new ApiError(401, 'ログインの有効期限が切れました。ログイン画面へ移動します');
   }
 
   if (response.status === 204) {

@@ -705,7 +705,31 @@ async function listTdnetEvents(): Promise<APIGatewayProxyResultV2> {
   return jsonResponse(200, { events });
 }
 
+export interface Caller {
+  // CognitoのユーザーID。メールアドレスと違って変わらないので、ユーザー別データの
+  // パーティションキーにはこれを使う。
+  sub: string;
+  // トークンにemailクレームがある場合だけ入る(Cognitoのアクセストークンには入らない)。
+  email: string | null;
+}
+
+// HTTP APIのJWT authorizer(Cognito User Pool)が検証済みのクレームから呼び出し元を取り出す。
+// クレームやsubが無いのはauthorizerの設定漏れなので、呼び出し側は処理せず401にする。
+export function getCaller(event: APIGatewayProxyEventV2): Caller | null {
+  const claims = (event.requestContext as { authorizer?: { jwt?: { claims?: Record<string, unknown> } } } | undefined)
+    ?.authorizer?.jwt?.claims;
+  if (!claims) return null;
+  const { sub, email } = claims;
+  if (typeof sub !== 'string' || sub === '') return null;
+  return { sub, email: typeof email === 'string' && email !== '' ? email : null };
+}
+
 export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
+  const caller = getCaller(event);
+  if (!caller) return jsonResponse(401, { message: 'Unauthorized' });
+  // 誰がどのルートを呼んだかをCloudWatch Logsで追えるようにする(メールアドレスは出さない)。
+  console.log(JSON.stringify({ event: 'api-access', sub: caller.sub, routeKey: event.routeKey }));
+
   const ticker = event.pathParameters?.ticker;
 
   switch (event.routeKey) {

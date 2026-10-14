@@ -114,6 +114,23 @@ a {
   background: var(--surface-alt);
 }
 
+/* ログイン中のユーザーとログアウト。ナビの右端に寄せる */
+.app-nav__user {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.app-nav__email {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .app-main {
   flex: 1;
   width: 100%;

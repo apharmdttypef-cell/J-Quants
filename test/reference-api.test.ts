@@ -25,15 +25,27 @@ process.env.YUTAI_TDNET_EVENT_TABLE_NAME = 'JQuantsYutaiTdnetEvent';
 process.env.TSE_MARGIN_FEATURES_ENABLED = 'true';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { handler } = require('../lambda/reference-api/index') as {
+const { handler, getCaller } = require('../lambda/reference-api/index') as {
   handler: (event: APIGatewayProxyEventV2) => Promise<APIGatewayProxyResultV2>;
+  getCaller: (event: APIGatewayProxyEventV2) => { sub: string; email: string | null } | null;
 };
+
+// JWT authorizer(Cognito)を通過したリクエストを模す。claims: nullで「クレーム無し」
+// (authorizerの設定漏れ)を作れる。
+const DEFAULT_CLAIMS = { sub: 'test-sub-0001', email: 'tester@example.com' };
 
 function makeEvent(
   routeKey: string,
-  options: { pathParameters?: Record<string, string>; queryStringParameters?: Record<string, string>; body?: string } = {},
+  options: {
+    pathParameters?: Record<string, string>;
+    queryStringParameters?: Record<string, string>;
+    body?: string;
+    claims?: Record<string, unknown> | null;
+  } = {},
 ): APIGatewayProxyEventV2 {
-  return { routeKey, ...options } as unknown as APIGatewayProxyEventV2;
+  const { claims = DEFAULT_CLAIMS, ...rest } = options;
+  const requestContext = claims === null ? {} : { authorizer: { jwt: { claims, scopes: null } } };
+  return { routeKey, requestContext, ...rest } as unknown as APIGatewayProxyEventV2;
 }
 
 function body(result: APIGatewayProxyResultV2): unknown {
@@ -160,6 +172,48 @@ test('the old yutai list route GET /yutai is gone (merged into GET /yutai/foreca
   const result = await handler(makeEvent('GET /yutai', { queryStringParameters: {} }));
 
   expect((result as { statusCode: number }).statusCode).toBe(404);
+});
+
+test('getCaller identifies the user by sub and passes email through when the token carries it', () => {
+  expect(getCaller(makeEvent('GET /yutai/forecast'))).toEqual({ sub: 'test-sub-0001', email: 'tester@example.com' });
+});
+
+test('getCaller returns email: null when the token has no email claim (Cognito access tokens do not)', () => {
+  const event = makeEvent('GET /yutai/forecast', { claims: { sub: 'test-sub-0002', client_id: 'abc', token_use: 'access' } });
+  expect(getCaller(event)).toEqual({ sub: 'test-sub-0002', email: null });
+});
+
+test('getCaller returns null when there are no claims or no sub', () => {
+  expect(getCaller(makeEvent('GET /yutai/forecast', { claims: null }))).toBeNull();
+  expect(getCaller(makeEvent('GET /yutai/forecast', { claims: { email: 'x@example.com' } }))).toBeNull();
+  expect(getCaller(makeEvent('GET /yutai/forecast', { claims: { sub: '' } }))).toBeNull();
+});
+
+test('a request without verified claims (authorizer misconfigured) gets 401 and touches nothing', async () => {
+  const result = await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: {}, claims: null }));
+
+  expect((result as { statusCode: number }).statusCode).toBe(401);
+  expect(mockSend).not.toHaveBeenCalled();
+});
+
+test('every request logs who called which route as structured JSON', async () => {
+  const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+  try {
+    await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: {} }));
+
+    const entries = logSpy.mock.calls
+      .map(([line]) => {
+        try {
+          return JSON.parse(String(line)) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry): entry is Record<string, unknown> => entry !== null);
+    expect(entries).toContainEqual(expect.objectContaining({ event: 'api-access', sub: 'test-sub-0001', routeKey: 'GET /yutai/forecast' }));
+  } finally {
+    logSpy.mockRestore();
+  }
 });
 
 test('unknown route returns 404', async () => {

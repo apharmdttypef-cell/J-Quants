@@ -2,7 +2,9 @@ import * as cdk from 'aws-cdk-lib/core';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { JQuantsStack } from '../lib/j-quants-stack';
 
-process.env.APP_PASSWORD = 'test-app-password';
+// 共有パスワード(APP_PASSWORD)は廃止した。環境変数が無くても合成できることを、
+// このファイル全体で確かめる(どのテストもAPP_PASSWORDを設定しない)。
+delete process.env.APP_PASSWORD;
 
 function synth() {
   const app = new cdk.App();
@@ -10,48 +12,84 @@ function synth() {
   return Template.fromStack(stack);
 }
 
-// bin/j-quants.tsは通常Secrets Managerから読んだ値をappPasswordプロパティで渡す
-// (デプロイ時に毎回環境変数を打たずに済むようにするため)。環境変数は初回デプロイと
-// ローテーション時のフォールバック。両方の経路が同じ場所に反映されることを検証する。
-test('appPassword prop takes precedence over the APP_PASSWORD env var, and both reach the secret and the CloudFront Function', () => {
-  const app = new cdk.App();
-  const stack = new JQuantsStack(app, 'PropPasswordStack', { appPassword: 'from-prop' });
-  const template = Template.fromStack(stack);
-
-  // Secrets Manager側
-  template.hasResourceProperties('AWS::SecretsManager::Secret', {
-    Name: 'JQuantsAppPassword',
-    SecretString: 'from-prop',
+// テスト合成は1ファイルで何度も走ると遅い(全Lambdaをesbuildで束ねる)ので、
+// 認証まわりの検証は1回の合成にまとめる。
+describe('Cognito user authentication', () => {
+  let template: Template;
+  beforeAll(() => {
+    template = synth();
   });
 
-  // CloudFront Function側(Basic認証は`jquants:<password>`のbase64を埋め込む)
-  const expected = Buffer.from('jquants:from-prop').toString('base64');
-  const functions = template.findResources('AWS::CloudFront::Function');
-  const codes = Object.values(functions).map(
-    (f) => (f as { Properties: { FunctionCode: string } }).Properties.FunctionCode,
-  );
-  expect(codes.some((c) => c.includes(expected))).toBe(true);
-  // 環境変数の値(test-app-password)が使われていないこと
-  expect(codes.some((c) => c.includes(Buffer.from('jquants:test-app-password').toString('base64')))).toBe(false);
-});
-
-test('falls back to the APP_PASSWORD env var when no appPassword prop is given', () => {
-  const template = synth(); // propsなし → process.env.APP_PASSWORD = 'test-app-password'
-
-  template.hasResourceProperties('AWS::SecretsManager::Secret', {
-    Name: 'JQuantsAppPassword',
-    SecretString: 'test-app-password',
+  test('the user pool is invite-only, email sign-in, protected from deletion, and retained', () => {
+    template.hasResourceProperties('AWS::Cognito::UserPool', {
+      AdminCreateUserConfig: Match.objectLike({ AllowAdminCreateUserOnly: true }),
+      UsernameAttributes: ['email'],
+      DeletionProtection: 'ACTIVE',
+      UserPoolTier: 'ESSENTIALS',
+    });
+    template.hasResource('AWS::Cognito::UserPool', { DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' });
   });
-});
 
-test('throws when neither the appPassword prop nor the APP_PASSWORD env var is available', () => {
-  const saved = process.env.APP_PASSWORD;
-  delete process.env.APP_PASSWORD;
-  try {
-    expect(() => new JQuantsStack(new cdk.App(), 'NoPasswordStack')).toThrow(/appPassword prop or APP_PASSWORD/);
-  } finally {
-    process.env.APP_PASSWORD = saved;
-  }
+  test('the SPA client uses the authorization code flow without a secret, and allows the CloudFront and local dev URLs', () => {
+    template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+      GenerateSecret: false,
+      AllowedOAuthFlows: ['code'],
+      AllowedOAuthFlowsUserPoolClient: true,
+      AllowedOAuthScopes: Match.arrayWith(['openid', 'email']),
+      EnableTokenRevocation: true,
+      PreventUserExistenceErrors: 'ENABLED',
+      CallbackURLs: Match.arrayWith(['http://localhost:5173/']),
+      LogoutURLs: Match.arrayWith(['http://localhost:5173/']),
+    });
+    // CloudFrontのドメインは合成時にはトークンなので、文字列化して含まれることを見る
+    const clients = template.findResources('AWS::Cognito::UserPoolClient');
+    const callbackJson = JSON.stringify(Object.values(clients).map((c) => (c as { Properties: { CallbackURLs: unknown } }).Properties.CallbackURLs));
+    expect(callbackJson).toContain('FrontendDistribution');
+  });
+
+  test('the managed login domain uses the beta prefix and has default branding', () => {
+    template.hasResourceProperties('AWS::Cognito::UserPoolDomain', {
+      Domain: 'jquants-beta-vqvfk',
+      ManagedLoginVersion: 2,
+    });
+    // 新しいManaged Loginはブランディングが無いとログイン画面が表示されない
+    template.hasResourceProperties('AWS::Cognito::ManagedLoginBranding', { UseCognitoProvidedValues: true });
+  });
+
+  test('every API route is protected by the Cognito JWT authorizer', () => {
+    template.hasResourceProperties('AWS::ApiGatewayV2::Authorizer', { AuthorizerType: 'JWT' });
+    const routes = template.findResources('AWS::ApiGatewayV2::Route');
+    expect(Object.keys(routes).length).toBeGreaterThan(0);
+    for (const route of Object.values(routes)) {
+      const props = (route as { Properties: { AuthorizationType?: string; AuthorizerId?: unknown } }).Properties;
+      expect(props.AuthorizationType).toBe('JWT');
+      expect(props.AuthorizerId).toBeDefined();
+    }
+  });
+
+  test('CORS accepts the Authorization header and no longer the shared-password header', () => {
+    const apis = template.findResources('AWS::ApiGatewayV2::Api');
+    const allowHeaders = Object.values(apis).flatMap(
+      (a) => (a as { Properties: { CorsConfiguration?: { AllowHeaders?: string[] } } }).Properties.CorsConfiguration?.AllowHeaders ?? [],
+    );
+    expect(allowHeaders).toContain('Authorization');
+    expect(allowHeaders).not.toContain('x-app-password');
+  });
+
+  test('the shared-password pieces are gone (CloudFront Basic auth, authorizer Lambda, password secret)', () => {
+    template.resourceCountIs('AWS::CloudFront::Function', 0);
+    const secrets = template.findResources('AWS::SecretsManager::Secret');
+    const names = Object.values(secrets).map((s) => (s as { Properties: { Name?: string } }).Properties.Name);
+    expect(names).not.toContain('JQuantsAppPassword');
+    const functions = template.findResources('AWS::Lambda::Function');
+    expect(Object.keys(functions).some((id) => id.startsWith('AuthorizerFunction'))).toBe(false);
+  });
+
+  test('outputs what the frontend needs to configure the login', () => {
+    const outputs = template.findOutputs('*');
+    expect(Object.keys(outputs)).toEqual(expect.arrayContaining(['UserPoolId', 'UserPoolClientId', 'CognitoDomain']));
+    expect(JSON.stringify(outputs.CognitoDomain.Value)).toContain('jquants-beta-vqvfk.auth.');
+  });
 });
 
 test('creates the JQuantsStockPrices table with ticker/date key and RETAIN policy', () => {
@@ -193,38 +231,6 @@ test('creates the HTTP API with the price/summary and yutai routes', () => {
   expect(actualRouteKeys).not.toContain('GET /yutai');
 });
 
-test('protects every route with the shared-password Lambda authorizer', () => {
-  const template = synth();
-
-  template.hasResourceProperties('AWS::ApiGatewayV2::Authorizer', {
-    AuthorizerType: 'REQUEST',
-    IdentitySource: ['$request.header.x-app-password'],
-  });
-
-  const routes = template.findResources('AWS::ApiGatewayV2::Route');
-  const routeKeys = Object.values(routes).map((r) => (r as { Properties: { RouteKey: string } }).Properties.RouteKey);
-  expect(routeKeys.length).toBeGreaterThan(0);
-  for (const route of Object.values(routes)) {
-    expect((route as { Properties: { AuthorizerId?: unknown } }).Properties.AuthorizerId).toBeDefined();
-  }
-});
-
-test('protects the frontend with a CloudFront Function performing Basic auth', () => {
-  const template = synth();
-
-  template.hasResourceProperties('AWS::CloudFront::Function', {
-    FunctionConfig: Match.objectLike({ Runtime: 'cloudfront-js-2.0' }),
-  });
-
-  template.hasResourceProperties('AWS::CloudFront::Distribution', {
-    DistributionConfig: Match.objectLike({
-      DefaultCacheBehavior: Match.objectLike({
-        FunctionAssociations: Match.arrayWith([Match.objectLike({ EventType: 'viewer-request' })]),
-      }),
-    }),
-  });
-});
-
 test('creates the JQuantsYutaiMaster table with ticker key and RETAIN policy', () => {
   const template = synth();
 
@@ -292,17 +298,6 @@ test('creates the gyakuhibu history batch Lambda wired to the rights-date/master
     ScheduleExpression: 'cron(0 10 * * ? *)',
     State: 'ENABLED',
   });
-});
-
-test('throws a clear error when APP_PASSWORD is not set', () => {
-  const original = process.env.APP_PASSWORD;
-  delete process.env.APP_PASSWORD;
-
-  try {
-    expect(() => new JQuantsStack(new cdk.App(), 'TestStack')).toThrow('APP_PASSWORD');
-  } finally {
-    process.env.APP_PASSWORD = original;
-  }
 });
 
 test('does not create a JQuantsYutaiRightsDate table (removed in favor of computed rights dates)', () => {

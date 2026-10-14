@@ -12,21 +12,16 @@ import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as scheduler_targets from 'aws-cdk-lib/aws-scheduler-targets';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
-import { HttpLambdaAuthorizer, HttpLambdaResponseType } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import { HttpUserPoolAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import { Construct } from 'constructs';
 
-export interface JQuantsStackProps extends cdk.StackProps {
-  /**
-   * フロント/APIを守る共有パスワード。通常は`bin/j-quants.ts`がSecrets Managerの
-   * `JQuantsAppPassword`からsynth時に読んで渡す(デプロイ時に環境変数を毎回渡さずに済む)。
-   * 省略時は環境変数`APP_PASSWORD`にフォールバックする — 初回デプロイ(シークレットが
-   * まだ存在しない)とローテーション(新しい値を明示的に入れたい)がこの経路。
-   */
-  readonly appPassword?: string;
-}
+// Cognito Managed Loginのドメイン(プレフィックス)。ログイン画面のURLとして利用者全員に
+// 見えるので、アカウントIDなどは含めない。リージョン内で一意である必要がある。
+const COGNITO_DOMAIN_PREFIX = 'jquants-beta-vqvfk';
 
 export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
@@ -42,7 +37,9 @@ export class JQuantsStack extends cdk.Stack {
   public readonly frontendBucket: s3.Bucket;
   public readonly distribution: cloudfront.Distribution;
 
-  constructor(scope: Construct, id: string, props?: JQuantsStackProps) {
+  public readonly userPool: cognito.UserPool;
+
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
     // スタンダードプラン依存機能(東証信用残の取得・現在需給ベース予測・信用残トレンド)の
@@ -150,44 +147,6 @@ export class JQuantsStack extends cdk.Stack {
     this.apiKeySecret = new secretsmanager.Secret(this, 'JQuantsApiKeySecret', {
       secretName: 'JQuantsApiKey',
       description: 'J-Quants API key (V2)',
-    });
-
-    // フロント/APIを未認証で公開しないための共有パスワード。Secrets Managerとフロント配信の
-    // 両方に同じ値を反映する。通常は`bin/j-quants.ts`がSecrets Managerから読んでpropsで渡すので
-    // デプロイ時に環境変数を渡す必要はない。環境変数はフォールバック(初回デプロイ・
-    // ローテーション時)。CloudFront FunctionはSecrets Managerを実行時参照できないため、
-    // どちらの経路でもsynth時に値が確定していなければならない。
-    const appPassword = props?.appPassword ?? process.env.APP_PASSWORD;
-    if (!appPassword) {
-      throw new Error(
-        'appPassword prop or APP_PASSWORD environment variable is required ' +
-          '(protects the frontend/API from being publicly open). Normally bin/j-quants.ts supplies it ' +
-          'from the JQuantsAppPassword secret; for the first deploy or a rotation use ' +
-          'APP_PASSWORD=xxxxx npx cdk deploy',
-      );
-    }
-
-    const appPasswordSecret = new secretsmanager.Secret(this, 'JQuantsAppPasswordSecret', {
-      secretName: 'JQuantsAppPassword',
-      description: 'Shared password protecting the frontend/API (checked by the Lambda authorizer)',
-      secretStringValue: cdk.SecretValue.unsafePlainText(appPassword),
-    });
-
-    const authorizerFn = new nodejs.NodejsFunction(this, 'AuthorizerFunction', {
-      entry: path.join(__dirname, '..', 'lambda', 'authorizer', 'index.ts'),
-      handler: 'handler',
-      runtime: lambda.Runtime.NODEJS_22_X,
-      timeout: cdk.Duration.seconds(5),
-      memorySize: 128,
-      bundling: { externalModules: ['@aws-sdk/*'] },
-      environment: { SECRET_ARN: appPasswordSecret.secretArn },
-    });
-    appPasswordSecret.grantRead(authorizerFn);
-
-    const apiAuthorizer = new HttpLambdaAuthorizer('ApiAuthorizer', authorizerFn, {
-      responseTypes: [HttpLambdaResponseType.SIMPLE],
-      identitySource: ['$request.header.x-app-password'],
-      resultsCacheTtl: cdk.Duration.minutes(5),
     });
 
     const priceBatchFn = new nodejs.NodejsFunction(this, 'PriceBatchFunction', {
@@ -635,36 +594,13 @@ export class JQuantsStack extends cdk.Stack {
       enforceSSL: true,
     });
 
-    // フロントも同じ共有パスワードでBasic認証をかける(CloudFront FunctionはSecrets
-    // Managerを実行時に参照できないため、synth時にAPP_PASSWORDを埋め込む)。
-    const basicAuthValue = Buffer.from(`jquants:${appPassword}`).toString('base64');
-    const basicAuthFn = new cloudfront.Function(this, 'BasicAuthFunction', {
-      code: cloudfront.FunctionCode.fromInline(`
-function handler(event) {
-  var request = event.request;
-  var expected = "Basic ${basicAuthValue}";
-  var provided = request.headers.authorization && request.headers.authorization.value;
-
-  if (provided !== expected) {
-    return {
-      statusCode: 401,
-      statusDescription: "Unauthorized",
-      headers: { "www-authenticate": { value: 'Basic realm="J-Quants"' } },
-    };
-  }
-
-  return request;
-}
-      `),
-      runtime: cloudfront.FunctionRuntime.JS_2_0,
-    });
-
+    // 静的ファイルは公開で配信する。バンドルに秘密情報は無く、データは全てAPI側
+    // (Cognito JWT authorizer)で守っている。
     this.distribution = new cloudfront.Distribution(this, 'FrontendDistribution', {
       defaultRootObject: 'index.html',
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(this.frontendBucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        functionAssociations: [{ function: basicAuthFn, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST }],
       },
       // SPA(React Router)のクライアントサイドルーティングのため、
       // 存在しないパスもindex.htmlにフォールバックさせる。
@@ -674,6 +610,63 @@ function handler(event) {
       ],
     });
 
+    // ユーザー別認証(管理者が招待した友人だけが使えるベータ)。
+    // 設計: docs/superpowers/specs/2026-10-07-cognito-auth-design.md
+    const frontendUrl = `https://${this.distribution.distributionDomainName}/`;
+    const localDevUrl = 'http://localhost:5173/';
+
+    // 招待済みユーザーはスタックを作り直しても残す(RETAIN + 削除保護)。
+    this.userPool = new cognito.UserPool(this, 'JQuantsUserPool', {
+      userPoolName: 'JQuantsUsers',
+      selfSignUpEnabled: false,
+      signInAliases: { email: true },
+      featurePlan: cognito.FeaturePlan.ESSENTIALS,
+      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      deletionProtection: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      userInvitation: {
+        emailSubject: 'J-Quants株価ビューア(ベータ)への招待',
+        emailBody:
+          'J-Quants株価ビューア(ベータ)に招待されました。<br><br>' +
+          'ログインID: {username}<br>仮パスワード: {####}<br><br>' +
+          `${frontendUrl} を開いてログインし、初回ログイン時に新しいパスワードを設定してください。`,
+      },
+    });
+
+    this.userPool.addDomain('JQuantsUserPoolDomain', {
+      cognitoDomain: { domainPrefix: COGNITO_DOMAIN_PREFIX },
+      managedLoginVersion: cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,
+    });
+
+    // SPA向け: 認可コード+PKCE、クライアントシークレットなし。
+    const userPoolClient = this.userPool.addClient('JQuantsWebClient', {
+      generateSecret: false,
+      oAuth: {
+        flows: { authorizationCodeGrant: true },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
+        callbackUrls: [frontendUrl, localDevUrl],
+        logoutUrls: [frontendUrl, localDevUrl],
+      },
+      supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
+      accessTokenValidity: cdk.Duration.hours(1),
+      idTokenValidity: cdk.Duration.hours(1),
+      refreshTokenValidity: cdk.Duration.days(7),
+      enableTokenRevocation: true,
+      preventUserExistenceErrors: true,
+    });
+
+    // 新しいManaged Loginはブランディングが無いとログイン画面が表示されない。
+    new cognito.CfnManagedLoginBranding(this, 'JQuantsManagedLoginBranding', {
+      userPoolId: this.userPool.userPoolId,
+      clientId: userPoolClient.userPoolClientId,
+      useCognitoProvidedValues: true,
+    });
+
+    // 全ルートでアクセストークンの署名・有効期限・client_idを検証する(Lambda不要)。
+    const apiAuthorizer = new HttpUserPoolAuthorizer('ApiAuthorizer', this.userPool, {
+      userPoolClients: [userPoolClient],
+    });
+
     // フロント(CloudFront配信)からのブラウザアクセスのみ許可。ローカル開発用にVite既定ポートも許可する。
     this.api = new apigwv2.HttpApi(this, 'JQuantsApi', {
       apiName: 'JQuants Reference API',
@@ -681,7 +674,7 @@ function handler(event) {
       corsPreflight: {
         allowOrigins: [`https://${this.distribution.distributionDomainName}`, 'http://localhost:5173'],
         allowMethods: [apigwv2.CorsHttpMethod.GET],
-        allowHeaders: ['Content-Type', 'x-app-password'],
+        allowHeaders: ['Content-Type', 'Authorization'],
       },
     });
 
@@ -727,5 +720,11 @@ function handler(event) {
     new cdk.CfnOutput(this, 'FrontendBucketName', { value: this.frontendBucket.bucketName });
     new cdk.CfnOutput(this, 'GyakuhibuValidationBucketName', { value: this.gyakuhibuValidationBucket.bucketName });
     new cdk.CfnOutput(this, 'DistributionId', { value: this.distribution.distributionId });
+    // フロントの.env(VITE_COGNITO_*)に設定する値。
+    new cdk.CfnOutput(this, 'UserPoolId', { value: this.userPool.userPoolId });
+    new cdk.CfnOutput(this, 'UserPoolClientId', { value: userPoolClient.userPoolClientId });
+    new cdk.CfnOutput(this, 'CognitoDomain', {
+      value: `https://${COGNITO_DOMAIN_PREFIX}.auth.${cdk.Aws.REGION}.amazoncognito.com`,
+    });
   }
 }

@@ -12,8 +12,10 @@
   "dependencies": {
     "@radix-ui/react-hover-card": "^1.1.23",
     "@tanstack/react-table": "^8.21.3",
+    "oidc-client-ts": "^3.5.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-oidc-context": "^3.3.1",
     "react-router-dom": "^7.18.2",
     "recharts": "^3.10.1"
   },
