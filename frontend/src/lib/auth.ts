@@ -44,7 +44,8 @@ export function signIn(): void {
   if (signinStarted) return;
   signinStarted = true;
   const state: SigninState = { returnTo: currentPath() };
-  void userManager.signinRedirect({ state }).catch((error: unknown) => {
+  // Managed Loginの表示言語(既定は英語)。
+  void userManager.signinRedirect({ state, extraQueryParams: { lang: 'ja' } }).catch((error: unknown) => {
     signinStarted = false;
     console.error('signinRedirect failed', error);
   });
