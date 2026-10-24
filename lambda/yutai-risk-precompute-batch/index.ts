@@ -14,7 +14,6 @@ import {
 } from '../shared/trading-calendar';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
-const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const TABLE_NAME = process.env.TABLE_NAME!; // 株価(JQuantsStockPrices)
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
 const SECRET_ARN = process.env.SECRET_ARN!;
@@ -64,18 +63,6 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
   } while (exclusiveStartKey);
 
   return rows;
-}
-
-async function hasMarginBalance(ticker: string): Promise<boolean> {
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: MARGIN_BALANCE_TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker',
-      ExpressionAttributeValues: { ':ticker': ticker },
-      Limit: 1,
-    }),
-  );
-  return (result.Items ?? []).length > 0;
 }
 
 async function latestClose(ticker: string): Promise<number | undefined> {
@@ -136,15 +123,17 @@ function fetchTradingCalendarCached(from: string, to: string, cache: Map<string,
 }
 
 async function calcRisk(
-  row: { ticker: string },
+  ticker: string,
+  marginName: string | null,
   shares: number,
   rightsDate: string | undefined,
   calendarCache: Map<string, CalendarDay[]>,
 ): Promise<RiskResult> {
   if (!rightsDate) return NA_RISK;
-  if (!(await hasMarginBalance(row.ticker))) return NA_RISK;
+  // 貸借銘柄でなければ(区分不明のnullを含む)逆日歩は見積もれない
+  if (marginName !== '貸借') return NA_RISK;
 
-  const closePrice = await latestClose(row.ticker);
+  const closePrice = await latestClose(ticker);
   if (closePrice === undefined) return NA_RISK;
 
   const calendarTo = new Date(rightsDate);
@@ -208,8 +197,8 @@ export const handler = async (): Promise<void> => {
       const generalMarginOnly = isGeneralMarginOnly(marginName);
       const risk = generalMarginOnly
         ? await calcGeneralMarginOnlyRisk(row.ticker, shares)
-        : await calcRisk(row, shares, rightsDate, calendarCache);
-      // 実績の集計は最大逆日歩の計算とは独立(信用残が無く最大逆日歩が出せない銘柄でも、
+        : await calcRisk(row.ticker, marginName, shares, rightsDate, calendarCache);
+      // 実績の集計は最大逆日歩の計算とは独立(貸借区分が不明で最大逆日歩が出せない銘柄でも、
       // 過去に実際に取られたコストは出す価値がある)。ただし制度信用で売れない銘柄の実績は
       // 全て「発生しなかった」記録なので、「前回0円」と見せると誤解を招くため出さない。
       const actuals = generalMarginOnly
