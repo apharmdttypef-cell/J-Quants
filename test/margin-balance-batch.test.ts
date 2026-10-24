@@ -192,19 +192,44 @@ test('ヘッダーのみのCSV(パース結果0件)もnullと同じ扱いにす�
   expect(cursorWrites()).toEqual(['2026-10-21', '2026-10-22']);
 });
 
-test('取得失敗はその回を打ち切り、部分失敗なら例外にしない', async () => {
+test('取得失敗はその回を打ち切り、カーソルが進んだ部分失敗なら例外にしない', async () => {
   const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  mockTables({ master: ['7203'], cursor: '2026-10-21' });
+  mockFetchCsv
+    .mockResolvedValueOnce(csvFor([['7203', '東証', '100', '50']]))
+    .mockResolvedValueOnce(csvFor([['7203', '東証', '100', '50']]))
+    .mockRejectedValueOnce(new Error('taisyaku.jp error 503'));
+
+  await expect(handler()).resolves.toBeUndefined();
+
+  expect(fetchedDates()).toEqual(['2026-10-21', '2026-10-22', '2026-10-23']);
+  expect(cursorWrites()).toEqual(['2026-10-21', '2026-10-22']);
+  expect(error).toHaveBeenCalled();
+});
+
+test('カーソル日の取り直しだけ成功し次の日で失敗したら、進んでいないので例外', async () => {
+  jest.spyOn(console, 'error').mockImplementation(() => undefined);
   mockTables({ master: ['7203'], cursor: '2026-10-21' });
   mockFetchCsv
     .mockResolvedValueOnce(csvFor([['7203', '東証', '100', '50']]))
     .mockRejectedValueOnce(new Error('taisyaku.jp error 503'))
     .mockResolvedValue(csvFor([['7203', '東証', '100', '50']]));
 
-  await expect(handler()).resolves.toBeUndefined();
+  await expect(handler()).rejects.toThrow('no progress past cursor');
 
   expect(mockFetchCsv).toHaveBeenCalledTimes(2);
   expect(cursorWrites()).toEqual(['2026-10-21']);
-  expect(error).toHaveBeenCalled();
+});
+
+test('カーソル日が成功し今日が未公表(0件)なら、進んでいなくても例外にしない', async () => {
+  mockTables({ master: ['7203'], cursor: '2026-10-22' });
+  const csv = csvFor([['7203', '東証', '100', '50']]);
+  mockFetchCsv.mockImplementation(async (date: string) => (date === '2026-10-23' ? null : csv));
+
+  await expect(handler()).resolves.toBeUndefined();
+
+  expect(fetchedDates()).toEqual(['2026-10-22', '2026-10-23']);
+  expect(cursorWrites()).toEqual(['2026-10-22']);
 });
 
 test('DynamoDB書き込み失敗も打ち切り、1日目で失敗したら例外', async () => {

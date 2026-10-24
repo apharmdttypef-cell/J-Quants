@@ -68,6 +68,9 @@ async function writeCursor(date: string): Promise<void> {
 // taisyaku.jp(日証金)の全銘柄一括CSVを申込日ごとに1回取得し、優待マスタの銘柄だけを保存する。
 // 進捗はカーソル行(lastFetchedDate)で持ち、カーソル日自体も毎回取り直す。
 // 失敗した日はその回の取得を打ち切り、カーソルを連続した最後の成功日のままにする(次回そこから取り直す)。
+// カーソル日の取り直しは毎回成功しうるため、成功件数だけでは「カーソルの次の日が失敗し続けて止まっている」
+// 状態を検知できない。失敗があり、かつカーソルが開始時の値より先へ進まなかった回は例外にしてアラームに乗せる。
+// (今日が未公表で打ち切った回は失敗に数えないので、進まなくても例外にしない)
 export const handler = async (): Promise<void> => {
   const tickers = await getYutaiTickers();
   if (tickers.length === 0) {
@@ -147,6 +150,12 @@ export const handler = async (): Promise<void> => {
   // handlerが常にresolveすると全滅していても実行は"成功"に見えるため、例外にしてアラームに乗せる
   if (succeeded === 0 && failed > 0) {
     throw new Error(`margin-balance-batch: all fetches failed (${failed} failed of ${dates.length} planned)`);
+  }
+  const advanced = cursor !== null && (lastFetchedDate === null || cursor > lastFetchedDate);
+  if (failed > 0 && !advanced) {
+    throw new Error(
+      `margin-balance-batch: no progress past cursor ${lastFetchedDate} (${failed} failed of ${dates.length} planned)`,
+    );
   }
   if (succeeded > 0 && upserted === 0) {
     throw new Error(
