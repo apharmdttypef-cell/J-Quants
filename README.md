@@ -274,11 +274,11 @@ aws cloudfront create-invalidation --distribution-id <DistributionId> --paths '/
 
 信用残のデータ源をJ-Quants(スタンダードプラン)からtaisyaku.jp(日証金の貸借取引残高、認証不要)へ移した。J-Quants版の最終状態はタグ`margin-balance-jquants-final`。本番は2026-10-01からライトプランで`tseMarginFeatures=false`(信用残バッチのスケジュール無し・現在需給予測無し)のまま動いているため、この移行のデプロイで信用残バッチのスケジュールと現在需給予測が初めて有効になる。
 
-1. `ALERT_EMAIL`(2日連続失敗の通知先)は`cdk synth`/`cdk deploy`/テストのスタック合成で必須。未設定だとスタックのコンストラクタが例外を投げる。
-   - bash: `ALERT_EMAIL=you@example.com npx cdk deploy`
-   - PowerShell: `$env:ALERT_EMAIL='you@example.com'; npx cdk deploy`
+1. 2日連続失敗の通知先メールアドレスはSSM Parameter Store(`/j-quants/alert-email`、String、ap-northeast-1)から`cdk deploy`時に読む。環境変数は不要で、`npx cdk deploy`だけでよい。パラメータが無いとデプロイは失敗する。
+   - 初回の設定と変更(同じコマンド): `aws ssm put-parameter --name /j-quants/alert-email --type String --value you@example.com --overwrite`のあと`npx cdk deploy`
+   - Git Bashでは`/j-quants/...`がパス変換されるので先頭に`MSYS_NO_PATHCONV=1`を付ける
 2. デプロイ順はフロント(`aws s3 sync` + CloudFront invalidation)が先、`cdk deploy`が後。新しいAPIは`features`を返さず、旧フロントは`features`が無いと(`listState.data?.features.tseMargin`で)例外になるため。
-3. 初回デプロイ後、SNSの確認メール(`JQuantsBatchAlarmTopic`)のリンクを踏む。踏むまで通知は届かない。
+3. 初回デプロイ後(通知先を変えて購読が作り直されたときも)、SNSの確認メール(`JQuantsBatchAlarmTopic`)のリンクを踏む。踏むまで通知は届かない。
 4. バックフィル(3年=738営業日、1回あたり新規39日なので19回分): 定期実行だけなら約4週間。早めるなら、前の実行が終わってから次を呼ぶ(カーソルが競合するので同時に走らせない):
    ```
    aws lambda invoke --function-name <MarginBalanceBatchFunctionの名前> --cli-read-timeout 900 out.json

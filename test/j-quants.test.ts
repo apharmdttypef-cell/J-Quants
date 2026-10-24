@@ -4,8 +4,8 @@ import { readFileSync } from 'fs';
 import * as path from 'path';
 import { JQuantsStack } from '../lib/j-quants-stack';
 
-// 共有パスワード(APP_PASSWORD)は廃止済み。合成に必要な環境変数はALERT_EMAILだけ。
-process.env.ALERT_EMAIL = 'alerts@example.com';
+// 共有パスワード(APP_PASSWORD)は廃止済み。スタックの合成に環境変数は不要
+// (通知先メールはSSM Parameter Storeからデプロイ時に解決される)。
 
 function synth() {
   const app = new cdk.App();
@@ -341,7 +341,6 @@ test('notifies by email when the margin balance batch fails two days in a row', 
   template.resourceCountIs('AWS::SNS::Topic', 1);
   template.hasResourceProperties('AWS::SNS::Subscription', {
     Protocol: 'email',
-    Endpoint: 'alerts@example.com',
   });
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
     Namespace: 'AWS/Lambda',
@@ -358,15 +357,36 @@ test('notifies by email when the margin balance batch fails two days in a row', 
   });
 });
 
-test('fails to synthesize without ALERT_EMAIL', () => {
+test('reads the alarm email address from SSM Parameter Store and synthesizes without ALERT_EMAIL', () => {
   const saved = process.env.ALERT_EMAIL;
   try {
     delete process.env.ALERT_EMAIL;
-    expect(() => new JQuantsStack(new cdk.App(), 'NoAlertStack')).toThrow(/ALERT_EMAIL/);
-    process.env.ALERT_EMAIL = '';
-    expect(() => new JQuantsStack(new cdk.App(), 'EmptyAlertStack')).toThrow(/ALERT_EMAIL/);
+    const template = synth();
+    const json = template.toJSON();
+
+    const params = Object.entries(json.Parameters ?? {}).filter(
+      ([, p]: [string, any]) => p.Type === 'AWS::SSM::Parameter::Value<String>' && p.Default === '/j-quants/alert-email',
+    );
+    expect(params).toHaveLength(1);
+    const [paramLogicalId] = params[0];
+
+    template.hasResourceProperties('AWS::SNS::Subscription', {
+      Protocol: 'email',
+      Endpoint: { Ref: paramLogicalId },
+    });
+
+    // メールアドレスのリテラルがテンプレートに埋め込まれていない
+    const subscriptions = Object.values(json.Resources).filter((r: any) => r.Type === 'AWS::SNS::Subscription');
+    for (const sub of subscriptions as any[]) {
+      expect(typeof sub.Properties.Endpoint).toBe('object');
+      expect(JSON.stringify(sub.Properties.Endpoint)).not.toContain('@');
+    }
   } finally {
-    process.env.ALERT_EMAIL = saved;
+    if (saved === undefined) {
+      delete process.env.ALERT_EMAIL;
+    } else {
+      process.env.ALERT_EMAIL = saved;
+    }
   }
 });
 

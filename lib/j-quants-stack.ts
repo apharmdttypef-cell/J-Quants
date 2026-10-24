@@ -4,6 +4,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
@@ -27,6 +28,9 @@ import { Construct } from 'constructs';
 // 見えるので、アカウントIDなどは含めない。リージョン内で一意である必要がある。
 const COGNITO_DOMAIN_PREFIX = 'jquants-beta-vqvfk';
 
+// バッチ失敗の通知先メールアドレスを置くSSM Parameter Store(String)のパラメータ名。
+export const ALERT_EMAIL_PARAMETER_NAME = '/j-quants/alert-email';
+
 export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
   public readonly financialSummaryTable: dynamodb.Table;
@@ -47,12 +51,13 @@ export class JQuantsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // バッチ失敗の通知先メールアドレス。デプロイ時に環境変数で渡す
-    // (例: ALERT_EMAIL=you@example.com npx cdk deploy)。未設定・空文字なら合成を止める。
-    const alertEmail = process.env.ALERT_EMAIL;
-    if (!alertEmail) {
-      throw new Error('ALERT_EMAIL is required: set it when running cdk (e.g. ALERT_EMAIL=you@example.com npx cdk deploy)');
-    }
+    // バッチ失敗の通知先メールアドレスはSSM Parameter Store(/j-quants/alert-email)に置き、
+    // デプロイ時にCloudFormationが解決する。コード・テンプレートにアドレスは含めず、
+    // cdk deployに環境変数は不要。パラメータが無いとデプロイは失敗する(アドレスは必須)。
+    // 変更: aws ssm put-parameter --name /j-quants/alert-email --type String --value <addr> --overwrite
+    // のあと npx cdk deploy(Git Bashでは先頭にMSYS_NO_PATHCONV=1を付ける。付けないとパス変換される)。
+    // 購読が作り直されると確認メールが届くので、リンクを踏むまで通知は届かない。
+    const alertEmail = ssm.StringParameter.valueForStringParameter(this, ALERT_EMAIL_PARAMETER_NAME);
 
     // バッチの連続失敗通知用トピック。今は信用残バッチだけが使うが、他のバッチの
     // 連続失敗通知にも使い回す。初回デプロイ後に届く確認メールのリンクを踏むまで通知は届かない。
