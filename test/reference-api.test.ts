@@ -22,7 +22,6 @@ process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'JQuantsGyakuhibuForecast';
 process.env.YUTAI_TDNET_EVENT_TABLE_NAME = 'JQuantsYutaiTdnetEvent';
-process.env.TSE_MARGIN_FEATURES_ENABLED = 'true';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler, getCaller } = require('../lambda/reference-api/index') as {
@@ -319,6 +318,7 @@ test('GET /yutai/{ticker} returns basic info, the gyakuhibu amounts, and rights 
     risk: { maxGyakuhibu: number };
     rightsHistory: Array<{ rightsDate: string; totalAmount: number }>;
   };
+  expect(parsed).not.toHaveProperty('features');
   expect(parsed.basicInfo.closePrice).toBe(500);
   expect(parsed.risk).toEqual({ maxGyakuhibu: 200, maxRate: 2, days: 1 });
   expect(parsed.rightsHistory).toEqual([{ rightsDate: '2026-03-30', totalAmount: 680, days: 2, avgRate: 0.4 }]);
@@ -398,27 +398,62 @@ test('GET /yutai/{ticker} returns rightsDate: null and companyName: null (not mi
   expect(parsed.risk).toEqual({ maxGyakuhibu: null, maxRate: null, days: null });
 });
 
-test('GET /yutai/{ticker}/margin-trend returns the balance time series in ascending date order', async () => {
-  mockSend.mockResolvedValueOnce({
-    Items: [
-      { ticker: '1234', date: '2026-08-05', financingBalance: 100, lendingBalance: 200 },
-      { ticker: '1234', date: '2026-08-04', financingBalance: 90, lendingBalance: 180 },
-    ],
-  });
+test('GET /yutai/{ticker}/margin-trend returns only taisyaku rows in ascending date order with a lending ratio', async () => {
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'clearImmediate', 'queueMicrotask'] })
+    .setSystemTime(new Date('2026-10-23T00:00:00Z'));
+  try {
+    mockSend.mockResolvedValueOnce({
+      Items: [
+        { ticker: '1234', date: '2026-08-04', financingBalance: 90, lendingBalance: 180, source: 'taisyaku' },
+        { ticker: '1234', date: '2026-08-05', financingBalance: 100, lendingBalance: 0, source: 'taisyaku' },
+        { ticker: '1234', date: '2026-08-05', financingBalance: 5, lendingBalance: 5, source: 'weekly' }, // Filterをすり抜けた想定
+      ],
+    });
+
+    const result = await handler(
+      makeEvent('GET /yutai/{ticker}/margin-trend', { pathParameters: { ticker: '1234' } }),
+    );
+
+    expect((result as { statusCode: number }).statusCode).toBe(200);
+    expect(body(result)).toEqual({
+      ticker: '1234',
+      range: '1y',
+      points: [
+        { date: '2026-08-04', financingBalance: 90, lendingBalance: 180, lendingRatio: 0.5 },
+        { date: '2026-08-05', financingBalance: 100, lendingBalance: 0, lendingRatio: null },
+      ],
+    });
+    const input = mockSend.mock.calls[0][0];
+    expect(input).toMatchObject({
+      TableName: 'JQuantsMarginBalance',
+      KeyConditionExpression: 'ticker = :ticker AND #date >= :from',
+      ExpressionAttributeValues: { ':ticker': '1234', ':from': '2025-10-23', ':source': 'taisyaku' },
+      FilterExpression: '#source = :source',
+      ScanIndexForward: true,
+    });
+    expect(input).not.toHaveProperty('Limit');
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('GET /yutai/{ticker}/margin-trend follows LastEvaluatedKey', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '1234', date: '2026-08-04', financingBalance: 90, lendingBalance: 180, source: 'taisyaku' }],
+      LastEvaluatedKey: { ticker: '1234', date: '2026-08-04' },
+    })
+    .mockResolvedValueOnce({
+      Items: [{ ticker: '1234', date: '2026-08-05', financingBalance: 100, lendingBalance: 200, source: 'taisyaku' }],
+    });
 
   const result = await handler(
     makeEvent('GET /yutai/{ticker}/margin-trend', { pathParameters: { ticker: '1234' } }),
   );
 
-  expect((result as { statusCode: number }).statusCode).toBe(200);
-  expect(body(result)).toEqual({
-    ticker: '1234',
-    range: '1y',
-    points: [
-      { date: '2026-08-04', financingBalance: 90, lendingBalance: 180 },
-      { date: '2026-08-05', financingBalance: 100, lendingBalance: 200 },
-    ],
-  });
+  expect((body(result) as { points: unknown[] }).points).toHaveLength(2);
+  expect(mockSend).toHaveBeenCalledTimes(2);
+  expect(mockSend.mock.calls[1][0]).toMatchObject({ ExclusiveStartKey: { ticker: '1234', date: '2026-08-04' } });
 });
 
 test('GET /yutai/forecast joins master and forecast tables by ticker and filters by forecastStatus', async () => {
@@ -614,7 +649,7 @@ const TSE_ROW = {
   },
 };
 
-test('GET /yutai/forecast includes tseForecast and features.tseMargin=true when the flag is on', async () => {
+test('GET /yutai/forecast includes tseForecast', async () => {
   mockSend
     .mockResolvedValueOnce({
       Items: [{ ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }],
@@ -623,8 +658,8 @@ test('GET /yutai/forecast includes tseForecast and features.tseMargin=true when 
 
   const result = await handler(makeEvent('GET /yutai/forecast', {}));
 
-  const parsed = body(result) as { tickers: Array<{ tseForecast: Record<string, unknown> | null }>; features: { tseMargin: boolean } };
-  expect(parsed.features).toEqual({ tseMargin: true });
+  const parsed = body(result) as { tickers: Array<{ tseForecast: Record<string, unknown> | null }> };
+  expect(parsed).not.toHaveProperty('features');
   expect(parsed.tickers[0].tseForecast).toMatchObject({
     snapshotDate: '2026-07-31', lagDays: 27, lagBucket: '22+', bin: '1〜2', forecastP50: 500, forecastStatus: 'caution', lendingGrowth4w: 2,
   });
@@ -645,27 +680,7 @@ test('GET /yutai/forecast returns tseForecast: null for a ticker whose forecast 
   expect(parsed.tickers[0]).toHaveProperty('tseForecast', null);
 });
 
-test('GET /yutai/forecast nulls tseForecast and reports features.tseMargin=false when the flag is off', async () => {
-  process.env.TSE_MARGIN_FEATURES_ENABLED = 'false';
-  try {
-    mockSend
-      .mockResolvedValueOnce({
-        Items: [{ ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }],
-      })
-      .mockResolvedValueOnce({ Items: [TSE_ROW] });
-
-    const result = await handler(makeEvent('GET /yutai/forecast', {}));
-
-    const parsed = body(result) as { tickers: Array<Record<string, unknown>>; features: { tseMargin: boolean } };
-    expect(parsed.features).toEqual({ tseMargin: false });
-    expect(parsed.tickers[0]).toHaveProperty('tseForecast', null);
-    expect(parsed.tickers[0]).toHaveProperty('forecast'); // 過去実績ベースは影響を受けない
-  } finally {
-    process.env.TSE_MARGIN_FEATURES_ENABLED = 'true';
-  }
-});
-
-test('GET /yutai/{ticker}/forecast includes tseForecast and features', async () => {
+test('GET /yutai/{ticker}/forecast includes tseForecast and no features key', async () => {
   mockSend
     .mockResolvedValueOnce({
       Item: { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 },
@@ -677,9 +692,33 @@ test('GET /yutai/{ticker}/forecast includes tseForecast and features', async () 
 
   const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '1234' } }));
 
-  const parsed = body(result) as { tseForecast: Record<string, unknown> | null; features: { tseMargin: boolean } };
-  expect(parsed.features).toEqual({ tseMargin: true });
+  const parsed = body(result) as { tseForecast: Record<string, unknown> | null };
+  expect(parsed).not.toHaveProperty('features');
   expect(parsed.tseForecast).toMatchObject({ snapshotDate: '2026-07-31', lagBucket: '22+', forecastP90: 2500 });
+});
+
+test('GET /yutai/{ticker}/forecast returns the latest taisyaku row as marginTrend.latest', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '1234', companyName: 'A', content: 'A優待', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 },
+    }) // master get
+    .mockResolvedValueOnce({ Item: TSE_ROW }) // forecast get
+    .mockResolvedValueOnce({}) // _POOL_ get
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual query
+    .mockResolvedValueOnce({
+      Items: [
+        { date: '2026-10-23', financingBalance: 10, lendingBalance: 20, source: 'taisyaku' },
+        { date: '2026-10-22', financingBalance: 11, lendingBalance: 21, source: 'taisyaku' },
+      ],
+    }); // margin balance query
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}/forecast', { pathParameters: { ticker: '1234' } }));
+
+  const parsed = body(result) as { marginTrend: { latest: Record<string, unknown> | null } };
+  expect(parsed.marginTrend.latest).toEqual({ date: '2026-10-23', financingBalance: 10, lendingBalance: 20 });
+  const input = mockSend.mock.calls[4][0];
+  expect(input).toMatchObject({ ScanIndexForward: false, FilterExpression: '#source = :source' });
+  expect(input).not.toHaveProperty('Limit');
 });
 
 test('GET /yutai/tdnet-events queries the event table by fixed pk and returns items newest-first', async () => {
