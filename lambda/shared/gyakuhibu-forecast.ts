@@ -88,7 +88,7 @@ export const BIN_EDGES: ReadonlyArray<{ label: string; lo: number; hi: number }>
 // 縮小推定の強さ。銘柄実績がK件あればプールと重み半々になる(w = n_t/(n_t+K))。
 export const SHRINKAGE_K = 4;
 
-// --- 東証信用残(J-Quants margin-interest / margin-alert)ベースの「現在需給」予測用 ---
+// --- 日証金の貸借取引残高(JQuantsMarginBalanceのsource=taisyaku)ベースの「現在需給」予測用 ---
 // 設計: docs/superpowers/specs/2026-09-09-tse-margin-forecast-design.md
 
 // スナップショット日→権利日の暦日数でキャリブレーションを分ける3バケット。
@@ -243,9 +243,9 @@ export function buildPool(samples: ForecastSample[]): PoolBin[] {
 // 次回権利日の貸株超過率シナリオを3段階の優先順位で決める:
 //   1. 同銘柄の過去権利日サンプルのうち、次回と同じ月があれば直近(rightsDateが新しい方)
 //   2. 同月が無ければ、同銘柄の全サンプル中で最も新しい権利日
-//   3. 銘柄サンプルが1件も無ければ、東証信用残(mkt-margin-int)の直近値から計算(参考値)
+//   3. 銘柄サンプルが1件も無ければ、信用残テーブルの直近値から計算(参考値)
 // ※ 2026-09-09以降、過去実績ベース予測はtseLatestにnullを渡し('current-tse'を使わない)、
-//    東証信用残は現在需給ベース予測(gyakuhibu-forecast-batch/tse-forecast.ts)側でのみ使う。
+//    信用残テーブルは現在需給ベース予測(gyakuhibu-forecast-batch/tse-forecast.ts)側でのみ使う。
 //   4. どちらも無ければ'none'(超過率なし)
 // 同銘柄のサンプルは超過率で条件付けしない(件数が少なく、同銘柄・同月の季節性のほうが
 // 強いため)。

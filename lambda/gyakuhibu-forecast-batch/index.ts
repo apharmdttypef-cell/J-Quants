@@ -1,7 +1,7 @@
 // 逆日歩予測バッチ: 優待マスタ・逆日歩実績履歴を組み合わせ、
 // lambda/shared/gyakuhibu-forecast.tsの純粋関数でJQuantsGyakuhibuForecastテーブルへ
 // 銘柄ごとの予測(+全銘柄横断のプール曲線 `_POOL_`)を書き込む。
-// フラグ(TSE_MARGIN_FEATURES_ENABLED)有効時は、東証信用残ベースの現在需給予測(tse-forecast.ts)も同じ行のtseForecast属性と_POOL_TSE_行へ書く。
+// 日証金の貸借取引残高(taisyaku.jp)ベースの現在需給予測(tse-forecast.ts)も、同じ行のtseForecast属性と_POOL_TSE_行へ書く。
 // 設計: docs/superpowers/specs/2026-09-05-gyakuhibu-forecast-design.md
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
@@ -32,12 +32,6 @@ const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 // 非有限値はnullに変換する。
 function finiteOrNull(value: number | null): number | null {
   return value !== null && Number.isFinite(value) ? value : null;
-}
-
-// スタンダードプラン依存の現在需給ベース予測を実行するか。テストで切り替えられるよう
-// 呼び出しごとに環境変数を読む。
-function tseMarginFeaturesEnabled(): boolean {
-  return process.env.TSE_MARGIN_FEATURES_ENABLED === 'true';
 }
 
 function finitePools(pools: TsePools): Record<string, unknown[]> {
@@ -156,14 +150,10 @@ export const handler = async (): Promise<void> => {
 
   const samplesByTicker = groupByTicker(allSamples);
   const pool = buildPool(allSamples);
-  // 現在需給ベース予測(スタンダードプラン依存)。無効時は信用残テーブルに一切触れない。
-  const tse = tseMarginFeaturesEnabled()
-    ? await (async () => {
-        const snapshots = await scanMarginSnapshots(ddbDocClient, MARGIN_BALANCE_TABLE_NAME);
-        const bucketSamples = buildTseSamples(allSamples, snapshots);
-        return { snapshots, bucketSamples, pools: buildTsePools(bucketSamples) };
-      })()
-    : null;
+  // 現在需給ベース予測(日証金の貸借取引残高)。
+  const snapshots = await scanMarginSnapshots(ddbDocClient, MARGIN_BALANCE_TABLE_NAME);
+  const bucketSamples = buildTseSamples(allSamples, snapshots);
+  const tsePools = buildTsePools(bucketSamples);
   const computedAt = new Date().toISOString().slice(0, 10);
 
   // プール行は銘柄ループより先に書く(プールが無いと全銘柄naになるため、失敗時はログで目立たせる)。
@@ -178,14 +168,12 @@ export const handler = async (): Promise<void> => {
     }),
   );
 
-  if (tse) {
-    await ddbDocClient.send(
-      new PutCommand({
-        TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
-        Item: { ticker: '_POOL_TSE_', buckets: finitePools(tse.pools), computedAt },
-      }),
-    );
-  }
+  await ddbDocClient.send(
+    new PutCommand({
+      TableName: GYAKUHIBU_FORECAST_TABLE_NAME,
+      Item: { ticker: '_POOL_TSE_', buckets: finitePools(tsePools), computedAt },
+    }),
+  );
 
   let written = 0;
   for (const row of master) {
@@ -198,7 +186,7 @@ export const handler = async (): Promise<void> => {
 
       const generalMarginOnly = isGeneralMarginOnly(row.marginName);
       const tickerSamples = samplesByTicker.get(row.ticker) ?? [];
-      // 過去実績ベース予測は東証信用残(スタンダードプラン依存)を使わない。実績が無い銘柄は
+      // 過去実績ベース予測は日証金の貸借取引残高を使わない。実績が無い銘柄は
       // 'none'(対象外)になり、現在需給ベース予測(tse-forecast.ts)側が補う。
       const nextRightsMonth = Number(nextDate.slice(5, 7));
       const { scenario, excessRatio } = chooseScenario(tickerSamples, nextRightsMonth, null);
@@ -222,15 +210,15 @@ export const handler = async (): Promise<void> => {
         excessRatio: finiteOrNull(result.excessRatio),
         computedAt,
       };
-      if (tse && generalMarginOnly) {
+      if (generalMarginOnly) {
         item.tseForecast = null;
-      } else if (tse) {
+      } else {
         const tseForecast = computeTseForecast({
           ticker: row.ticker,
           today: computedAt,
           nextRightsDate: nextDate,
-          snapshots: tse.snapshots,
-          bucketSamples: tse.bucketSamples,
+          snapshots,
+          bucketSamples,
           maxGyakuhibu: row.maxGyakuhibu,
           value: row.value,
         });

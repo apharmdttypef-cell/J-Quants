@@ -1,7 +1,6 @@
-// 現在需給ベース予測: 東証信用残(JQuantsMarginBalance)のスナップショットから貸株超過率を求め、
-// 既存の統計モデル(lambda/shared/gyakuhibu-forecast.ts)を「東証超過率でキャリブレーションした
-// 別プール」で走らせる。スタンダードプラン依存のため、index.tsはTSE_MARGIN_FEATURES_ENABLEDが
-// 'true'のときだけこのモジュールを呼ぶ。
+// 現在需給ベース予測: 日証金の貸借取引残高(JQuantsMarginBalanceのsource=taisyaku、旧J-Quants行は混ぜない)の
+// スナップショットから貸株超過率を求め、既存の統計モデル(lambda/shared/gyakuhibu-forecast.ts)を
+// 「この超過率でキャリブレーションした別プール」で走らせる。
 // 設計: docs/superpowers/specs/2026-09-09-tse-margin-forecast-design.md
 import { DynamoDBDocumentClient, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
@@ -24,29 +23,31 @@ import { calendarDaysBetween } from '../shared/trading-calendar';
 export type TseBucketSamples = Record<LagBucket, ForecastSample[]>;
 export type TsePools = Record<LagBucket, PoolBin[]>;
 
-// JQuantsMarginBalanceを全件スキャンし、ticker→日付昇順のスナップショット列にする。
-// weekly(margin-interest)とdaily-alert(margin-alert)は同じ東証信用残として1系列に結合し、
-// 同じ日付に両方ある場合はdaily-alert(日々公表)を優先する。
+// JQuantsMarginBalanceのsource=taisyaku行だけをスキャンし、ticker→日付昇順のスナップショット列にする。
+// 旧J-Quants行(weekly/daily-alert)とカーソル行は、FilterExpressionとJS側の両方で除外する。
 export async function scanMarginSnapshots(
   ddbDocClient: DynamoDBDocumentClient,
   tableName: string,
 ): Promise<Map<string, MarginSnapshot[]>> {
-  const byTicker = new Map<string, Map<string, { snapshot: MarginSnapshot; source: string }>>();
+  const byTicker = new Map<string, Map<string, MarginSnapshot>>();
   let exclusiveStartKey: Record<string, unknown> | undefined;
 
   do {
-    const result = await ddbDocClient.send(new ScanCommand({ TableName: tableName, ExclusiveStartKey: exclusiveStartKey }));
+    const result = await ddbDocClient.send(
+      new ScanCommand({
+        TableName: tableName,
+        FilterExpression: '#source = :source',
+        ExpressionAttributeNames: { '#source': 'source' },
+        ExpressionAttributeValues: { ':source': 'taisyaku' },
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
     for (const item of result.Items ?? []) {
+      if (item.source !== 'taisyaku') continue;
       if (typeof item.ticker !== 'string' || typeof item.date !== 'string') continue;
       if (typeof item.financingBalance !== 'number' || typeof item.lendingBalance !== 'number') continue;
-      const perDate = byTicker.get(item.ticker) ?? new Map<string, { snapshot: MarginSnapshot; source: string }>();
-      const existing = perDate.get(item.date);
-      if (!existing || item.source === 'daily-alert') {
-        perDate.set(item.date, {
-          snapshot: { date: item.date, financingBalance: item.financingBalance, lendingBalance: item.lendingBalance },
-          source: String(item.source),
-        });
-      }
+      const perDate = byTicker.get(item.ticker) ?? new Map<string, MarginSnapshot>();
+      perDate.set(item.date, { date: item.date, financingBalance: item.financingBalance, lendingBalance: item.lendingBalance });
       byTicker.set(item.ticker, perDate);
     }
     exclusiveStartKey = result.LastEvaluatedKey;
@@ -56,7 +57,7 @@ export async function scanMarginSnapshots(
   for (const [ticker, perDate] of byTicker) {
     snapshots.set(
       ticker,
-      [...perDate.values()].map((v) => v.snapshot).sort((a, b) => a.date.localeCompare(b.date)),
+      [...perDate.values()].sort((a, b) => a.date.localeCompare(b.date)),
     );
   }
   return snapshots;

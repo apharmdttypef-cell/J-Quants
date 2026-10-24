@@ -14,7 +14,6 @@ process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'JQuantsGyakuhibuForecast';
-process.env.TSE_MARGIN_FEATURES_ENABLED = 'false';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/gyakuhibu-forecast-batch/index') as { handler: () => Promise<void> };
@@ -27,6 +26,25 @@ function putCalls() {
   return mockSend.mock.calls.filter(([cmd]) => 'Item' in (cmd as Record<string, unknown>));
 }
 
+// テーブル名でルーティングするモック(TSEが常時有効なので、呼び出し順に依存させない)。
+function mockTables(t: { master: unknown[]; actual: unknown[]; margin?: unknown[]; failPutFor?: string }) {
+  mockSend.mockImplementation(async (cmd: Record<string, unknown>) => {
+    if ('Item' in cmd) {
+      if (t.failPutFor && (cmd.Item as { ticker: string }).ticker === t.failPutFor) throw new Error('DynamoDB error');
+      return {};
+    }
+    if (cmd.TableName === 'JQuantsYutaiMaster') return { Items: t.master };
+    if (cmd.TableName === 'JQuantsGyakuhibuActual') return { Items: t.actual };
+    if (cmd.TableName === 'JQuantsMarginBalance') return { Items: t.margin ?? [] };
+    return {};
+  });
+}
+
+function itemOf(ticker: string): Record<string, unknown> {
+  const call = putCalls().find((c) => (c[0] as { Item: { ticker: string } }).Item.ticker === ticker);
+  return (call![0] as { Item: Record<string, unknown> }).Item;
+}
+
 function withFixedNow(fn: () => Promise<void>): Promise<void> {
   jest.useFakeTimers({
     doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick'],
@@ -34,34 +52,30 @@ function withFixedNow(fn: () => Promise<void>): Promise<void> {
   return fn().finally(() => jest.useRealTimers());
 }
 
+const ACTUAL_1234 = {
+  ticker: '1234', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
+  avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
+};
+const MASTER_1234 = { ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 };
+
 test('writes the _POOL_ row before any ticker row', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
-      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan (履歴なし)
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}); // 1234のforecast put
+    mockTables({ master: [MASTER_1234], actual: [] });
 
     await handler();
 
     const puts = putCalls();
-    expect(puts).toHaveLength(2);
-    expect((puts[0][0] as { Item: { ticker: string } }).Item.ticker).toBe('_POOL_');
-    expect((puts[1][0] as { Item: { ticker: string } }).Item.ticker).toBe('1234');
+    expect(puts.map((c) => (c[0] as { Item: { ticker: string } }).Item.ticker)).toEqual(['_POOL_', '_POOL_TSE_', '1234']);
   });
 });
 
-test('does not fall back to current-tse: a ticker with no history gets scenario none and never queries the margin table', async () => {
+test('does not fall back to current-tse: a ticker with no history gets scenario none and never issues a per-ticker margin Query', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
-      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan (履歴なし)
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}); // 1234のforecast put
+    mockTables({ master: [MASTER_1234], actual: [] });
 
     await handler();
 
-    const item = (putCalls()[1][0] as { Item: Record<string, unknown> }).Item;
+    const item = itemOf('1234');
     expect(item.scenario).toBe('none');
     expect(item.forecastStatus).toBe('na');
     // 銘柄ごとのQueryCommand(旧latestMarginBalance)は発行されない
@@ -71,71 +85,45 @@ test('does not fall back to current-tse: a ticker with no history gets scenario 
 
 test('marks a ticker that cannot be shorted under 制度信用 (信用/その他) as general-only instead of forecasting it', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({
-        Items: [
-          { ticker: '8798', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: null, marginName: '信用' },
-          { ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000, marginName: '貸借' },
-        ],
-      }) // yutai master scan
-      .mockResolvedValueOnce({
-        Items: [
-          // 8798は貸借だった頃の実績を持つが、今は制度信用で売れないので予測しない
-          {
-            ticker: '8798', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
-            avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
-          },
-        ],
-      }) // gyakuhibu actual scan
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}) // 8798のforecast put
-      .mockResolvedValueOnce({}); // 1234のforecast put
+    mockTables({
+      master: [
+        { ticker: '8798', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: null, marginName: '信用' },
+        { ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000, marginName: '貸借' },
+      ],
+      actual: [
+        // 8798は貸借だった頃の実績を持つが、今は制度信用で売れないので予測しない
+        { ...ACTUAL_1234, ticker: '8798' },
+      ],
+    });
 
     await handler();
 
-    const itemOf = (ticker: string) =>
-      (putCalls().find((c) => (c[0] as { Item: { ticker: string } }).Item.ticker === ticker)![0] as { Item: Record<string, unknown> }).Item;
     const generalOnly = itemOf('8798');
     expect(generalOnly.forecastStatus).toBe('general-only');
     expect(generalOnly.fillP90).toBeNull();
     expect(generalOnly.forecastP90).toBeNull();
+    expect(generalOnly.tseForecast).toBeNull();
     expect(itemOf('1234').forecastStatus).not.toBe('general-only');
   });
 });
 
 test('forecasts a ticker whose margin classification is unknown (東証外上場など) as usual', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '9942', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: null }] }) // marginNameなし
-      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}); // 9942のforecast put
+    mockTables({ master: [{ ticker: '9942', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: null }], actual: [] }); // marginNameなし
 
     await handler();
 
-    expect((putCalls()[1][0] as { Item: Record<string, unknown> }).Item.forecastStatus).toBe('na');
+    expect(itemOf('9942').forecastStatus).toBe('na');
   });
 });
 
 test('computes a forecast per ticker using its own rights history and the pool', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
-      .mockResolvedValueOnce({
-        Items: [
-          {
-            ticker: '1234', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
-            avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
-          },
-        ],
-      }) // gyakuhibu actual scan(同銘柄・同月の権利日履歴が1件)
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}); // 1234のforecast put
+    mockTables({ master: [MASTER_1234], actual: [ACTUAL_1234] }); // 同銘柄・同月の権利日履歴が1件
 
     await handler();
 
-    const tickerPut = putCalls().find((c) => (c[0] as { Item: { ticker: string } }).Item.ticker === '1234')!;
-    const item = (tickerPut[0] as { Item: Record<string, unknown> }).Item;
+    const item = itemOf('1234');
     expect(item.rightsDate).toBe('2026-08-27');
     expect(item.scenario).toBe('last-rights');
     expect(item.tickerSamples).toBe(1);
@@ -149,25 +137,14 @@ test('computes a forecast per ticker using its own rights history and the pool',
 
 test('judges a ticker whose yutai value is unknown (the status depends only on the fill ratio)', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '9001', unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan (valueフィールド無し)
-      .mockResolvedValueOnce({
-        Items: [
-          {
-            ticker: '9001', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
-            avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
-          },
-        ],
-      }) // gyakuhibu actual scan
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}); // 9001のforecast put
+    mockTables({
+      master: [{ ticker: '9001', unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }], // valueフィールド無し
+      actual: [{ ...ACTUAL_1234, ticker: '9001' }],
+    });
 
     await handler();
 
-    const puts = putCalls();
-    expect(puts).toHaveLength(2);
-    const item = (puts[1][0] as { Item: Record<string, unknown> }).Item;
-    expect(item.ticker).toBe('9001');
+    const item = itemOf('9001');
     expect(item.forecastStatus).toBe('danger'); // 充足率1.0の実績1件 → P90=100%
     expect(item.expectedNet).toBeNull(); // 優待価値との差額だけは出せない
     expect(typeof item.forecastP50).toBe('number');
@@ -178,21 +155,21 @@ test('continues with the next ticker when one ticker throws', async () => {
   const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   try {
     await withFixedNow(async () => {
-      mockSend
-        .mockResolvedValueOnce({
-          Items: [
-            { ticker: '1111', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 },
-            { ticker: '2222', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 },
-          ],
-        }) // yutai master scan
-        .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
-        .mockResolvedValueOnce({}) // _POOL_ put
-        .mockRejectedValueOnce(new Error('DynamoDB error')) // 1111のforecast putが失敗
-        .mockResolvedValueOnce({}); // 2222のforecast put
+      mockTables({
+        master: [
+          { ticker: '1111', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 },
+          { ticker: '2222', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 },
+        ],
+        actual: [],
+        failPutFor: '1111', // 1111のforecast putが失敗
+      });
 
       await handler();
 
-      const tickerPuts = putCalls().filter((c) => (c[0] as { Item: { ticker: string } }).Item.ticker !== '_POOL_');
+      const tickerPuts = putCalls().filter((c) => {
+        const t = (c[0] as { Item: { ticker: string } }).Item.ticker;
+        return t !== '_POOL_' && t !== '_POOL_TSE_';
+      });
       expect(tickerPuts.map((c) => (c[0] as { Item: { ticker: string } }).Item.ticker)).toEqual(['1111', '2222']);
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('1111'), expect.any(Error));
     });
@@ -203,23 +180,14 @@ test('continues with the next ticker when one ticker throws', async () => {
 
 test('judges tickers without maxGyakuhibu by fill ratio, leaving only the yen amounts null', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: null }] }) // risk-precompute未実行(maxGyakuhibuがまだ無い)
-      .mockResolvedValueOnce({
-        Items: [
-          {
-            ticker: '1234', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
-            avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
-          },
-        ],
-      }) // 履歴はある(n_t=1)
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}); // 1234のforecast put
+    mockTables({
+      master: [{ ...MASTER_1234, maxGyakuhibu: null }], // risk-precompute未実行(maxGyakuhibuがまだ無い)
+      actual: [ACTUAL_1234], // 履歴はある(n_t=1)
+    });
 
     await handler();
 
-    const tickerPut = putCalls().find((c) => (c[0] as { Item: { ticker: string } }).Item.ticker === '1234')!;
-    const item = (tickerPut[0] as { Item: Record<string, unknown> }).Item;
+    const item = itemOf('1234');
     expect(item.tickerSamples).toBe(1);
     expect(item.forecastStatus).toBe('danger'); // 充足率1.0の実績1件 → P90=100%
     expect(item.forecastP90).toBeNull(); // 金額は出せない
@@ -228,18 +196,8 @@ test('judges tickers without maxGyakuhibu by fill ratio, leaving only the yen am
 
 test('every PutCommand Item survives real DynamoDB marshalling (no Infinity/-Infinity reaches storage)', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
-      .mockResolvedValueOnce({
-        Items: [
-          {
-            ticker: '1234', rightsDate: '2025-08-27', financingBalance: 0, lendingBalance: 250,
-            avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
-          },
-        ],
-      }) // financingBalance:0, lendingBalance>0 -> excessRatio = Infinity (実在しうる状態)
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}); // 1234のforecast put
+    // financingBalance:0, lendingBalance>0 -> excessRatio = Infinity (実在しうる状態)
+    mockTables({ master: [MASTER_1234], actual: [{ ...ACTUAL_1234, financingBalance: 0 }] });
 
     await handler();
 
@@ -250,129 +208,118 @@ test('every PutCommand Item survives real DynamoDB marshalling (no Infinity/-Inf
   });
 });
 
-function withTseEnabled(fn: () => Promise<void>): Promise<void> {
-  process.env.TSE_MARGIN_FEATURES_ENABLED = 'true';
-  return fn().finally(() => {
-    process.env.TSE_MARGIN_FEATURES_ENABLED = 'false';
-  });
-}
-
-test('writes _POOL_TSE_ after _POOL_ and a tseForecast per ticker when the flag is on', async () => {
-  await withTseEnabled(() =>
-    withFixedNow(async () => {
-      mockSend
-        .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
-        .mockResolvedValueOnce({
-          Items: [
-            {
-              ticker: '1234', rightsDate: '2025-08-27', financingBalance: 100, lendingBalance: 250,
-              avgRate: 10, days: 1, maxRateActual: 10, restriction: null, emergencyMeasure: null, enriched: true,
-            },
-          ],
-        }) // gyakuhibu actual scan
-        .mockResolvedValueOnce({
-          Items: [
-            { ticker: '1234', date: '2025-08-01', financingBalance: 100, lendingBalance: 250, source: 'weekly' }, // 権利日2025-08-27の26日前(バケット'22+'のサンプル用、超過率1.5)
-            { ticker: '1234', date: '2026-07-03', financingBalance: 100, lendingBalance: 25, source: 'weekly' }, // 4週前比の基準
-            { ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 50, source: 'weekly' }, // 直近(today=2026-08-01)
-          ],
-        }) // margin balance scan
-        .mockResolvedValueOnce({}) // _POOL_ put
-        .mockResolvedValueOnce({}) // _POOL_TSE_ put
-        .mockResolvedValueOnce({}); // 1234のforecast put
-
-      await handler();
-
-      const puts = putCalls();
-      expect(puts.map((c) => (c[0] as { Item: { ticker: string } }).Item.ticker)).toEqual(['_POOL_', '_POOL_TSE_', '1234']);
-
-      const pool = (puts[1][0] as { Item: { buckets: Record<string, unknown[]> } }).Item;
-      expect(Object.keys(pool.buckets).sort()).toEqual(['0-7', '22+', '8-21']);
-      expect(pool.buckets['22+']).toHaveLength(6);
-
-      const tse = (puts[2][0] as { Item: { tseForecast: Record<string, unknown> } }).Item.tseForecast;
-      // 直近スナップショット2026-07-31 → 次回権利日2026-08-27 まで27日 → バケット'22+'。
-      expect(tse.snapshotDate).toBe('2026-07-31');
-      expect(tse.lagDays).toBe(27);
-      expect(tse.lagBucket).toBe('22+');
-      expect(tse.scenario).toBe('current-tse');
-      // 超過率 (50-100)/100 = -0.5 → 融資超過ビン。プールに同ビンのサンプルは無く、自銘柄の
-      // '22+'サンプル(2025-08-01時点の超過率1.5、充足率1)だけで w=1 → forecastP50 = 1×5000。
-      expect(tse.bin).toBe('融資超過');
-      expect(tse.forecastP50).toBe(5000);
-      expect(tse.forecastStatus).toBe('danger'); // value 1000 <= P50 5000
-      expect(tse.lendingGrowth4w).toBeCloseTo(2); // 50 / 25
-    }),
-  );
-});
-
-test('skips the TSE step entirely when the flag is off (no margin scan, no _POOL_TSE_, no tseForecast attribute)', async () => {
+test('writes _POOL_TSE_ after _POOL_ and a tseForecast per ticker', async () => {
   await withFixedNow(async () => {
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
-      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
-      .mockResolvedValueOnce({}) // _POOL_ put
-      .mockResolvedValueOnce({}); // 1234のforecast put
+    mockTables({
+      master: [MASTER_1234],
+      actual: [ACTUAL_1234],
+      margin: [
+        { ticker: '1234', date: '2025-08-01', financingBalance: 100, lendingBalance: 250, source: 'taisyaku' }, // 権利日2025-08-27の26日前(バケット'22+'のサンプル用、超過率1.5)
+        { ticker: '1234', date: '2026-07-03', financingBalance: 100, lendingBalance: 25, source: 'taisyaku' }, // 4週前比の基準
+        { ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 50, source: 'taisyaku' }, // 直近(today=2026-08-01)
+      ],
+    });
 
     await handler();
 
     const puts = putCalls();
-    expect(puts).toHaveLength(2);
-    const item = (puts[1][0] as { Item: Record<string, unknown> }).Item;
-    expect('tseForecast' in item).toBe(false);
-    // ScanCommandはmaster/actualの2回のみ(margin balance scanは無い)
-    const scans = mockSend.mock.calls.filter(([cmd]) => !('Item' in (cmd as Record<string, unknown>)));
-    expect(scans).toHaveLength(2);
+    expect(puts.map((c) => (c[0] as { Item: { ticker: string } }).Item.ticker)).toEqual(['_POOL_', '_POOL_TSE_', '1234']);
+
+    const pool = (puts[1][0] as { Item: { buckets: Record<string, unknown[]> } }).Item;
+    expect(Object.keys(pool.buckets).sort()).toEqual(['0-7', '22+', '8-21']);
+    expect(pool.buckets['22+']).toHaveLength(6);
+
+    const tse = itemOf('1234').tseForecast as Record<string, unknown>;
+    // 直近スナップショット2026-07-31 → 次回権利日2026-08-27 まで27日 → バケット'22+'。
+    expect(tse.snapshotDate).toBe('2026-07-31');
+    expect(tse.lagDays).toBe(27);
+    expect(tse.lagBucket).toBe('22+');
+    expect(tse.scenario).toBe('current-tse');
+    // 超過率 (50-100)/100 = -0.5 → 融資超過ビン。プールに同ビンのサンプルは無く、自銘柄の
+    // '22+'サンプル(2025-08-01時点の超過率1.5、充足率1)だけで w=1 → forecastP50 = 1×5000。
+    expect(tse.bin).toBe('融資超過');
+    expect(tse.forecastP50).toBe(5000);
+    expect(tse.forecastStatus).toBe('danger'); // value 1000 <= P50 5000
+    expect(tse.lendingGrowth4w).toBeCloseTo(2); // 50 / 25
+  });
+});
+
+test('reads only taisyaku rows from the margin table, ignoring legacy J-Quants rows and the cursor row', async () => {
+  await withFixedNow(async () => {
+    mockTables({
+      master: [MASTER_1234],
+      actual: [],
+      margin: [
+        { ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 999, source: 'weekly' },
+        { ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 50, source: 'taisyaku' },
+        { ticker: '1234', date: '2026-07-30', financingBalance: 1, lendingBalance: 1, source: 'daily-alert' },
+        { ticker: '__cursor__', date: 'taisyaku', lastFetchedDate: '2026-07-31' },
+      ],
+    });
+
+    await handler();
+
+    const tse = itemOf('1234').tseForecast as Record<string, unknown>;
+    expect(tse.snapshotDate).toBe('2026-07-31');
+    expect(tse.lendingBalance).toBe(50);
+
+    const marginScan = mockSend.mock.calls
+      .map(([cmd]) => cmd as Record<string, unknown>)
+      .find((cmd) => !('Item' in cmd) && cmd.TableName === 'JQuantsMarginBalance')!;
+    expect(marginScan.FilterExpression).toBe('#source = :source');
+    expect(marginScan.ExpressionAttributeNames).toEqual({ '#source': 'source' });
+    expect(marginScan.ExpressionAttributeValues).toEqual({ ':source': 'taisyaku' });
+  });
+});
+
+test('gives tseForecast: null when the margin table has only legacy rows', async () => {
+  await withFixedNow(async () => {
+    mockTables({
+      master: [MASTER_1234],
+      actual: [],
+      margin: [{ ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 50, source: 'weekly' }],
+    });
+
+    await handler();
+
+    expect(itemOf('1234').tseForecast).toBeNull();
   });
 });
 
 test('writes tseForecast: null when the ticker has no fresh margin snapshot', async () => {
-  await withTseEnabled(() =>
-    withFixedNow(async () => {
-      mockSend
-        .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
-        .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
-        .mockResolvedValueOnce({
-          Items: [{ ticker: '1234', date: '2026-06-01', financingBalance: 100, lendingBalance: 50, source: 'weekly' }], // 61日前 → 鮮度切れ
-        }) // margin balance scan
-        .mockResolvedValueOnce({}) // _POOL_ put
-        .mockResolvedValueOnce({}) // _POOL_TSE_ put
-        .mockResolvedValueOnce({}); // 1234のforecast put
+  await withFixedNow(async () => {
+    mockTables({
+      master: [MASTER_1234],
+      actual: [],
+      margin: [{ ticker: '1234', date: '2026-06-01', financingBalance: 100, lendingBalance: 50, source: 'taisyaku' }], // 61日前 → 鮮度切れ
+    });
 
-      await handler();
+    await handler();
 
-      const item = (putCalls()[2][0] as { Item: Record<string, unknown> }).Item;
-      expect(item.tseForecast).toBeNull();
-    }),
-  );
+    expect(itemOf('1234').tseForecast).toBeNull();
+  });
 });
 
 test('TSE items survive real DynamoDB marshalling when the current snapshot has financingBalance 0 (excessRatio Infinity)', async () => {
-  await withTseEnabled(() =>
-    withFixedNow(async () => {
-      mockSend
-        .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8], maxGyakuhibu: 5000 }] }) // yutai master scan
-        .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actual scan
-        .mockResolvedValueOnce({
-          Items: [
-            { ticker: '1234', date: '2026-07-03', financingBalance: 0, lendingBalance: 0, source: 'weekly' }, // 4週前比の分母0 → null
-            { ticker: '1234', date: '2026-07-31', financingBalance: 0, lendingBalance: 250, source: 'weekly' }, // excessRatio = Infinity
-          ],
-        }) // margin balance scan
-        .mockResolvedValueOnce({}) // _POOL_ put
-        .mockResolvedValueOnce({}) // _POOL_TSE_ put
-        .mockResolvedValueOnce({}); // 1234のforecast put
+  await withFixedNow(async () => {
+    mockTables({
+      master: [MASTER_1234],
+      actual: [],
+      margin: [
+        { ticker: '1234', date: '2026-07-03', financingBalance: 0, lendingBalance: 0, source: 'taisyaku' }, // 4週前比の分母0 → null
+        { ticker: '1234', date: '2026-07-31', financingBalance: 0, lendingBalance: 250, source: 'taisyaku' }, // excessRatio = Infinity
+      ],
+    });
 
-      await handler();
+    await handler();
 
-      for (const [cmd] of putCalls()) {
-        const { Item } = cmd as { Item: Record<string, unknown> };
-        expect(() => marshall(Item)).not.toThrow();
-      }
-      const tse = (putCalls()[2][0] as { Item: { tseForecast: Record<string, unknown> } }).Item.tseForecast;
-      expect(tse.excessRatio).toBeNull(); // Infinity → null
-      expect(tse.bin).toBe('5以上');
-      expect(tse.lendingGrowth4w).toBeNull();
-    }),
-  );
+    for (const [cmd] of putCalls()) {
+      const { Item } = cmd as { Item: Record<string, unknown> };
+      expect(() => marshall(Item)).not.toThrow();
+    }
+    const tse = itemOf('1234').tseForecast as Record<string, unknown>;
+    expect(tse.excessRatio).toBeNull(); // Infinity → null
+    expect(tse.bin).toBe('5以上');
+    expect(tse.lendingGrowth4w).toBeNull();
+  });
 });
