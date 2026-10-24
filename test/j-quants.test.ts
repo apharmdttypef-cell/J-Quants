@@ -298,6 +298,9 @@ test('creates the margin balance batch Lambda wired to the yutai and margin tabl
   template.hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'cron(15 10 ? * MON-FRI *)',
     State: 'ENABLED',
+    // 失敗時の非同期リトライ(既定2回)でtaisyaku.jpへの負荷が3倍になり、予測バッチの時刻まで
+    // 長引きうるため再試行しない。取り直しは翌営業日の実行に任せる
+    Targets: [Match.objectLike({ RetryPolicy: { MaximumRetryAttempts: 0 } })],
   });
   const rules = template.findResources('AWS::Events::Rule');
   const scheduleExpressions = Object.values(rules).map(

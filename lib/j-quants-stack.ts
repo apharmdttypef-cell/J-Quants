@@ -237,11 +237,14 @@ export class JQuantsStack extends cdk.Stack {
     this.marginBalanceTable.grantReadWriteData(marginBalanceBatchFn);
 
     // taisyaku.jpの公表時刻は未確定(Task 0)。JST平日19:15 = UTC 10:15。毎回カーソル日を取り直して
-    // 遅れた公表・訂正を拾う。GyakuhibuHistoryBatchSchedule(UTC 10:00、同じtaisyaku.jpを叩く)と重ならず、
-    // GyakuhibuForecastBatchSchedule(UTC 10:40)より前に終わる時刻(タイムアウト14分で最遅10:29)。
+    // 遅れた公表・訂正を拾う。GyakuhibuHistoryBatchSchedule(UTC 10:00、同じtaisyaku.jpを叩く)の15分後に
+    // 開始する(別セッションなので実行が重なっても負荷が増えるだけ)。GyakuhibuForecastBatchSchedule(UTC 10:40)
+    // より前に終わる時刻(タイムアウト14分で最遅10:29)。
+    // 非同期invokeの既定リトライ(2回)はtaisyaku.jpへの負荷を3倍にし、予測バッチの時刻を越えうるので無効にする。
+    // 取り直しは翌営業日の実行に任せる(カーソル日から取り直すので取りこぼさない)。
     new events.Rule(this, 'MarginBalanceBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '15', hour: '10', weekDay: 'MON-FRI' }),
-      targets: [new targets.LambdaFunction(marginBalanceBatchFn)],
+      targets: [new targets.LambdaFunction(marginBalanceBatchFn, { retryAttempts: 0 })],
     });
 
     // 2日連続で失敗(エラーが出た日が2日続く)したらメールで知らせる。実行が無い日は欠測扱いで正常。
