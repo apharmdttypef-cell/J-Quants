@@ -14,22 +14,44 @@ export async function batchUpsert(
   items: Record<string, unknown>[],
 ): Promise<void> {
   for (let i = 0; i < items.length; i += 25) {
-    let pending: { PutRequest: { Item: Record<string, unknown> } }[] = items
-      .slice(i, i + 25)
-      .map((Item) => ({ PutRequest: { Item } }));
-    let attempt = 0;
+    const pending = items.slice(i, i + 25).map((Item) => ({ PutRequest: { Item } }));
+    await writeBatchWithRetry(ddbDocClient, tableName, pending, 'batchUpsert');
+  }
+}
 
-    while (pending.length > 0) {
-      const result = await ddbDocClient.send(new BatchWriteCommand({ RequestItems: { [tableName]: pending } }));
-      const unprocessed = (result.UnprocessedItems?.[tableName] ?? []) as typeof pending;
-      if (unprocessed.length === 0) break;
+// batchUpsertのDelete版。キー(パーティションキー+ソートキー)の配列を25件ずつ削除する。
+export async function batchDelete(
+  ddbDocClient: DynamoDBDocumentClient,
+  tableName: string,
+  keys: Record<string, unknown>[],
+): Promise<void> {
+  for (let i = 0; i < keys.length; i += 25) {
+    const pending = keys.slice(i, i + 25).map((Key) => ({ DeleteRequest: { Key } }));
+    await writeBatchWithRetry(ddbDocClient, tableName, pending, 'batchDelete');
+  }
+}
 
-      attempt += 1;
-      if (attempt > 10) {
-        throw new Error(`batchUpsert: too many retries, ${unprocessed.length} items still unprocessed`);
-      }
-      await sleep(Math.min(2000, 100 * 2 ** attempt));
-      pending = unprocessed;
+async function writeBatchWithRetry<T extends object>(
+  ddbDocClient: DynamoDBDocumentClient,
+  tableName: string,
+  requests: T[],
+  label: string,
+): Promise<void> {
+  let pending = requests;
+  let attempt = 0;
+
+  while (pending.length > 0) {
+    const result = await ddbDocClient.send(
+      new BatchWriteCommand({ RequestItems: { [tableName]: pending as never } }),
+    );
+    const unprocessed = (result.UnprocessedItems?.[tableName] ?? []) as unknown as T[];
+    if (unprocessed.length === 0) break;
+
+    attempt += 1;
+    if (attempt > 10) {
+      throw new Error(`${label}: too many retries, ${unprocessed.length} items still unprocessed`);
     }
+    await sleep(Math.min(2000, 100 * 2 ** attempt));
+    pending = unprocessed;
   }
 }

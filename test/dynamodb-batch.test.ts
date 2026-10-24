@@ -17,7 +17,8 @@ const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { batchUpsert } = require('../lambda/shared/dynamodb-batch') as {
+const { batchUpsert, batchDelete } = require('../lambda/shared/dynamodb-batch') as {
+  batchDelete: (ddbDocClient: unknown, tableName: string, keys: Record<string, unknown>[]) => Promise<void>;
   batchUpsert: (ddbDocClient: unknown, tableName: string, items: Record<string, unknown>[]) => Promise<void>;
 };
 
@@ -76,4 +77,41 @@ test('throws after more than 10 retries', async () => {
   } finally {
     jest.useRealTimers();
   }
+});
+
+test('batchDelete sends DeleteRequests in batches of 25', async () => {
+  mockSend.mockResolvedValue({});
+  const keys = Array.from({ length: 30 }, (_, i) => ({ ticker: `T${i}`, date: '2026-01-01' }));
+
+  await batchDelete(ddbDocClient, 'MyTable', keys);
+
+  expect(mockSend).toHaveBeenCalledTimes(2);
+  const first = mockSend.mock.calls[0][0] as { RequestItems: Record<string, unknown[]> };
+  expect(first.RequestItems.MyTable).toHaveLength(25);
+  expect(first.RequestItems.MyTable[0]).toEqual({ DeleteRequest: { Key: keys[0] } });
+  const second = mockSend.mock.calls[1][0] as { RequestItems: Record<string, unknown[]> };
+  expect(second.RequestItems.MyTable).toHaveLength(5);
+  expect(second.RequestItems.MyTable[4]).toEqual({ DeleteRequest: { Key: keys[29] } });
+});
+
+test('batchDelete resends UnprocessedItems', async () => {
+  let callCount = 0;
+  mockSend.mockImplementation((cmd: { RequestItems: Record<string, unknown[]> }) => {
+    callCount++;
+    if (callCount === 1) {
+      return Promise.resolve({ UnprocessedItems: { MyTable: [cmd.RequestItems.MyTable[0]] } });
+    }
+    return Promise.resolve({});
+  });
+
+  await batchDelete(ddbDocClient, 'MyTable', [{ ticker: 'A', date: 'd' }, { ticker: 'B', date: 'd' }]);
+
+  expect(callCount).toBe(2);
+  const resent = mockSend.mock.calls[1][0] as { RequestItems: Record<string, unknown[]> };
+  expect(resent.RequestItems.MyTable).toEqual([{ DeleteRequest: { Key: { ticker: 'A', date: 'd' } } }]);
+});
+
+test('batchDelete does nothing when keys is empty', async () => {
+  await batchDelete(ddbDocClient, 'MyTable', []);
+  expect(mockSend).not.toHaveBeenCalled();
 });
