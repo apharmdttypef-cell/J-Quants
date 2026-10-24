@@ -48,15 +48,15 @@ EventBridge(毎週月曜 JST21:00)
 
 EventBridge(毎日 JST18:20)
   → YutaiRiskPrecomputeBatchFunction(Lambda)
-      - JQuantsYutaiMasterを全件スキャンし、銘柄ごとに逆日歩リスク(信用残の有無・前日終値ベース)を計算
-      - J-Quants /equities/master から貸借区分(MrgnNm、普通株=コード末尾0を採用)を取り込む
+      - J-Quants /equities/master の`MrgnNm`(普通株=コード末尾0を採用)を貸借区分`marginName`として取り込む(取得失敗時は前回の値のまま)
+      - JQuantsYutaiMasterを全件スキャンし、`marginName`が`貸借`の銘柄だけ前日終値ベースで最大逆日歩・最高料率・品貸日数を計算(信用残テーブルは読まない)
       → JQuantsYutaiMaster に maxGyakuhibu/maxRate/days/marginName を書き戻す(判定は逆日歩予測側のforecastStatusが持つ)
 
 EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
   → GyakuhibuForecastBatchFunction(Lambda)
       - JQuantsYutaiMaster・JQuantsGyakuhibuActual(全件)・JQuantsMarginBalance(直近値)を読み、
         貸株超過率→充足率の実績分布(全銘柄プール+銘柄別)から次回権利日の予測逆日歩を算出
-      → JQuantsGyakuhibuForecast に upsert(銘柄行 + 全銘柄横断のプール曲線行`_POOL_`、東証超過率ベースの`tseForecast`行`_POOL_TSE_`も常に追加)
+      → JQuantsGyakuhibuForecast に upsert(銘柄行 + 全銘柄横断のプール曲線行`_POOL_`、日証金の貸借取引残高ベースの`tseForecast`行`_POOL_TSE_`も常に追加)
 
 ブラウザ
   → CloudFront(静的ファイルは公開配信)
@@ -159,12 +159,12 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 |---|---|---|
 | `PriceBatchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsYutaiMaster`)の四本値を取得し`JQuantsStockPrices`へupsert |
 | `FinancialSummaryBatchFunction` | EventBridge(`cron(0 11 ? * MON *)` = 毎週月曜 JST 20:00) | 対象銘柄(`JQuantsYutaiMaster`)の決算サマリを取得し`JQuantsFinancialSummary`へupsert。四半期ごとの更新なので週次取得で十分 |
-| `MarginBalanceBatchFunction` | EventBridge(`cron(15 10 ? * MON-FRI *)` = JST平日 19:15) | taisyaku.jpの全銘柄一括CSVを基準日ごとに取得し(検索→CSV取得の3リクエスト、各間と日付間に`REQUEST_INTERVAL_MS`=1000ms)、`JQuantsYutaiMaster`の銘柄の東証行の融資残・貸株残を`JQuantsMarginBalance`へ`source`=`taisyaku`でupsert(冪等)。カーソル行(`ticker`=`__cursor__`, `date`=`taisyaku`)の`lastFetchedDate`の日から最大`MAX_DATES_PER_RUN`=40日分(初回は3年前から)を古い順に処理し、カーソルの日自体も毎回取り直す。0件の日は、当日なら「未公表」としてカーソルを進めずに打ち切り、当日より前なら休場日または公開範囲外とみなして警告ログを出し先へ進む。取得失敗はその回の取得を打ち切る(カーソルは最後の成功日のまま)。2日連続で失敗(Errors≧1が2日)するとSNS経由でメール通知 |
+| `MarginBalanceBatchFunction` | EventBridge(`cron(15 10 ? * MON-FRI *)` = JST平日 19:15) | taisyaku.jpの全銘柄一括CSVを基準日ごとに取得し(検索→CSV取得の3リクエスト、各間と日付間に`REQUEST_INTERVAL_MS`=1000ms)、`JQuantsYutaiMaster`の銘柄の東証行の融資残・貸株残を`JQuantsMarginBalance`へ`source`=`taisyaku`でupsert(冪等)。カーソル行(`ticker`=`__cursor__`, `date`=`taisyaku`)の`lastFetchedDate`の日から最大`MAX_DATES_PER_RUN`=40日分(初回は3年前から)を古い順に処理し、カーソルの日自体も毎回取り直す。0件の日は、当日なら「未公表」としてカーソルを進めずに打ち切り、当日より前なら休場日または公開範囲外とみなして警告ログを出し先へ進む。取得失敗はその回の取得を打ち切る(カーソルは最後の成功日のまま)。失敗があり、カーソルが開始時の日より先へ進まなかった回(カーソル日の取り直しだけ成功し次の日が失敗する等)は実行エラーにする。2日連続で失敗(Errors≧1が2日)するとSNS経由でメール通知 |
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
 | `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert。開示ごとに`JQuantsYutaiTdnetEvent`へイベント(`start`/`update`/`abolition`)を記録する(マスタが実際に変わらなかった場合は記録しない)。廃止検知による`JQuantsYutaiMaster`からの削除は、`PriceBatchFunction`/`FinancialSummaryBatchFunction`の対象銘柄取得も`ReferenceApiFunction`の`isKnownTicker`判定も同テーブルを参照する設計のため、その銘柄の株価・決算サマリ収集を止め、`GET /tickers/{ticker}/prices`・`summary`も404にする(意図した副作用だが、単一の削除操作が複数の挙動に波及する点に注意) |
 | `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし最大逆日歩・貸借区分などを事前計算・書き戻し。一覧API(`GET /yutai/forecast`)が銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため。貸借判定は`marginName`で行う |
-| `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 10 * * ? *)` = JST 19:40 毎日、逆日歩実績・信用残バッチの後) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`を読み、貸株超過率のビン別充足率分布から次回権利日の予測逆日歩(過去実績ベース)を算出し`JQuantsGyakuhibuForecast`へupsert。`JQuantsMarginBalance`も読み、日証金の貸借取引残高ベースの現在需給予測(`tseForecast`属性・`_POOL_TSE_`行)も併せて書く。信用残バッチ(JST19:15)の後に走るので当日公表分までの残高を使う |
+| `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 10 * * ? *)` = JST 19:40 毎日、逆日歩実績・信用残バッチの後) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`を読み、貸株超過率のビン別充足率分布から次回権利日の予測逆日歩(過去実績ベース)を算出し`JQuantsGyakuhibuForecast`へupsert。`JQuantsMarginBalance`も読み、日証金の貸借取引残高ベースの現在需給予測(`tseForecast`属性・`_POOL_TSE_`行)も併せて書く。信用残バッチ(JST19:15)の後に走るので当日公表分までの残高を使う。ただしtaisyaku.jpの公表時刻は未検証で、19:15時点で当日分が未公表なら前営業日までの残高で予測する(当日分は翌営業日の信用残バッチで取り込まれる) |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理。呼び出し元(`sub`)と`routeKey`を構造化ログに出す |
 | `PreTokenGenerationFunction` | Cognito User PoolのPre Token Generationトリガー(V2) | アクセストークンに`email`クレームを足す |
 

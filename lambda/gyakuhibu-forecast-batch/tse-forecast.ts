@@ -63,7 +63,7 @@ export async function scanMarginSnapshots(
   return snapshots;
 }
 
-// 各学習サンプル(taisyaku.jp実績)に、バケットごとの東証超過率を付与する。バケットのサンプル側
+// 各学習サンプル(taisyaku.jp実績)に、バケットごとの超過率(日証金の貸借取引残高ベース)を付与する。バケットのサンプル側
 // スナップショットは「権利日のminLagDays日以上前で最新の点」。スナップショットが無い(鮮度切れ
 // 含む)バケットにはそのサンプルを含めない。fillRatio等の目的変数はそのまま。
 export function buildTseSamples(samples: ForecastSample[], snapshots: Map<string, MarginSnapshot[]>): TseBucketSamples {
