@@ -249,10 +249,12 @@ test('reads only taisyaku rows from the margin table, ignoring legacy J-Quants r
     mockTables({
       master: [MASTER_1234],
       actual: [],
+      // 旧行はtaisyaku行の後ろ(同じ日)とtaisyaku行の無い新しい日に置く。JS側の除外が無いと
+      // 同じ日のtaisyaku行を上書きし、または直近スナップショットになってしまうので、このテストが落ちる
       margin: [
-        { ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 999, source: 'weekly' },
         { ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 50, source: 'taisyaku' },
-        { ticker: '1234', date: '2026-07-30', financingBalance: 1, lendingBalance: 1, source: 'daily-alert' },
+        { ticker: '1234', date: '2026-07-31', financingBalance: 100, lendingBalance: 999, source: 'weekly' },
+        { ticker: '1234', date: '2026-08-01', financingBalance: 1, lendingBalance: 1, source: 'daily-alert' },
         { ticker: '__cursor__', date: 'taisyaku', lastFetchedDate: '2026-07-31' },
       ],
     });
