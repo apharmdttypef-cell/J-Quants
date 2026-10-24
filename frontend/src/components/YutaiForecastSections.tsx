@@ -78,7 +78,7 @@ function scenarioText(forecast: YutaiForecast): string {
       forecast.excessRatio !== null && Number.isFinite(forecast.excessRatio) ? forecast.excessRatio.toFixed(1) : '—';
     return `過去の権利日実績の超過率 ${ratio} を採用`;
   }
-  if (forecast.scenario === 'current-tse') return '東証信用残ベース(参考)';
+  if (forecast.scenario === 'current-tse') return '日証金の貸借取引残高ベース(参考)';
   return '実績なし';
 }
 
@@ -170,14 +170,14 @@ export function ForecastSummary({
   );
 }
 
-// 東証信用残ベースの現在需給予測(スタンダードプラン依存)。フラグ無効・予測無しなら何も出さない。
+// 日証金の貸借取引残高ベースの現在需給予測。予測が無ければ何も出さない。
 export function TseForecastSection({ data }: { data: YutaiForecastDetail }) {
   const tse = data.tseForecast;
-  if (!data.features.tseMargin || !tse) return null;
+  if (!tse) return null;
   return (
     <>
       <div className="section-heading">
-        現在需給ベース(東証信用残 {tse.snapshotDate} 時点、権利日{tse.lagDays}日前)
+        現在需給ベース(日証金の貸借取引残高 {tse.snapshotDate} 時点、権利日{tse.lagDays}日前)
       </div>
       <div className="forecast-cards">
         <div className="card">
@@ -343,9 +343,8 @@ export function ForecastBasis({ data }: { data: YutaiForecastDetail }) {
   );
 }
 
-// 信用残トレンド(スタンダードプラン依存)。フラグ無効時は取得もしない。
+// 信用残(日証金の貸借取引残高)トレンド。
 export function MarginTrendSection({ data }: { data: YutaiForecastDetail }) {
-  if (!data.features.tseMargin) return null;
   return <MarginTrendChart ticker={data.ticker} rightsDates={data.history.map((h) => h.rightsDate)} />;
 }
 
@@ -353,11 +352,11 @@ function MarginTrendChart({ ticker, rightsDates }: { ticker: string; rightsDates
   const trendState = useAsync(() => fetchYutaiMarginTrend(ticker), [ticker]);
   return (
     <>
-      <div className="section-heading">信用残トレンド(過去1年)</div>
+      <div className="section-heading">貸借取引残高トレンド(過去1年)</div>
       {trendState.loading && <StatusNote kind="loading" message="読み込み中…" />}
       {trendState.error && <StatusNote kind="error" message={`取得に失敗しました: ${trendState.error.message}`} />}
       {trendState.data && trendState.data.points.length === 0 && (
-        <StatusNote kind="empty" message="まだ信用残データがありません(取得中です)。" />
+        <StatusNote kind="empty" message="まだ貸借取引残高データがありません(取得中です)。" />
       )}
       {trendState.data && trendState.data.points.length > 0 && (
         <div className="card" style={{ height: 220 }}>
@@ -365,16 +364,24 @@ function MarginTrendChart({ ticker, rightsDates }: { ticker: string; rightsDates
             <LineChart data={trendState.data.points} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
+              <YAxis yAxisId="balance" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
+              <YAxis yAxisId="ratio" orientation="right" width={40} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
               <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
-              <Line type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
-              <Line type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
+              <Line yAxisId="balance" type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
+              <Line yAxisId="balance" type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
               {rightsDates.map((date) => (
-                <ReferenceLine key={date} x={date} stroke="var(--up)" strokeDasharray="3 3" />
+                <ReferenceLine key={date} yAxisId="balance" x={date} stroke="var(--up)" strokeDasharray="3 3" />
               ))}
+              <Line yAxisId="ratio" type="monotone" dataKey="lendingRatio" stroke="var(--up)" strokeDasharray="4 2" dot={false} name="貸借倍率" connectNulls={false} />
+              <ReferenceLine yAxisId="ratio" y={1} stroke="var(--text-muted)" strokeDasharray="2 2" label={{ value: '1.0', position: 'right', fontSize: 10, fill: 'var(--text-muted)' }} />
             </LineChart>
           </ResponsiveContainer>
         </div>
+      )}
+      {trendState.data && trendState.data.points.length > 0 && (
+        <p style={{ marginTop: '0.5rem', fontSize: 12, color: 'var(--text-muted)' }}>
+          日本証券金融の貸借取引残高(融資残・貸株残)。取引所公表の信用残とは異なります。貸借倍率(融資残÷貸株残)が1.0を下回ると貸株超過で、逆日歩が付く可能性があります。
+        </p>
       )}
     </>
   );

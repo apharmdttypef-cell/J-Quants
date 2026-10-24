@@ -111,16 +111,14 @@ export interface YutaiDetail extends YutaiBenefitFields {
   basicInfo: YutaiBasicInfo;
   risk: YutaiRiskInfo;
   rightsHistory: YutaiRightsHistoryPoint[];
-  features: YutaiFeatures;
 }
 
 export interface MarginTrendPoint {
   date: string;
-  // 全上場銘柄一括取得の対象に含まれる値欠損レコード(J-Quants側のデータ欠落)は
-  // nullとして書き込まれる(margin-balance-batch参照)。Rechartsの<Line>はnullを
-  // その点だけ欠けとして描画するため、フロント側の追加ハンドリングは不要。
-  financingBalance: number | null;
-  lendingBalance: number | null;
+  financingBalance: number;
+  lendingBalance: number;
+  // 貸借倍率 = 融資残 ÷ 貸株残。貸株残0ならnull。1未満 = 貸株超過(逆日歩が付きうる)
+  lendingRatio: number | null;
 }
 
 export interface MarginTrendResponse {
@@ -152,7 +150,7 @@ export interface YutaiForecast {
 
 export type YutaiTseLagBucket = '0-7' | '8-21' | '22+';
 
-// 東証信用残ベースの現在需給予測(スタンダードプラン依存)。APIはフラグ無効時にnullを返す。
+// 日証金の貸借取引残高ベースの現在需給予測。予測が無ければnull
 export interface YutaiTseForecast extends YutaiForecast {
   snapshotDate: string;
   lagDays: number;
@@ -160,10 +158,6 @@ export interface YutaiTseForecast extends YutaiForecast {
   financingBalance: number;
   lendingBalance: number;
   lendingGrowth4w: number | null;
-}
-
-export interface YutaiFeatures {
-  tseMargin: boolean;
 }
 
 export interface YutaiForecastListItem extends YutaiCrossFields {
@@ -181,7 +175,6 @@ export interface YutaiForecastListResponse {
   tickers: YutaiForecastListItem[];
   currentMonthLastTradableDate: string;
   poolComputedAt: string | null;
-  features: YutaiFeatures;
 }
 
 export interface YutaiForecastHistoryPoint {
@@ -239,7 +232,6 @@ export interface YutaiForecastDetail {
   history: YutaiForecastHistoryPoint[];
   poolBins: PoolBin[];
   marginTrend: { latest: YutaiForecastMarginLatest | null };
-  features: YutaiFeatures;
 }
 
 export type YutaiTdnetEventType = 'start' | 'update' | 'abolition';

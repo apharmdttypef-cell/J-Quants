@@ -127,7 +127,7 @@ function TseCellHover({ tse, children }: { tse: YutaiTseForecast; children: Reac
       </HoverCard.Trigger>
       <HoverCard.Portal>
         <HoverCard.Content className="gyakuhibu-tooltip" side="bottom" sideOffset={8}>
-          <div>東証信用残 {tse.snapshotDate} 時点(権利日{tse.lagDays}日前)</div>
+          <div>日証金の貸借取引残高 {tse.snapshotDate} 時点(権利日{tse.lagDays}日前)</div>
           <div>貸株超過率: {ratio}(ビン: {tse.bin ?? '—'})</div>
           <div>発生確率: {formatPercent(tse.pOccur)}</div>
           <div>想定逆日歩(最悪): {formatYenOrDash(tse.forecastP90)}</div>
@@ -138,45 +138,43 @@ function TseCellHover({ tse, children }: { tse: YutaiTseForecast; children: Reac
   );
 }
 
-function buildColumns(tseEnabled: boolean): ColumnDef<YutaiForecastListItem>[] {
-  const tseColumns: ColumnDef<YutaiForecastListItem>[] = tseEnabled
-    ? [
-        {
-          id: 'tseForecastP50',
-          header: () => (
-            <HeaderTooltip
-              label="想定逆日歩(現在需給)"
-              tooltip="直近の東証信用残(融資残・貸株残)から求めた貸株超過率をもとに、過去の類似ケースの分布から算出した逆日歩の目安。過去実績ベースよりリスクが高い区分に入っていれば↑。スタンダードプラン限定の情報です。"
-            />
-          ),
-          accessorFn: (row) => row.tseForecast?.forecastP50 ?? undefined,
-          sortDescFirst: true,
-          sortUndefined: 'last',
-          cell: ({ row }) => {
-            const tse = row.original.tseForecast;
-            if (!tse || tse.forecastP50 === null) return '—';
-            return (
-              <TseCellHover tse={tse}>
-                {formatYenOrDash(tse.forecastP50)}
-                {tseWorseThanHistory(row.original) ? ' ↑' : ''}
-              </TseCellHover>
-            );
-          },
-        },
-        numberColumn(
-          'lendingGrowth4w',
-          () => (
-            <HeaderTooltip
-              label="貸株残(4週前比)"
-              tooltip="直近の東証貸株残が4週間前の何倍か。権利日に向けた空売りの積み上がりペースで、3倍以上の急増は逆日歩発生の先行シグナルです。スタンダードプラン限定の情報です。"
-            />
-          ),
-          (row) => row.tseForecast?.lendingGrowth4w ?? null,
-          true,
-          formatGrowth,
-        ),
-      ]
-    : [];
+function buildColumns(): ColumnDef<YutaiForecastListItem>[] {
+  const tseColumns: ColumnDef<YutaiForecastListItem>[] = [
+    {
+      id: 'tseForecastP50',
+      header: () => (
+        <HeaderTooltip
+          label="想定逆日歩(現在需給)"
+          tooltip="直近の日証金の貸借取引残高(融資残・貸株残)から求めた貸株超過率をもとに、過去の類似ケースの分布から算出した逆日歩の目安。過去実績ベースよりリスクが高い区分に入っていれば↑。"
+        />
+      ),
+      accessorFn: (row) => row.tseForecast?.forecastP50 ?? undefined,
+      sortDescFirst: true,
+      sortUndefined: 'last',
+      cell: ({ row }) => {
+        const tse = row.original.tseForecast;
+        if (!tse || tse.forecastP50 === null) return '—';
+        return (
+          <TseCellHover tse={tse}>
+            {formatYenOrDash(tse.forecastP50)}
+            {tseWorseThanHistory(row.original) ? ' ↑' : ''}
+          </TseCellHover>
+        );
+      },
+    },
+    numberColumn(
+      'lendingGrowth4w',
+      () => (
+        <HeaderTooltip
+          label="貸株残(4週前比)"
+          tooltip="直近の日証金の貸株残が4週間前の何倍か。権利日に向けた空売りの積み上がりペースで、3倍以上の急増は逆日歩発生の先行シグナルです。"
+        />
+      ),
+      (row) => row.tseForecast?.lendingGrowth4w ?? null,
+      true,
+      formatGrowth,
+    ),
+  ];
 
   return [
     {
@@ -424,8 +422,7 @@ export function YutaiListPage() {
     [listState.data, selectedStatuses],
   );
 
-  const tseEnabled = listState.data?.features.tseMargin ?? false;
-  const columns = useMemo(() => buildColumns(tseEnabled), [tseEnabled]);
+  const columns = useMemo(() => buildColumns(), []);
   const columnVisibility = useMemo<VisibilityState>(
     () => Object.fromEntries(DETAIL_ONLY_COLUMN_IDS.map((id) => [id, viewMode === 'detail'])),
     [viewMode],
