@@ -171,9 +171,9 @@ export function parseTaisyakuCsv(
   return undefined; // 対象の申込日がCSVに含まれていない
 }
 
-const TAISYAKU_BASE_URL = 'https://www.taisyaku.jp';
+export const TAISYAKU_BASE_URL = 'https://www.taisyaku.jp';
 // 一部サイトが素のundiciリクエストを弾くことがあるため、通常のブラウザらしいUser-Agentを付与する。
-const USER_AGENT = 'Mozilla/5.0 (compatible; JQuantsYutaiBot/1.0)';
+export const USER_AGENT = 'Mozilla/5.0 (compatible; JQuantsYutaiBot/1.0)';
 
 // ヘッダー行にこの文字列のどちらかが含まれていれば、そのエンコーディングでの
 // デコードが正しかったとみなす(逆に言えば、含まれなければセッション切れの
@@ -208,11 +208,11 @@ function decodeCsvResponseBody(buffer: ArrayBuffer, contentType: string | null):
 }
 
 // "YYYY-MM-DD" → "YYYY / MM / DD"(taisyaku.jpのフォーム入力形式)
-function toSlashDate(isoDate: string): string {
+export function toSlashDate(isoDate: string): string {
   return isoDate.replaceAll('-', ' / ');
 }
 
-function cookieHeaderFrom(setCookies: string[]): string {
+export function cookieHeaderFrom(setCookies: string[]): string {
   return setCookies.map((c) => c.split(';')[0]).join('; ');
 }
 

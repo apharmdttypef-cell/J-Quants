@@ -1,5 +1,5 @@
 import { fetchWithRetry, normalizeDate } from '../shared/jquants-batch-client';
-import { splitCsvLine } from '../gyakuhibu-history-batch/taisyaku-client';
+import { splitCsvLine, extractCsrfToken, toSlashDate, cookieHeaderFrom, TAISYAKU_BASE_URL, USER_AGENT } from '../gyakuhibu-history-batch/taisyaku-client';
 
 const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
 // mkt-margin-int/mkt-margin-alertはStandardプラン専用のエンドポイントのため、
@@ -182,4 +182,42 @@ export function parseTaisyakuBalanceCsv(csvText: string, date: string): MarginBa
     points.push({ code: cols[codeIdx], date, financingBalance, lendingBalance, source: 'taisyaku' });
   }
   return points;
+}
+
+function sleep(ms: number): Promise<void> {
+  return ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 基準日dateの全銘柄CSV(デコード済みテキスト)を取得する。検索結果が0件ならCSVを取らずnullを返す。
+// 一覧ページ(GET)→検索(POST)→CSV(GET)の3ステップで、CSRFトークンとセッションCookieを使い回す。
+// intervalMsは3リクエストの各間に空ける待ち時間。ヘッダーの検証はparseTaisyakuBalanceCsvに任せる。
+export async function fetchTaisyakuBalanceCsv(date: string, intervalMs: number): Promise<string | null> {
+  const pageUrl = `${TAISYAKU_BASE_URL}/app/stock`;
+  const pageResponse = await fetch(pageUrl, { headers: { 'User-Agent': USER_AGENT } });
+  if (!pageResponse.ok) {
+    throw new Error(`taisyaku.jp error ${pageResponse.status} fetching ${pageUrl}`);
+  }
+  const cookie = cookieHeaderFrom(pageResponse.headers.getSetCookie());
+  const csrfToken = extractCsrfToken(await pageResponse.text());
+  await sleep(intervalMs);
+
+  const searchUrl = `${TAISYAKU_BASE_URL}/app/stock/search`;
+  const searchResponse = await fetch(searchUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie, 'User-Agent': USER_AGENT },
+    body: new URLSearchParams({ csrf_test_name: csrfToken, mkYmd: toSlashDate(date) }).toString(),
+  });
+  if (!searchResponse.ok) {
+    throw new Error(`taisyaku.jp error ${searchResponse.status} posting to ${searchUrl}`);
+  }
+  const searchHtml = await searchResponse.text();
+  if (/検索結果(?:&nbsp;|\s)*0件/.test(searchHtml)) return null;
+  await sleep(intervalMs);
+
+  const csvUrl = `${TAISYAKU_BASE_URL}/app/stock/csv`;
+  const csvResponse = await fetch(csvUrl, { headers: { Cookie: cookie, 'User-Agent': USER_AGENT } });
+  if (!csvResponse.ok) {
+    throw new Error(`taisyaku.jp error ${csvResponse.status} fetching ${csvUrl}`);
+  }
+  return new TextDecoder('shift_jis').decode(await csvResponse.arrayBuffer());
 }
