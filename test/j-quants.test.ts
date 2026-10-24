@@ -1,10 +1,11 @@
 import * as cdk from 'aws-cdk-lib/core';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { readFileSync } from 'fs';
+import * as path from 'path';
 import { JQuantsStack } from '../lib/j-quants-stack';
 
-// 共有パスワード(APP_PASSWORD)は廃止した。環境変数が無くても合成できることを、
-// このファイル全体で確かめる(どのテストもAPP_PASSWORDを設定しない)。
-delete process.env.APP_PASSWORD;
+// 共有パスワード(APP_PASSWORD)は廃止済み。合成に必要な環境変数はALERT_EMAILだけ。
+process.env.ALERT_EMAIL = 'alerts@example.com';
 
 function synth() {
   const app = new cdk.App();
@@ -278,22 +279,92 @@ test('creates the JQuantsGyakuhibuActual table with ticker/rightsDate key', () =
   });
 });
 
-test('creates the margin balance batch Lambda wired to the yutai and margin tables, on a weekday daily schedule', () => {
+test('creates the margin balance batch Lambda wired to the yutai and margin tables, on a weekday evening schedule without the J-Quants secret', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
+    Timeout: 840, // 14 minutes in seconds
     Environment: {
-      Variables: Match.objectLike({
+      Variables: Match.exact({
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
+        REQUEST_INTERVAL_MS: '1000',
+        MAX_DATES_PER_RUN: '40',
       }),
     },
   });
+  // JST平日19:15 = UTC 10:15
   template.hasResourceProperties('AWS::Events::Rule', {
-    ScheduleExpression: 'cron(30 8 ? * MON-FRI *)',
+    ScheduleExpression: 'cron(15 10 ? * MON-FRI *)',
     State: 'ENABLED',
   });
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  expect(scheduleExpressions).not.toContain('cron(30 8 ? * MON-FRI *)');
+
+  const statements = Object.entries(template.findResources('AWS::IAM::Policy'))
+    .filter(([name]) => name.includes('MarginBalanceBatch'))
+    .flatMap(
+      ([, p]) =>
+        (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: unknown }> } } })
+          .Properties?.PolicyDocument?.Statement ?? [],
+    )
+    .map((stmt) => ({
+      actions: Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [],
+      resourceStr: JSON.stringify(stmt.Resource ?? ''),
+    }));
+  expect(statements.length).toBeGreaterThan(0);
+  // J-Quantsのシークレットは読めない
+  expect(statements.some((s) => s.actions.includes('secretsmanager:GetSecretValue'))).toBe(false);
+  // 優待マスタは読み取りのみ
+  const masterActions = statements.filter((s) => s.resourceStr.includes('YutaiMaster')).flatMap((s) => s.actions);
+  expect(masterActions.length).toBeGreaterThan(0);
+  expect(
+    masterActions.some((a) => ['PutItem', 'UpdateItem', 'DeleteItem', 'BatchWriteItem'].some((w) => a.includes(w))),
+  ).toBe(false);
+  // 信用残テーブルは読み書きできる
+  const marginActions = statements.filter((s) => s.resourceStr.includes('MarginBalance')).flatMap((s) => s.actions);
+  expect(marginActions.some((a) => a.includes('BatchWriteItem'))).toBe(true);
+  expect(marginActions.some((a) => a.includes('PutItem'))).toBe(true);
+  expect(marginActions.some((a) => a.includes('GetItem'))).toBe(true);
+});
+
+test('notifies by email when the margin balance batch fails two days in a row', () => {
+  const template = synth();
+
+  template.resourceCountIs('AWS::SNS::Topic', 1);
+  template.hasResourceProperties('AWS::SNS::Subscription', {
+    Protocol: 'email',
+    Endpoint: 'alerts@example.com',
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    Namespace: 'AWS/Lambda',
+    MetricName: 'Errors',
+    Statistic: 'Sum',
+    Period: 86400,
+    EvaluationPeriods: 2,
+    DatapointsToAlarm: 2,
+    Threshold: 1,
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    TreatMissingData: 'notBreaching',
+    AlarmActions: [{ Ref: Match.stringLikeRegexp('JQuantsBatchAlarmTopic') }],
+    Dimensions: [{ Name: 'FunctionName', Value: { Ref: Match.stringLikeRegexp('MarginBalanceBatchFunction') } }],
+  });
+});
+
+test('fails to synthesize without ALERT_EMAIL', () => {
+  const saved = process.env.ALERT_EMAIL;
+  try {
+    delete process.env.ALERT_EMAIL;
+    expect(() => new JQuantsStack(new cdk.App(), 'NoAlertStack')).toThrow(/ALERT_EMAIL/);
+    process.env.ALERT_EMAIL = '';
+    expect(() => new JQuantsStack(new cdk.App(), 'EmptyAlertStack')).toThrow(/ALERT_EMAIL/);
+  } finally {
+    process.env.ALERT_EMAIL = saved;
+  }
 });
 
 test('creates the gyakuhibu history batch Lambda wired to the rights-date/master/actual tables, on a daily schedule', () => {
@@ -362,7 +433,6 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
     Environment: {
       Variables: Match.exact({
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
-        MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
         TABLE_NAME: Match.anyValue(),
         GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
         // 貸借区分(J-Quants /equities/master)を取るためのAPIキー
@@ -411,11 +481,17 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
         (action) => action && (action.includes('GetItem') || action.includes('Query') || action.includes('Scan') || action.includes('BatchGetItem')),
       );
       const resourceStr = JSON.stringify(stmt.Resource || '');
-      const hasMarginOrStockResource = resourceStr.includes('MarginBalance') || resourceStr.includes('StockPrices');
-      return hasReadActions && hasMarginOrStockResource;
+      return hasReadActions && resourceStr.includes('StockPrices');
     });
   });
   expect(hasMarginStockReadAccess).toBe(true);
+
+  // 信用残テーブルはもう読まない
+  const touchesMarginBalance = policyEntries
+    .filter(([name]) => name.includes('YutaiRiskPrecompute'))
+    .flatMap(([, p]) => (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Resource?: unknown }> } } }).Properties?.PolicyDocument?.Statement ?? [])
+    .some((stmt) => JSON.stringify(stmt.Resource ?? '').includes('MarginBalance'));
+  expect(touchesMarginBalance).toBe(false);
 
   // 逆日歩実績テーブルは読み取りのみ(前回逆日歩の集計用)。書き込みは付けない。
   const actualStatements = policyEntries
@@ -464,7 +540,6 @@ test('creates the gyakuhibu-forecast-batch Lambda wired to master/actual/margin/
         GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
         MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
         GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(),
-        TSE_MARGIN_FEATURES_ENABLED: 'true',
       }),
     },
   });
@@ -511,55 +586,20 @@ test('creates the gyakuhibu-forecast-batch Lambda wired to master/actual/margin/
   expect(hasReadAccessToInputs).toBe(true);
 });
 
-test('passes TSE_MARGIN_FEATURES_ENABLED=true to the reference API by default', () => {
+test('does not pass TSE_MARGIN_FEATURES_ENABLED to any Lambda', () => {
   const template = synth();
 
-  template.hasResourceProperties('AWS::Lambda::Function', {
-    Handler: 'index.handler',
-    Environment: {
-      Variables: Match.objectLike({
-        GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(),
-        YUTAI_TDNET_EVENT_TABLE_NAME: Match.anyValue(),
-        TSE_MARGIN_FEATURES_ENABLED: 'true',
-      }),
-    },
-  });
+  const functions = Object.values(template.findResources('AWS::Lambda::Function'));
+  expect(functions.length).toBeGreaterThan(0);
+  for (const fn of functions) {
+    const variables = (fn as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } }).Properties?.Environment?.Variables ?? {};
+    expect(Object.keys(variables)).not.toContain('TSE_MARGIN_FEATURES_ENABLED');
+  }
 });
 
-test('tseMarginFeatures=false drops the margin balance schedule and flips the env var to false', () => {
-  const app = new cdk.App({ context: { tseMarginFeatures: false } });
-  const template = Template.fromStack(new JQuantsStack(app, 'TestStack'));
-
-  const rules = template.findResources('AWS::Events::Rule');
-  const scheduleExpressions = Object.values(rules).map(
-    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
-  );
-  expect(scheduleExpressions).not.toContain('cron(30 8 ? * MON-FRI *)');
-  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6); // 既定の7つから信用残バッチ分が減る
-
-  template.hasResourceProperties('AWS::Lambda::Function', {
-    Handler: 'index.handler',
-    Environment: {
-      Variables: Match.exact({
-        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
-        GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
-        MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
-        GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(),
-        TSE_MARGIN_FEATURES_ENABLED: 'false',
-      }),
-    },
-  });
-});
-
-test('tseMarginFeatures passed as the string "false" (as the CLI -c flag does) is treated as disabled', () => {
-  const app = new cdk.App({ context: { tseMarginFeatures: 'false' } });
-  const template = Template.fromStack(new JQuantsStack(app, 'TestStack'));
-
-  const rules = template.findResources('AWS::Events::Rule');
-  const scheduleExpressions = Object.values(rules).map(
-    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
-  );
-  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
+test('cdk.json no longer carries the tseMarginFeatures context flag', () => {
+  const cdkJson = JSON.parse(readFileSync(path.join(__dirname, '..', 'cdk.json'), 'utf-8'));
+  expect(cdkJson.context.tseMarginFeatures).toBeUndefined();
 });
 
 test('creates the JQuantsYutaiTdnetEvent table with pk/eventId key and RETAIN policy', () => {

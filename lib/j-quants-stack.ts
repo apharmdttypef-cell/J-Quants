@@ -4,6 +4,10 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
@@ -33,6 +37,7 @@ export class JQuantsStack extends cdk.Stack {
   public readonly yutaiTdnetEventTable: dynamodb.Table;
   public readonly gyakuhibuValidationBucket: s3.Bucket;
   public readonly apiKeySecret: secretsmanager.Secret;
+  public readonly batchAlarmTopic: sns.Topic;
   public readonly api: apigwv2.HttpApi;
   public readonly frontendBucket: s3.Bucket;
   public readonly distribution: cloudfront.Distribution;
@@ -42,12 +47,17 @@ export class JQuantsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // スタンダードプラン依存機能(東証信用残の取得・現在需給ベース予測・信用残トレンド)の
-    // 有効/無効。ライトプランへ落とす際は `cdk deploy -c tseMarginFeatures=false` の1回で、
-    // 信用残バッチのスケジュール削除・APIのnull応答・画面非表示までまとめて切り替わる
-    // (docs/superpowers/specs/2026-09-09-tse-margin-forecast-design.md)。CLIの-cは文字列で渡る。
-    const tseMarginFeaturesContext = this.node.tryGetContext('tseMarginFeatures');
-    const tseMarginFeatures = tseMarginFeaturesContext !== false && tseMarginFeaturesContext !== 'false';
+    // バッチ失敗の通知先メールアドレス。デプロイ時に環境変数で渡す
+    // (例: ALERT_EMAIL=you@example.com npx cdk deploy)。未設定・空文字なら合成を止める。
+    const alertEmail = process.env.ALERT_EMAIL;
+    if (!alertEmail) {
+      throw new Error('ALERT_EMAIL is required: set it when running cdk (e.g. ALERT_EMAIL=you@example.com npx cdk deploy)');
+    }
+
+    // バッチの連続失敗通知用トピック。今は信用残バッチだけが使うが、他のバッチの
+    // 連続失敗通知にも使い回す。初回デプロイ後に届く確認メールのリンクを踏むまで通知は届かない。
+    this.batchAlarmTopic = new sns.Topic(this, 'JQuantsBatchAlarmTopic');
+    this.batchAlarmTopic.addSubscription(new subscriptions.EmailSubscription(alertEmail));
 
     // J-Quants Freeプランは過去2年分を12週間遅延で配信する(直近12週間分は取得不可)。
     // 蓄積データはスタック destroy 時も残す(RETAIN + PITR)。
@@ -81,8 +91,7 @@ export class JQuantsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // 信用残(融資残・貸株残)の時系列。トレンドグラフ表示と貸借銘柄判定に使う
-    // (逆日歩の見積り計算そのものには使わない。最高料率は株価×単元株数で決まるため)。
+    // 日証金の貸借取引残高(taisyaku.jp)。トレンドグラフと現在需給予測に使う。貸借判定は`marginName`。
     this.marginBalanceTable = new dynamodb.Table(this, 'JQuantsMarginBalanceTable', {
       tableName: 'JQuantsMarginBalance',
       partitionKey: { name: 'ticker', type: dynamodb.AttributeType.STRING },
@@ -219,24 +228,32 @@ export class JQuantsStack extends cdk.Stack {
       environment: {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
-        SECRET_ARN: this.apiKeySecret.secretArn,
+        REQUEST_INTERVAL_MS: '1000',
+        MAX_DATES_PER_RUN: '40',
       },
     });
 
     this.yutaiMasterTable.grantReadData(marginBalanceBatchFn);
     this.marginBalanceTable.grantReadWriteData(marginBalanceBatchFn);
-    this.apiKeySecret.grantRead(marginBalanceBatchFn);
 
-    // 信用残はJ-Quants側で毎営業日16:30頃に更新される(margin-alertは以前から日次、
-    // margin-interestは2026-09-28から日次)。JST平日17:30 = UTC 08:30。
-    // スタンダードプラン依存のため、tseMarginFeaturesが無効ならスケジュール自体を作らない
-    // (Lambdaは残すので手動実行は可能)。
-    if (tseMarginFeatures) {
-      new events.Rule(this, 'MarginBalanceBatchSchedule', {
-        schedule: events.Schedule.cron({ minute: '30', hour: '8', weekDay: 'MON-FRI' }),
-        targets: [new targets.LambdaFunction(marginBalanceBatchFn)],
-      });
-    }
+    // taisyaku.jpの公表時刻は未確定(Task 0)。JST平日19:15 = UTC 10:15。毎回カーソル日を取り直して
+    // 遅れた公表・訂正を拾う。GyakuhibuHistoryBatchSchedule(UTC 10:00、同じtaisyaku.jpを叩く)と重ならず、
+    // GyakuhibuForecastBatchSchedule(UTC 10:40)より前に終わる時刻(タイムアウト14分で最遅10:29)。
+    new events.Rule(this, 'MarginBalanceBatchSchedule', {
+      schedule: events.Schedule.cron({ minute: '15', hour: '10', weekDay: 'MON-FRI' }),
+      targets: [new targets.LambdaFunction(marginBalanceBatchFn)],
+    });
+
+    // 2日連続で失敗(エラーが出た日が2日続く)したらメールで知らせる。実行が無い日は欠測扱いで正常。
+    new cloudwatch.Alarm(this, 'MarginBalanceBatchErrorsAlarm', {
+      metric: marginBalanceBatchFn.metricErrors({ period: cdk.Duration.days(1), statistic: 'Sum' }),
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      evaluationPeriods: 2,
+      datapointsToAlarm: 2,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: '信用残バッチ(taisyaku.jp)が2日連続で失敗',
+    }).addAlarmAction(new cloudwatch_actions.SnsAction(this.batchAlarmTopic));
 
     const gyakuhibuHistoryBatchFn = new nodejs.NodejsFunction(this, 'GyakuhibuHistoryBatchFunction', {
       entry: path.join(__dirname, '..', 'lambda', 'gyakuhibu-history-batch', 'index.ts'),
@@ -295,7 +312,7 @@ export class JQuantsStack extends cdk.Stack {
     this.yutaiTdnetEventTable.grantWriteData(yutaiTdnetWatchBatchFn);
 
     // TDnetの直近開示から株主優待関連の新設・変更・廃止を検知する。既存の週次バッチ
-    // (FinancialSummaryBatchSchedule: 月11:00 UTC、MarginBalanceBatchSchedule: 月9:30 UTC)
+    // (FinancialSummaryBatchSchedule: 月11:00 UTC、MarginBalanceBatchSchedule: 平日10:15 UTC)
     // と重ならない時間帯。JST 月曜21:00 = UTC 月曜12:00。
     new events.Rule(this, 'YutaiTdnetWatchBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '0', hour: '12', weekDay: 'MON' }),
@@ -311,7 +328,6 @@ export class JQuantsStack extends cdk.Stack {
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
-        MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         TABLE_NAME: this.stockPricesTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
         // 貸借区分(J-Quants /equities/master のMrgnNm)を毎日取り込むためのAPIキー
@@ -320,7 +336,6 @@ export class JQuantsStack extends cdk.Stack {
     });
 
     this.yutaiMasterTable.grantReadWriteData(yutaiRiskPrecomputeBatchFn);
-    this.marginBalanceTable.grantReadData(yutaiRiskPrecomputeBatchFn);
     this.stockPricesTable.grantReadData(yutaiRiskPrecomputeBatchFn);
     this.gyakuhibuActualTable.grantReadData(yutaiRiskPrecomputeBatchFn);
     this.apiKeySecret.grantRead(yutaiRiskPrecomputeBatchFn);
@@ -420,7 +435,6 @@ export class JQuantsStack extends cdk.Stack {
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName,
-        TSE_MARGIN_FEATURES_ENABLED: String(tseMarginFeatures),
       },
     });
 
@@ -429,8 +443,8 @@ export class JQuantsStack extends cdk.Stack {
     this.marginBalanceTable.grantReadData(gyakuhibuForecastBatchFn);
     this.gyakuhibuForecastTable.grantWriteData(gyakuhibuForecastBatchFn);
 
-    // 逆日歩実績(GyakuhibuHistoryBatchSchedule: 毎日10:00 UTC)と信用残(MarginBalanceBatchSchedule:
-    // 平日08:30 UTC)の後に実行する。JST 19:40 = UTC 10:40。
+    // 逆日歩実績(GyakuhibuHistoryBatchSchedule: 毎日10:00 UTC)の後、信用残バッチ(MarginBalanceBatchSchedule:
+    // 平日10:15 UTC)の後に走るので当日までの残高を使う。JST 19:40 = UTC 10:40。
     new events.Rule(this, 'GyakuhibuForecastBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '40', hour: '10' }),
       targets: [new targets.LambdaFunction(gyakuhibuForecastBatchFn)],
@@ -450,7 +464,6 @@ export class JQuantsStack extends cdk.Stack {
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
         GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName,
-        TSE_MARGIN_FEATURES_ENABLED: String(tseMarginFeatures),
         YUTAI_TDNET_EVENT_TABLE_NAME: this.yutaiTdnetEventTable.tableName,
       },
     });
