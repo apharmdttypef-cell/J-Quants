@@ -365,22 +365,28 @@ function MarginTrendChart({ ticker, rightsDates }: { ticker: string; rightsDates
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
               <XAxis dataKey="date" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
               <YAxis yAxisId="balance" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={64} />
-              <YAxis yAxisId="ratio" orientation="right" width={40} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-              <ChartTooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }} />
+              <YAxis yAxisId="ratio" orientation="right" width={40} domain={[0, 3]} allowDataOverflow ticks={[0, 0.5, 1, 1.5, 2, 2.5, 3]} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+              <ChartTooltip
+                contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', fontSize: 12 }}
+                formatter={(value, name) => {
+                  if (typeof value !== 'number') return [value, name];
+                  return [name === '貸借倍率' ? value.toFixed(2) : value.toLocaleString('ja-JP'), name];
+                }}
+              />
               <Line yAxisId="balance" type="monotone" dataKey="lendingBalance" stroke="var(--accent)" dot={false} name="貸株残" />
               <Line yAxisId="balance" type="monotone" dataKey="financingBalance" stroke="var(--text-muted)" dot={false} name="融資残" />
               {rightsDates.map((date) => (
                 <ReferenceLine key={date} yAxisId="balance" x={date} stroke="var(--up)" strokeDasharray="3 3" />
               ))}
               <Line yAxisId="ratio" type="monotone" dataKey="lendingRatio" stroke="var(--up)" strokeDasharray="4 2" dot={false} name="貸借倍率" connectNulls={false} />
-              <ReferenceLine yAxisId="ratio" y={1} stroke="var(--text-muted)" strokeDasharray="2 2" label={{ value: '1.0', position: 'right', fontSize: 10, fill: 'var(--text-muted)' }} />
+              <ReferenceLine yAxisId="ratio" y={1} stroke="var(--text-muted)" strokeDasharray="2 2" label={{ value: '1.0', position: 'insideTopRight', fontSize: 10, fill: 'var(--text-muted)' }} />
             </LineChart>
           </ResponsiveContainer>
         </div>
       )}
       {trendState.data && trendState.data.points.length > 0 && (
         <p style={{ marginTop: '0.5rem', fontSize: 12, color: 'var(--text-muted)' }}>
-          日本証券金融の貸借取引残高(融資残・貸株残)。取引所公表の信用残とは異なります。貸借倍率(融資残÷貸株残)が1.0を下回ると貸株超過で、逆日歩が付く可能性があります。
+          日本証券金融の貸借取引残高(融資残・貸株残)。取引所公表の信用残とは異なります。貸借倍率(融資残÷貸株残)が1.0を下回ると貸株超過で、逆日歩が付く可能性があります。貸借倍率が3を超える日は右軸の上端に表示を切り詰めています(ツールチップは実際の値)。
         </p>
       )}
     </>
