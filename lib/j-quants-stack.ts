@@ -229,6 +229,9 @@ export class JQuantsStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
+      // EventBridgeからの非同期invokeでLambdaが関数エラー時に自動で再実行する既定(2回)を無効にする。
+      // ターゲット側のretryAttemptsとは別の設定(下のスケジュールのコメント参照)
+      retryAttempts: 0,
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
@@ -245,7 +248,10 @@ export class JQuantsStack extends cdk.Stack {
     // 遅れた公表・訂正を拾う。GyakuhibuHistoryBatchSchedule(UTC 10:00、同じtaisyaku.jpを叩く)の15分後に
     // 開始する(別セッションなので実行が重なっても負荷が増えるだけ)。GyakuhibuForecastBatchSchedule(UTC 10:40)
     // より前に終わる時刻(タイムアウト14分で最遅10:29)。
-    // 非同期invokeの既定リトライ(2回)はtaisyaku.jpへの負荷を3倍にし、予測バッチの時刻を越えうるので無効にする。
+    // リトライは2層あり、どちらも無効にする。(1) EventBridgeの配信リトライ(ターゲットのretryAttempts)は
+    // Lambdaへの配信失敗時の再送だけを止める。(2) EventBridgeはLambdaを非同期invokeするので、関数エラー時の
+    // Lambda側の非同期リトライ(既定2回)は関数のretryAttempts(EventInvokeConfig)で止める。これを残すと
+    // 失敗した回が最大3回走り、taisyaku.jpへの負荷が3倍になって予測バッチの時刻を越えうる。
     // 取り直しは翌営業日の実行に任せる(カーソル日から取り直すので取りこぼさない)。
     new events.Rule(this, 'MarginBalanceBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '15', hour: '10', weekDay: 'MON-FRI' }),

@@ -302,6 +302,11 @@ test('creates the margin balance batch Lambda wired to the yutai and margin tabl
     // 長引きうるため再試行しない。取り直しは翌営業日の実行に任せる
     Targets: [Match.objectLike({ RetryPolicy: { MaximumRetryAttempts: 0 } })],
   });
+  // EventBridgeはLambdaを非同期invokeするため、Lambda側の非同期リトライ(既定2回)も無効にする
+  template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+    FunctionName: { Ref: Match.stringLikeRegexp('MarginBalanceBatchFunction') },
+    MaximumRetryAttempts: 0,
+  });
   const rules = template.findResources('AWS::Events::Rule');
   const scheduleExpressions = Object.values(rules).map(
     (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
