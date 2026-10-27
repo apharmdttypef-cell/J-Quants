@@ -1,6 +1,11 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { parseTaisyakuBalanceCsv, TaisyakuCsvFormatError, TAISYAKU_BALANCE_CSV_HEADER } from '../lambda/margin-balance-batch/data-source';
+import {
+  parseTaisyakuBalanceCsv,
+  parseTaisyakuMarginNames,
+  TaisyakuCsvFormatError,
+  TAISYAKU_BALANCE_CSV_HEADER,
+} from '../lambda/margin-balance-batch/data-source';
 
 // 実CSV(CP932)をそのままフィクスチャにしている。ヘッダー行だけ末尾が\r\n、データ行は\n
 const fixtureText = new TextDecoder('shift_jis').decode(
@@ -83,5 +88,43 @@ describe('parseTaisyakuBalanceCsv', () => {
     expect(TAISYAKU_BALANCE_CSV_HEADER).toHaveLength(14);
     expect(TAISYAKU_BALANCE_CSV_HEADER[6]).toBe('融資残高（株）');
     expect(TAISYAKU_BALANCE_CSV_HEADER[7]).toBe('貸株残高（株）');
+  });
+});
+
+describe('parseTaisyakuMarginNames', () => {
+  it('実CSVから東証行の銘柄コード→貸借区分を返す(7203の名証行は見ない)', () => {
+    expect(parseTaisyakuMarginNames(fixtureText)).toEqual(
+      new Map([
+        ['1301', '貸借'],
+        ['3197', '貸借'],
+        ['7203', '貸借'],
+        ['9418', '貸借'],
+      ]),
+    );
+  });
+
+  it('東証以外の行は値が違っても無視し、貸借区分が空の行は含めない', () => {
+    const csv = [
+      HEADER_LINE,
+      '"1111","A","東証","貸借融資","20270331","","100","100","0","1.00","0.00","-","-","-"',
+      '"1111","A","名証","非貸借","20270331","","100","100","0","1.00","0.00","-","-","-"',
+      '"2222","B","名証","貸借","20270331","","100","100","0","1.00","0.00","-","-","-"',
+      '"3333","C","東証","","20270331","","100","100","0","1.00","0.00","-","-","-"',
+      '"4444","D","東証","非貸借","20270331","","-","-","-","-","-","-","-","-"',
+    ].join('\n');
+    expect(parseTaisyakuMarginNames(csv)).toEqual(
+      new Map([
+        ['1111', '貸借融資'],
+        ['4444', '非貸借'],
+      ]),
+    );
+  });
+
+  it('空のテキストは空のMapを返す', () => {
+    expect(parseTaisyakuMarginNames('')).toEqual(new Map());
+  });
+
+  it('ヘッダーが想定と違えばTaisyakuCsvFormatErrorを投げる', () => {
+    expect(() => parseTaisyakuMarginNames('"銘柄コード","銘柄名"\n"1301","極洋"')).toThrow(TaisyakuCsvFormatError);
   });
 });
