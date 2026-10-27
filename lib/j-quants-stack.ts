@@ -345,15 +345,12 @@ export class JQuantsStack extends cdk.Stack {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         TABLE_NAME: this.stockPricesTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
-        // 貸借区分(J-Quants /equities/master のMrgnNm)を毎日取り込むためのAPIキー
-        SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
 
     this.yutaiMasterTable.grantReadWriteData(yutaiRiskPrecomputeBatchFn);
     this.stockPricesTable.grantReadData(yutaiRiskPrecomputeBatchFn);
     this.gyakuhibuActualTable.grantReadData(yutaiRiskPrecomputeBatchFn);
-    this.apiKeySecret.grantRead(yutaiRiskPrecomputeBatchFn);
 
     // 優待一覧の最大逆日歩などを事前計算し、reference-apiでの逐次クエリ(銘柄数に比例して
     // 増える)を無くす。PriceBatchFunction(daily 09:00 UTC)の後に実行する。JST 18:20 = UTC 09:20。

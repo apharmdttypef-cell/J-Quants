@@ -461,8 +461,6 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         TABLE_NAME: Match.anyValue(),
         GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
-        // 貸借区分(J-Quants /equities/master)を取るためのAPIキー
-        SECRET_ARN: Match.anyValue(),
       }),
     },
   });
@@ -528,15 +526,15 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
   expect(actualActions.some((a) => a.includes('Query'))).toBe(true);
   expect(actualActions.some((a) => a.includes('PutItem') || a.includes('UpdateItem') || a.includes('DeleteItem'))).toBe(false);
 
-  // J-Quants APIキーのシークレットを読める
+  // 貸借区分はマスタから読むだけなので、J-Quants APIキーのシークレットは読まない
   const canReadApiKey = policyEntries
     .filter(([name]) => name.includes('YutaiRiskPrecompute'))
     .flatMap(([, p]) => (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: unknown }> } } }).Properties?.PolicyDocument?.Statement ?? [])
     .some((stmt) => {
       const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
-      return actions.includes('secretsmanager:GetSecretValue') && JSON.stringify(stmt.Resource ?? '').includes('JQuantsApiKeySecret');
+      return actions.includes('secretsmanager:GetSecretValue');
     });
-  expect(canReadApiKey).toBe(true);
+  expect(canReadApiKey).toBe(false);
 });
 
 test('creates the JQuantsGyakuhibuForecast table (ticker only key) with RETAIN policy', () => {
