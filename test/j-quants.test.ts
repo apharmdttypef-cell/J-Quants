@@ -327,12 +327,10 @@ test('creates the margin balance batch Lambda wired to the yutai and margin tabl
   expect(statements.length).toBeGreaterThan(0);
   // J-Quantsのシークレットは読めない
   expect(statements.some((s) => s.actions.includes('secretsmanager:GetSecretValue'))).toBe(false);
-  // 優待マスタは読み取りのみ
+  // 優待マスタは貸借区分(marginName)を更新するので読み書きできる
   const masterActions = statements.filter((s) => s.resourceStr.includes('YutaiMaster')).flatMap((s) => s.actions);
-  expect(masterActions.length).toBeGreaterThan(0);
-  expect(
-    masterActions.some((a) => ['PutItem', 'UpdateItem', 'DeleteItem', 'BatchWriteItem'].some((w) => a.includes(w))),
-  ).toBe(false);
+  expect(masterActions.some((a) => a.includes('Scan'))).toBe(true);
+  expect(masterActions.some((a) => a.includes('UpdateItem'))).toBe(true);
   // 信用残テーブルは読み書きできる
   const marginActions = statements.filter((s) => s.resourceStr.includes('MarginBalance')).flatMap((s) => s.actions);
   expect(marginActions.some((a) => a.includes('BatchWriteItem'))).toBe(true);

@@ -241,7 +241,8 @@ export class JQuantsStack extends cdk.Stack {
       },
     });
 
-    this.yutaiMasterTable.grantReadData(marginBalanceBatchFn);
+    // 貸借区分(marginName)をtaisyaku.jpのCSVから更新するため、優待マスタは読み書き
+    this.yutaiMasterTable.grantReadWriteData(marginBalanceBatchFn);
     this.marginBalanceTable.grantReadWriteData(marginBalanceBatchFn);
 
     // taisyaku.jpの公表時刻は未確定(Task 0)。JST平日19:15 = UTC 10:15。毎回カーソル日を取り直して

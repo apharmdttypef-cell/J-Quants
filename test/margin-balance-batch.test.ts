@@ -13,6 +13,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   ScanCommand: jest.fn((input: unknown) => ({ ...(input as object), __type: 'Scan' })),
   GetCommand: jest.fn((input: unknown) => ({ ...(input as object), __type: 'Get' })),
   PutCommand: jest.fn((input: unknown) => ({ ...(input as object), __type: 'Put' })),
+  UpdateCommand: jest.fn((input: unknown) => ({ ...(input as object), __type: 'Update' })),
   BatchWriteCommand: jest.fn((input: unknown) => ({ ...(input as object), __type: 'BatchWrite' })),
 }));
 // 取得(HTTP)だけ差し替え、パース(ヘッダー検証を含む)は本物を使う
@@ -36,24 +37,32 @@ const { CURSOR_KEY } = require('../lambda/margin-balance-batch/fetch-plan') as {
 };
 /* eslint-enable @typescript-eslint/no-var-requires */
 
-type Row = [code: string, market: string, financing: string, lending: string];
+type Row = [code: string, market: string, financing: string, lending: string, marginName?: string];
 
 function csvFor(rows: Row[]): string {
   const quote = (cols: string[]) => cols.map((c) => `"${c}"`).join(',');
   const lines = [quote([...TAISYAKU_BALANCE_CSV_HEADER])];
-  for (const [code, market, financing, lending] of rows) {
+  for (const [code, market, financing, lending, marginName = '貸借'] of rows) {
     lines.push(
-      quote([code, `銘柄${code}`, market, '貸借', '20270331', '', financing, lending, '0', '1.00', '0.00', '-', '-', '-']),
+      quote([code, `銘柄${code}`, market, marginName, '20270331', '', financing, lending, '0', '1.00', '0.00', '-', '-', '-']),
     );
   }
   return lines.join('\r\n');
 }
 
-function mockTables({ master, cursor }: { master: string[]; cursor?: string }): void {
+function mockTables({
+  master,
+  cursor,
+  marginNames = {},
+}: {
+  master: string[];
+  cursor?: string;
+  marginNames?: Record<string, string>;
+}): void {
   mockSend.mockImplementation(async (command: { __type: string }) => {
     switch (command.__type) {
       case 'Scan':
-        return { Items: master.map((ticker) => ({ ticker })) };
+        return { Items: master.map((ticker) => ({ ticker, marginName: marginNames[ticker] })) };
       case 'Get':
         return cursor ? { Item: { ...CURSOR_KEY, lastFetchedDate: cursor } } : {};
       default:
@@ -80,6 +89,16 @@ function putItems(): Record<string, unknown>[] {
     ((c.RequestItems as Record<string, { PutRequest: { Item: Record<string, unknown> } }[]>).JQuantsMarginBalance ?? []).map(
       (r) => r.PutRequest.Item,
     ),
+  );
+}
+
+// マスタへの貸借区分の書き込み(ticker → 書いた値)
+function marginNameUpdates(): Record<string, unknown> {
+  return Object.fromEntries(
+    sentCommands('Update').map((c) => [
+      (c.Key as { ticker: string }).ticker,
+      (c.ExpressionAttributeValues as Record<string, unknown>)[':marginName'],
+    ]),
   );
 }
 
@@ -291,6 +310,100 @@ test('取得済みが最新ならカーソル日の取り直し1日だけ取る'
   await handler();
 
   expect(fetchedDates()).toEqual(['2026-10-23']);
+});
+
+test('最新の申込日のCSVの貸借区分で、値が変わった銘柄だけマスタを更新する', async () => {
+  mockTables({
+    master: ['7203', '3197', '1301', '9418'],
+    cursor: '2026-10-21',
+    marginNames: { '7203': '貸借', '3197': '信用', '1301': '貸借', '9418': '貸借' },
+  });
+  const older = csvFor([
+    ['7203', '東証', '100', '50', '貸借'],
+    ['3197', '東証', '100', '50', '貸借'],
+    ['1301', '東証', '100', '50', '貸借'],
+    ['9418', '東証', '100', '50', '貸借'],
+  ]);
+  const newest = csvFor([
+    ['7203', '東証', '100', '50', '貸借'], // 変化なし → 書かない
+    ['3197', '東証', '100', '50', '貸借融資'], // J-Quants表記(信用)から変わる
+    ['1301', '東証', '100', '50', '非貸借'],
+    ['9418', '名証', '100', '50', '貸借'], // 東証行が無い → null
+  ]);
+  mockFetchCsv.mockImplementation(async (date: string) => (date === '2026-10-23' ? newest : older));
+
+  await handler();
+
+  expect(marginNameUpdates()).toEqual({ '3197': '貸借融資', '1301': '非貸借', '9418': null });
+  expect(sentCommands('Update')[0]).toMatchObject({
+    TableName: 'JQuantsYutaiMaster',
+    UpdateExpression: 'SET marginName = :marginName',
+  });
+});
+
+test('今日が未公表なら、取れた日のうち最新(昨日)のCSVの区分を使う', async () => {
+  mockTables({ master: ['7203'], cursor: '2026-10-21', marginNames: { '7203': '貸借' } });
+  mockFetchCsv.mockImplementation(async (date: string) => {
+    if (date === '2026-10-23') return null;
+    return csvFor([['7203', '東証', '100', '50', date === '2026-10-22' ? '貸借融資' : '貸借']]);
+  });
+
+  await handler();
+
+  expect(marginNameUpdates()).toEqual({ '7203': '貸借融資' });
+});
+
+test('東証行が無く、すでにnull(未設定)の銘柄は書かない', async () => {
+  mockTables({ master: ['7203', '5555'], cursor: '2026-10-23', marginNames: { '7203': '貸借' } });
+  mockFetchCsv.mockResolvedValue(csvFor([['7203', '東証', '100', '50']]));
+
+  await handler();
+
+  expect(sentCommands('Update')).toHaveLength(0);
+});
+
+test('CSVが1件も取れなかった実行では区分を更新しない', async () => {
+  mockTables({ master: ['7203'], cursor: '2026-10-23', marginNames: { '7203': '貸借' } });
+  mockFetchCsv.mockResolvedValue(null);
+
+  await handler();
+
+  expect(sentCommands('Update')).toHaveLength(0);
+});
+
+test('区分の更新に失敗しても信用残の処理を終えてから例外を投げる', async () => {
+  jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  mockTables({ master: ['7203', '3197'], cursor: '2026-10-21' });
+  const base = mockSend.getMockImplementation()!;
+  mockSend.mockImplementation(async (command: { __type: string; Key?: { ticker: string } }) => {
+    if (command.__type === 'Update' && command.Key?.ticker === '7203') throw new Error('ddb down');
+    return base(command);
+  });
+  mockFetchCsv.mockResolvedValue(
+    csvFor([
+      ['7203', '東証', '100', '50'],
+      ['3197', '東証', '100', '50'],
+    ]),
+  );
+
+  await expect(handler()).rejects.toThrow('failed to update the margin classification of 1 tickers');
+
+  // 信用残は3日分とも書き終えている
+  expect(cursorWrites()).toEqual(['2026-10-21', '2026-10-22', '2026-10-23']);
+  // 失敗した銘柄があっても残りの銘柄は更新する
+  expect(sentCommands('Update').map((c) => (c.Key as { ticker: string }).ticker).sort()).toEqual(['3197', '7203']);
+});
+
+test('マスタのScanはtickerとmarginNameだけを読む', async () => {
+  mockTables({ master: ['7203'], cursor: '2026-10-23' });
+  mockFetchCsv.mockResolvedValue(csvFor([['7203', '東証', '100', '50']]));
+
+  await handler();
+
+  expect(sentCommands('Scan')[0]).toMatchObject({
+    TableName: 'JQuantsYutaiMaster',
+    ProjectionExpression: 'ticker, marginName',
+  });
 });
 
 test('J-Quants(APIキー・クライアント)に依存しない', () => {
