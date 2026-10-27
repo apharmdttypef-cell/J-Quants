@@ -506,14 +506,12 @@ export class JQuantsStack extends cdk.Stack {
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
         STOCK_PRICES_TABLE_NAME: this.stockPricesTable.tableName,
         VALIDATION_BUCKET_NAME: this.gyakuhibuValidationBucket.bucketName,
-        SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
 
     this.yutaiMasterTable.grantReadData(gyakuhibuForecastSnapshotFn);
     this.gyakuhibuActualTable.grantReadData(gyakuhibuForecastSnapshotFn);
     this.stockPricesTable.grantReadData(gyakuhibuForecastSnapshotFn);
-    this.apiKeySecret.grantRead(gyakuhibuForecastSnapshotFn);
     this.gyakuhibuValidationBucket.grantPut(gyakuhibuForecastSnapshotFn);
     this.gyakuhibuValidationBucket.grantRead(gyakuhibuForecastSnapshotFn);
 

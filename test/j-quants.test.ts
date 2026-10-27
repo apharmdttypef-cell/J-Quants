@@ -850,7 +850,7 @@ test('creates the gyakuhibu validation bucket with Object Lock (Governance, reta
   });
 });
 
-test('creates the ForecastSnapshotFunction wired to master/actual/price tables, the api secret, and the validation bucket, with no schedule of its own', () => {
+test('creates the ForecastSnapshotFunction wired to master/actual/price tables, and the validation bucket, with no schedule of its own', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -864,10 +864,18 @@ test('creates the ForecastSnapshotFunction wired to master/actual/price tables, 
         GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
         STOCK_PRICES_TABLE_NAME: Match.anyValue(),
         VALIDATION_BUCKET_NAME: Match.anyValue(),
-        SECRET_ARN: Match.anyValue(),
       }),
     },
   });
+
+  // 対象銘柄はマスタのmarginNameで絞るので、J-Quants APIキーは渡さない
+  const snapshotFn = Object.entries(template.findResources('AWS::Lambda::Function')).find(([name]) =>
+    name.includes('ForecastSnapshotFunction'),
+  );
+  expect(snapshotFn).toBeDefined();
+  expect(
+    (snapshotFn![1] as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables,
+  ).not.toHaveProperty('SECRET_ARN');
 
   const policies = template.findResources('AWS::IAM::Policy');
   const policyEntries = Object.entries(policies);
@@ -896,8 +904,9 @@ test('creates the ForecastSnapshotFunction wired to master/actual/price tables, 
   expect(hasReadAccess('GyakuhibuActual')).toBe(true);
   expect(hasReadAccess('StockPrices')).toBe(true);
 
+  // J-Quants APIキーのシークレットは読まない
   expect(hasStatement('ForecastSnapshotFunction', (actions) => actions.some((a) => a.includes('secretsmanager:GetSecretValue')))).toBe(
-    true,
+    false,
   );
 
   expect(
