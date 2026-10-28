@@ -241,7 +241,8 @@ export class JQuantsStack extends cdk.Stack {
       },
     });
 
-    this.yutaiMasterTable.grantReadData(marginBalanceBatchFn);
+    // 貸借区分(marginName)をtaisyaku.jpのCSVから更新するため、優待マスタは読み書き
+    this.yutaiMasterTable.grantReadWriteData(marginBalanceBatchFn);
     this.marginBalanceTable.grantReadWriteData(marginBalanceBatchFn);
 
     // taisyaku.jpの公表時刻は未確定(Task 0)。JST平日19:15 = UTC 10:15。毎回カーソル日を取り直して
@@ -344,15 +345,12 @@ export class JQuantsStack extends cdk.Stack {
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         TABLE_NAME: this.stockPricesTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
-        // 貸借区分(J-Quants /equities/master のMrgnNm)を毎日取り込むためのAPIキー
-        SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
 
     this.yutaiMasterTable.grantReadWriteData(yutaiRiskPrecomputeBatchFn);
     this.stockPricesTable.grantReadData(yutaiRiskPrecomputeBatchFn);
     this.gyakuhibuActualTable.grantReadData(yutaiRiskPrecomputeBatchFn);
-    this.apiKeySecret.grantRead(yutaiRiskPrecomputeBatchFn);
 
     // 優待一覧の最大逆日歩などを事前計算し、reference-apiでの逐次クエリ(銘柄数に比例して
     // 増える)を無くす。PriceBatchFunction(daily 09:00 UTC)の後に実行する。JST 18:20 = UTC 09:20。
@@ -508,14 +506,12 @@ export class JQuantsStack extends cdk.Stack {
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
         STOCK_PRICES_TABLE_NAME: this.stockPricesTable.tableName,
         VALIDATION_BUCKET_NAME: this.gyakuhibuValidationBucket.bucketName,
-        SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
 
     this.yutaiMasterTable.grantReadData(gyakuhibuForecastSnapshotFn);
     this.gyakuhibuActualTable.grantReadData(gyakuhibuForecastSnapshotFn);
     this.stockPricesTable.grantReadData(gyakuhibuForecastSnapshotFn);
-    this.apiKeySecret.grantRead(gyakuhibuForecastSnapshotFn);
     this.gyakuhibuValidationBucket.grantPut(gyakuhibuForecastSnapshotFn);
     this.gyakuhibuValidationBucket.grantRead(gyakuhibuForecastSnapshotFn);
 

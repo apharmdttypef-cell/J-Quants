@@ -38,7 +38,6 @@ jest.mock('../lambda/gyakuhibu-forecast-validation/snapshot-input', () => ({
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 process.env.STOCK_PRICES_TABLE_NAME = 'JQuantsStockPrices';
-process.env.SECRET_ARN = 'arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:JQuantsApiKey';
 process.env.VALIDATION_BUCKET_NAME = 'test-validation-bucket';
 process.env.TAISYAKU_REQUEST_INTERVAL_MS = '0'; // テストでは待機なしにする
 
@@ -59,7 +58,7 @@ beforeEach(() => {
 });
 
 // -----------------------------------------------------------------------
-// resolveTargetTickers: yutai masterとequities/masterの積集合が正しく計算されること
+// resolveTargetTickers: yutai masterの対象月かつマスタのmarginNameが貸借の銘柄だけが選ばれること
 // -----------------------------------------------------------------------
 describe('resolveTargetTickers', () => {
   // target-tickers.tsの実装そのものをテストするため、上のjest.mockを経由しない
@@ -69,66 +68,43 @@ describe('resolveTargetTickers', () => {
     '../lambda/gyakuhibu-forecast-validation/target-tickers',
   ) as typeof import('../lambda/gyakuhibu-forecast-validation/target-tickers');
 
-  test('intersects yutai-master rows (rightsMonths includes the target month) with equities/master margin-eligible tickers', async () => {
+  test('keeps yutai-master rows whose rightsMonths include the target month and whose stored marginName is 貸借', async () => {
     mockDdbSend.mockResolvedValueOnce({
       Items: [
-        { ticker: '1111', companyName: 'A社', value: 1000, unitShares: 100, maxGyakuhibu: 5000, rightsMonths: [9] },
-        { ticker: '2222', companyName: 'B社', value: 2000, unitShares: 100, maxGyakuhibu: 3000, rightsMonths: [9] },
-        { ticker: '3333', companyName: 'C社', value: 500, unitShares: 100, maxGyakuhibu: 1000, rightsMonths: [3] }, // 対象月(9)を含まない
+        { ticker: '1111', companyName: 'A社', value: 1000, unitShares: 100, maxGyakuhibu: 5000, rightsMonths: [9], marginName: '貸借' },
+        { ticker: '2222', companyName: 'B社', value: 2000, unitShares: 100, maxGyakuhibu: 3000, rightsMonths: [9], marginName: '貸借融資' }, // 貸借ではないので除外
+        { ticker: '3333', companyName: 'C社', value: 500, unitShares: 100, maxGyakuhibu: 1000, rightsMonths: [3], marginName: '貸借' }, // 対象月(9)を含まない
+        { ticker: '4444', companyName: 'D社', value: 500, unitShares: 100, maxGyakuhibu: 1000, rightsMonths: [9] }, // 区分不明(東証行なし)は除外
       ],
     });
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
-    mockFetchWithRetry.mockResolvedValueOnce({
-      json: async () => ({
-        data: [
-          { Code: '11110', MrgnNm: '貸借' }, // 1111にマッチ
-          { Code: '22220', MrgnNm: '信用' }, // 貸借ではないので除外
-          { Code: '99990', MrgnNm: '貸借' }, // yutai masterに無い銘柄
-        ],
-      }),
-    });
 
     const result = await realResolveTargetTickers(9);
 
-    expect(result.map((r) => r.ticker)).toEqual(['1111']);
-    expect(result[0]).toEqual({
-      ticker: '1111',
-      companyName: 'A社',
-      value: 1000,
-      unitShares: 100,
-      maxGyakuhibu: 5000,
-      rightsMonths: [9],
-    });
+    expect(result).toEqual([
+      { ticker: '1111', companyName: 'A社', value: 1000, unitShares: 100, maxGyakuhibu: 5000, rightsMonths: [9] },
+    ]);
   });
 
-  test('paginates equities/master using pagination_key before intersecting', async () => {
+  test('does not call J-Quants', async () => {
     mockDdbSend.mockResolvedValueOnce({
-      Items: [{ ticker: '4444', companyName: 'D社', value: null, unitShares: 100, maxGyakuhibu: null, rightsMonths: [9] }],
+      Items: [{ ticker: '1111', companyName: 'A社', value: 1000, unitShares: 100, maxGyakuhibu: 5000, rightsMonths: [9], marginName: '貸借' }],
     });
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
-    mockFetchWithRetry
-      .mockResolvedValueOnce({ json: async () => ({ data: [{ Code: '11110', MrgnNm: '貸借' }], pagination_key: 'page2' }) })
-      .mockResolvedValueOnce({ json: async () => ({ data: [{ Code: '44440', MrgnNm: '貸借' }] }) });
 
-    const result = await realResolveTargetTickers(9);
+    await realResolveTargetTickers(9);
 
-    expect(mockFetchWithRetry).toHaveBeenCalledTimes(2);
-    expect(result.map((r) => r.ticker)).toEqual(['4444']);
+    expect(mockGetApiKey).not.toHaveBeenCalled();
+    expect(mockFetchWithRetry).not.toHaveBeenCalled();
   });
 
   test('paginates the yutai master DynamoDB scan using LastEvaluatedKey', async () => {
     mockDdbSend
       .mockResolvedValueOnce({
-        Items: [{ ticker: '5555', companyName: 'E社', value: 100, unitShares: 100, maxGyakuhibu: 200, rightsMonths: [9] }],
+        Items: [{ ticker: '5555', companyName: 'E社', value: 100, unitShares: 100, maxGyakuhibu: 200, rightsMonths: [9], marginName: '貸借' }],
         LastEvaluatedKey: { ticker: '5555' },
       })
       .mockResolvedValueOnce({
-        Items: [{ ticker: '6666', companyName: 'F社', value: 100, unitShares: 100, maxGyakuhibu: 200, rightsMonths: [9] }],
+        Items: [{ ticker: '6666', companyName: 'F社', value: 100, unitShares: 100, maxGyakuhibu: 200, rightsMonths: [9], marginName: '貸借' }],
       });
-    mockGetApiKey.mockResolvedValueOnce('test-api-key');
-    mockFetchWithRetry.mockResolvedValueOnce({
-      json: async () => ({ data: [{ Code: '55550', MrgnNm: '貸借' }, { Code: '66660', MrgnNm: '貸借' }] }),
-    });
 
     const result = await realResolveTargetTickers(9);
 

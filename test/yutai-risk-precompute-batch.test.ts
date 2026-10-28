@@ -14,32 +14,23 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   UpdateCommand: jest.fn((input: unknown) => input),
 }));
 
-// 貸借区分はJ-Quantsから取る。取得そのもの(HTTP)はここでは差し替え、判定ロジック
-// (isGeneralMarginOnly)は本物を使う。
-const mockFetchMarginNames = jest.fn();
-jest.mock('../lambda/shared/margin-name', () => ({
-  ...jest.requireActual('../lambda/shared/margin-name'),
-  fetchMarginNames: (...args: unknown[]) => mockFetchMarginNames(...args),
-}));
+// 貸借区分は信用残バッチがtaisyaku.jpのCSVからマスタに書く。このバッチはJ-Quantsを呼ばない。
+const mockGetApiKey = jest.fn();
 jest.mock('../lambda/shared/jquants-batch-client', () => ({
-  getApiKey: jest.fn(async () => 'test-api-key'),
+  getApiKey: (...args: unknown[]) => mockGetApiKey(...args),
+  fetchWithRetry: jest.fn(),
 }));
 
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.TABLE_NAME = 'JQuantsStockPrices';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
-process.env.SECRET_ARN = 'arn:aws:secretsmanager:test';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/yutai-risk-precompute-batch/index') as { handler: () => Promise<void> };
 
 beforeEach(() => {
   mockSend.mockReset();
-  mockFetchMarginNames.mockReset();
-  // 既定は貸借(最大逆日歩を計算する経路)。
-  mockFetchMarginNames.mockResolvedValue(
-    new Map(['1234', '9001', '7458', '1111', '2222'].map((t) => [t, '貸借'])),
-  );
+  mockGetApiKey.mockReset();
 });
 
 function updateCalls() {
@@ -50,7 +41,7 @@ function updateCalls() {
 
 test('writes null risk amounts when rightsMonths is empty (no upcoming rights date)', async () => {
   mockSend.mockResolvedValueOnce({
-    Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [] }],
+    Items: [{ ticker: '1234', marginName: '貸借', value: 1000, unitShares: 100, rightsMonths: [] }],
   }); // yutai master scan
   mockSend.mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
@@ -88,7 +79,7 @@ test('the master scan projects only the attributes the batch reads', async () =>
   expect(scanInput.ExpressionAttributeNames).toBeUndefined();
 });
 
-test('writes null risk amounts when the margin classification is unknown (not in the J-Quants listing)', async () => {
+test('writes null risk amounts when the margin classification is unknown (no stored marginName)', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9942', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals(区分不明でも走る)
@@ -106,7 +97,7 @@ test('writes null risk amounts when the margin classification is unknown (not in
 
 test('writes null risk amounts when there is no price data for the ticker', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [] }) // latest close: none
     .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
@@ -121,7 +112,7 @@ test('writes null risk amounts when there is no price data for the ticker', asyn
 
 test('writes the numeric risk fields including closePrice, and removes the old riskStatus verdict', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500 }] }) // latest close
     .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
@@ -142,7 +133,7 @@ test('writes the numeric risk fields including closePrice, and removes the old r
 
 test('computes maxGyakuhibu/maxRate/days even when value is null (優待価値が抽出できない銘柄)', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '9001', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan (valueフィールド無し = 東武鉄道のような銘柄)
+    .mockResolvedValueOnce({ Items: [{ ticker: '9001', marginName: '貸借', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan (valueフィールド無し = 東武鉄道のような銘柄)
     .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-12', close: 500 }] }) // latest close
     .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
@@ -159,7 +150,7 @@ test('computes maxGyakuhibu/maxRate/days even when value is null (優待価値�
 test('uses requiredShares instead of estimating from minInvestment', async () => {
   // 第一興商: 単元100株だが優待は200株。推定ではなく個別ページ由来の正確値を使う。
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '7458', value: 5000, unitShares: 100, minInvestment: 400000, requiredShares: 200, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '7458', marginName: '貸借', value: 5000, unitShares: 100, minInvestment: 400000, requiredShares: 200, rightsMonths: [3] }] })
     .mockResolvedValueOnce({ Items: [{ close: 2000 }] }) // 直近終値
     .mockResolvedValueOnce({ Items: [] }) // 逆日歩実績なし
     .mockResolvedValueOnce({}); // update
@@ -179,7 +170,7 @@ test('uses requiredShares instead of estimating from minInvestment', async () =>
 
 test('falls back to unitShares when requiredShares has not been fetched yet', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '1111', value: 3000, unitShares: 100, minInvestment: null, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '1111', marginName: '貸借', value: 3000, unitShares: 100, minInvestment: null, rightsMonths: [3] }] })
     .mockResolvedValueOnce({ Items: [{ close: 1500 }] })
     .mockResolvedValueOnce({ Items: [] })
     .mockResolvedValueOnce({});
@@ -192,7 +183,7 @@ test('falls back to unitShares when requiredShares has not been fetched yet', as
 
 test('aggregates the last and prior-year-same-month gyakuhibu costs', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '7458', value: 5000, unitShares: 100, requiredShares: 200, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '7458', marginName: '貸借', value: 5000, unitShares: 100, requiredShares: 200, rightsMonths: [3] }] })
     .mockResolvedValueOnce({ Items: [{ close: 2000 }] })
     .mockResolvedValueOnce({
       Items: [
@@ -214,7 +205,7 @@ test('aggregates the last and prior-year-same-month gyakuhibu costs', async () =
 
 test('writes null summaries for a ticker with no actual history', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '1111', value: 3000, unitShares: 100, requiredShares: 100, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [{ ticker: '1111', marginName: '貸借', value: 3000, unitShares: 100, requiredShares: 100, rightsMonths: [3] }] })
     .mockResolvedValueOnce({ Items: [{ close: 1500 }] })
     .mockResolvedValueOnce({ Items: [] })
     .mockResolvedValueOnce({});
@@ -251,7 +242,7 @@ test('applies the rights-day 4x rate multiplier (taisyaku.jp「倍率適用」) 
 
   try {
     mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
       .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-07-31', close: 500 }] }) // latest close
       .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
@@ -278,8 +269,8 @@ test('continues past a single row failure and processes the remaining rows', asy
     mockSend
       .mockResolvedValueOnce({
         Items: [
-          { ticker: '1111', value: 1000, unitShares: 100, rightsMonths: [] },
-          { ticker: '2222', value: 1000, unitShares: 100, rightsMonths: [] },
+          { ticker: '1111', marginName: '貸借', value: 1000, unitShares: 100, rightsMonths: [] },
+          { ticker: '2222', marginName: '貸借', value: 1000, unitShares: 100, rightsMonths: [] },
         ],
       }) // yutai master scan
       .mockResolvedValueOnce({ Items: [] }) // 1111's gyakuhibu actuals
@@ -310,33 +301,27 @@ function updateValues(): Record<string, unknown> {
   return (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
 }
 
-test('records the J-Quants margin classification and computes the gyakuhibu amounts for a 貸借 ticker', async () => {
-  mockFetchMarginNames.mockResolvedValue(new Map([['1234', '貸借']]));
+test('computes the gyakuhibu amounts for a ticker whose stored classification is 貸借', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '1234', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', unitShares: 100, rightsMonths: [8], marginName: '貸借' }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ close: 500 }] }) // latest close
     .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
     .mockResolvedValueOnce({}); // update
 
   await handler();
 
-  expect(mockFetchMarginNames).toHaveBeenCalledWith('test-api-key', 'https://api.jquants.com/v2');
-  const values = updateValues();
-  expect(values[':marginName']).toBe('貸借');
-  expect(typeof values[':maxGyakuhibu']).toBe('number');
+  expect(typeof updateValues()[':maxGyakuhibu']).toBe('number');
 });
 
-test('for a 信用 ticker (cannot be shorted under 制度信用), writes no gyakuhibu amounts or past costs but keeps the investment amount', async () => {
-  mockFetchMarginNames.mockResolvedValue(new Map([['1380', '信用']]));
+test('for a 貸借融資 ticker (cannot be shorted under 制度信用), writes no gyakuhibu amounts or past costs but keeps the investment amount', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, requiredShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, requiredShares: 100, rightsMonths: [8], marginName: '貸借融資' }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ close: 800 }] }) // latest close
     .mockResolvedValueOnce({}); // update
 
   await handler();
 
   const values = updateValues();
-  expect(values[':marginName']).toBe('信用');
   expect(values[':maxGyakuhibu']).toBeNull();
   expect(values[':maxRate']).toBeNull();
   expect(values[':days']).toBeNull();
@@ -350,8 +335,7 @@ test('for a 信用 ticker (cannot be shorted under 制度信用), writes no gyak
   expect(mockSend).toHaveBeenCalledTimes(3);
 });
 
-test('treats a ticker missing from the J-Quants listing (東証外上場など) as unknown, not as 一般信用のみ', async () => {
-  mockFetchMarginNames.mockResolvedValue(new Map([['1234', '貸借']]));
+test('treats a ticker without a stored classification (no TSE row) as unknown, not as 一般信用のみ', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9942', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
@@ -359,49 +343,13 @@ test('treats a ticker missing from the J-Quants listing (東証外上場など) 
 
   await handler();
 
-  expect(updateValues()[':marginName']).toBeNull();
-});
-
-test('keeps the stored margin classification when the J-Quants fetch fails', async () => {
-  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-  try {
-    mockFetchMarginNames.mockRejectedValue(new Error('J-Quants API error 500'));
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, rightsMonths: [8], marginName: '信用' }] }) // 前回までの値
-      .mockResolvedValueOnce({ Items: [{ close: 800 }] }) // latest close
-      .mockResolvedValueOnce({}); // update
-
-    await handler();
-
-    const values = updateValues();
-    expect(values[':marginName']).toBe('信用');
-    expect(values[':maxGyakuhibu']).toBeNull();
-    expect(errorSpy).toHaveBeenCalled();
-  } finally {
-    errorSpy.mockRestore();
-  }
-});
-
-test('treats an empty J-Quants listing as a failed fetch rather than wiping every classification', async () => {
-  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-  try {
-    mockFetchMarginNames.mockResolvedValue(new Map());
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, rightsMonths: [8], marginName: '信用' }] })
-      .mockResolvedValueOnce({ Items: [{ close: 800 }] })
-      .mockResolvedValueOnce({});
-
-    await handler();
-
-    expect(updateValues()[':marginName']).toBe('信用');
-  } finally {
-    errorSpy.mockRestore();
-  }
+  expect(updateValues()[':maxGyakuhibu']).toBeNull();
+  expect(updateValues()[':lastGyakuhibu']).toBeNull();
 });
 
 test('never queries the margin balance table', async () => {
   mockSend
-    .mockResolvedValueOnce({ Items: [{ ticker: '1234', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
     .mockResolvedValueOnce({ Items: [{ close: 500 }] }) // latest close
     .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
     .mockResolvedValueOnce({}); // update
@@ -412,22 +360,29 @@ test('never queries the margin balance table', async () => {
   expect(typeof updateValues()[':maxGyakuhibu']).toBe('number');
 });
 
-test('uses the stored 貸借 classification when the J-Quants fetch fails', async () => {
-  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-  try {
-    mockFetchMarginNames.mockRejectedValue(new Error('J-Quants API error 500'));
-    mockSend
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', unitShares: 100, rightsMonths: [8], marginName: '貸借' }] })
-      .mockResolvedValueOnce({ Items: [{ close: 500 }] }) // latest close
-      .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
-      .mockResolvedValueOnce({}); // update
+test('a stored J-Quants-era 信用 value is still treated as 一般信用のみ (until the margin balance batch rewrites it)', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, rightsMonths: [8], marginName: '信用' }] })
+    .mockResolvedValueOnce({ Items: [{ close: 800 }] })
+    .mockResolvedValueOnce({});
 
-    await handler();
+  await handler();
 
-    const values = updateValues();
-    expect(values[':marginName']).toBe('貸借');
-    expect(typeof values[':maxGyakuhibu']).toBe('number');
-  } finally {
-    errorSpy.mockRestore();
-  }
+  expect(updateValues()[':maxGyakuhibu']).toBeNull();
+  expect(updateValues()[':requiredInvestment']).toBe(80000);
+});
+
+test('never calls J-Quants and never writes marginName (the margin balance batch owns it)', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', unitShares: 100, rightsMonths: [8], marginName: '貸借' }] })
+    .mockResolvedValueOnce({ Items: [{ close: 500 }] })
+    .mockResolvedValueOnce({ Items: [] })
+    .mockResolvedValueOnce({});
+
+  await handler();
+
+  expect(mockGetApiKey).not.toHaveBeenCalled();
+  const update = updateCalls()[0][0] as { UpdateExpression: string; ExpressionAttributeValues: Record<string, unknown> };
+  expect(update.UpdateExpression).not.toContain('marginName');
+  expect(update.ExpressionAttributeValues).not.toHaveProperty(':marginName');
 });

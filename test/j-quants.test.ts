@@ -327,12 +327,10 @@ test('creates the margin balance batch Lambda wired to the yutai and margin tabl
   expect(statements.length).toBeGreaterThan(0);
   // J-Quantsのシークレットは読めない
   expect(statements.some((s) => s.actions.includes('secretsmanager:GetSecretValue'))).toBe(false);
-  // 優待マスタは読み取りのみ
+  // 優待マスタは貸借区分(marginName)を更新するので読み書きできる
   const masterActions = statements.filter((s) => s.resourceStr.includes('YutaiMaster')).flatMap((s) => s.actions);
-  expect(masterActions.length).toBeGreaterThan(0);
-  expect(
-    masterActions.some((a) => ['PutItem', 'UpdateItem', 'DeleteItem', 'BatchWriteItem'].some((w) => a.includes(w))),
-  ).toBe(false);
+  expect(masterActions.some((a) => a.includes('Scan'))).toBe(true);
+  expect(masterActions.some((a) => a.includes('UpdateItem'))).toBe(true);
   // 信用残テーブルは読み書きできる
   const marginActions = statements.filter((s) => s.resourceStr.includes('MarginBalance')).flatMap((s) => s.actions);
   expect(marginActions.some((a) => a.includes('BatchWriteItem'))).toBe(true);
@@ -453,7 +451,7 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
   const template = synth();
 
   // Verify the Lambda function exists with exact environment variables (not a superset like ReferenceApiFunction).
-  // Use Match.exact() to ensure only these four env vars are present, distinguishing it from ReferenceApiFunction
+  // Use Match.exact() to ensure only these three env vars are present, distinguishing it from ReferenceApiFunction
   // which has many more env vars (FINANCIAL_TABLE_NAME, GYAKUHIBU_ACTUAL_TABLE_NAME, MARGIN_BALANCE_TABLE_NAME, YUTAI_TDNET_EVENT_TABLE_NAME).
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
@@ -463,8 +461,6 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
         TABLE_NAME: Match.anyValue(),
         GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
-        // 貸借区分(J-Quants /equities/master)を取るためのAPIキー
-        SECRET_ARN: Match.anyValue(),
       }),
     },
   });
@@ -530,15 +526,15 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
   expect(actualActions.some((a) => a.includes('Query'))).toBe(true);
   expect(actualActions.some((a) => a.includes('PutItem') || a.includes('UpdateItem') || a.includes('DeleteItem'))).toBe(false);
 
-  // J-Quants APIキーのシークレットを読める
+  // 貸借区分はマスタから読むだけなので、J-Quants APIキーのシークレットは読まない
   const canReadApiKey = policyEntries
     .filter(([name]) => name.includes('YutaiRiskPrecompute'))
     .flatMap(([, p]) => (p as { Properties?: { PolicyDocument?: { Statement?: Array<{ Action?: string[] | string; Resource?: unknown }> } } }).Properties?.PolicyDocument?.Statement ?? [])
     .some((stmt) => {
       const actions = Array.isArray(stmt.Action) ? stmt.Action : stmt.Action ? [stmt.Action] : [];
-      return actions.includes('secretsmanager:GetSecretValue') && JSON.stringify(stmt.Resource ?? '').includes('JQuantsApiKeySecret');
+      return actions.includes('secretsmanager:GetSecretValue');
     });
-  expect(canReadApiKey).toBe(true);
+  expect(canReadApiKey).toBe(false);
 });
 
 test('creates the JQuantsGyakuhibuForecast table (ticker only key) with RETAIN policy', () => {
@@ -854,7 +850,7 @@ test('creates the gyakuhibu validation bucket with Object Lock (Governance, reta
   });
 });
 
-test('creates the ForecastSnapshotFunction wired to master/actual/price tables, the api secret, and the validation bucket, with no schedule of its own', () => {
+test('creates the ForecastSnapshotFunction wired to master/actual/price tables, and the validation bucket, with no schedule of its own', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
@@ -868,10 +864,18 @@ test('creates the ForecastSnapshotFunction wired to master/actual/price tables, 
         GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
         STOCK_PRICES_TABLE_NAME: Match.anyValue(),
         VALIDATION_BUCKET_NAME: Match.anyValue(),
-        SECRET_ARN: Match.anyValue(),
       }),
     },
   });
+
+  // 対象銘柄はマスタのmarginNameで絞るので、J-Quants APIキーは渡さない
+  const snapshotFn = Object.entries(template.findResources('AWS::Lambda::Function')).find(([name]) =>
+    name.includes('ForecastSnapshotFunction'),
+  );
+  expect(snapshotFn).toBeDefined();
+  expect(
+    (snapshotFn![1] as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables,
+  ).not.toHaveProperty('SECRET_ARN');
 
   const policies = template.findResources('AWS::IAM::Policy');
   const policyEntries = Object.entries(policies);
@@ -900,8 +904,9 @@ test('creates the ForecastSnapshotFunction wired to master/actual/price tables, 
   expect(hasReadAccess('GyakuhibuActual')).toBe(true);
   expect(hasReadAccess('StockPrices')).toBe(true);
 
+  // J-Quants APIキーのシークレットは読まない
   expect(hasStatement('ForecastSnapshotFunction', (actions) => actions.some((a) => a.includes('secretsmanager:GetSecretValue')))).toBe(
-    true,
+    false,
   );
 
   expect(

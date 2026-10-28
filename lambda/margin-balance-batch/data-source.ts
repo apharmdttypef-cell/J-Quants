@@ -38,11 +38,8 @@ function parseBalance(value: string): number | null {
   return /^-?\d+$/.test(normalized) ? Number(normalized) : null;
 }
 
-// 全銘柄一括CSV(UTF-8にデコード済み)をMarginBalancePoint[]にする。
-// CSVに申込日の列は無く、`基準日`は次の権利基準日なので使わない。行の日付は検索した`mkYmd`(dateで受ける)。
-// 同じ銘柄に市場区分ごとの行(東証・名証など)があるので、東証だけを使う。
-// 融資残高・貸株残高のどちらかが数値でない行は、0として保存せず捨てる。
-export function parseTaisyakuBalanceCsv(csvText: string, date: string): MarginBalancePoint[] {
+// ヘッダーを完全一致で検証し、データ行を列に分けて返す。空行は飛ばし、列数の合わない行は警告して捨てる。
+function readTaisyakuCsvRows(csvText: string): string[][] {
   if (csvText.trim() === '') return [];
 
   const lines = csvText.split(/\r?\n/);
@@ -56,12 +53,7 @@ export function parseTaisyakuBalanceCsv(csvText: string, date: string): MarginBa
     );
   }
 
-  const codeIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('銘柄コード');
-  const marketIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('市場区分');
-  const financingIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('融資残高（株）');
-  const lendingIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('貸株残高（株）');
-
-  const points: MarginBalancePoint[] = [];
+  const rows: string[][] = [];
   for (const line of lines.slice(1)) {
     if (line.trim() === '') continue;
     const cols = splitCsvLine(line);
@@ -69,6 +61,23 @@ export function parseTaisyakuBalanceCsv(csvText: string, date: string): MarginBa
       console.warn(`Skipping taisyaku.jp CSV row with ${cols.length} columns: ${line.slice(0, 100)}`);
       continue;
     }
+    rows.push(cols);
+  }
+  return rows;
+}
+
+// 全銘柄一括CSV(UTF-8にデコード済み)をMarginBalancePoint[]にする。
+// CSVに申込日の列は無く、`基準日`は次の権利基準日なので使わない。行の日付は検索した`mkYmd`(dateで受ける)。
+// 同じ銘柄に市場区分ごとの行(東証・名証など)があるので、東証だけを使う。
+// 融資残高・貸株残高のどちらかが数値でない行は、0として保存せず捨てる。
+export function parseTaisyakuBalanceCsv(csvText: string, date: string): MarginBalancePoint[] {
+  const codeIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('銘柄コード');
+  const marketIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('市場区分');
+  const financingIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('融資残高（株）');
+  const lendingIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('貸株残高（株）');
+
+  const points: MarginBalancePoint[] = [];
+  for (const cols of readTaisyakuCsvRows(csvText)) {
     if (cols[marketIdx] !== '東証') continue;
 
     const financingBalance = parseBalance(cols[financingIdx]);
@@ -80,13 +89,29 @@ export function parseTaisyakuBalanceCsv(csvText: string, date: string): MarginBa
   return points;
 }
 
+// 全銘柄一括CSVから、東証行の 銘柄コード → 貸借区分('貸借' | '貸借融資' | '非貸借') を作る。
+// 制度信用で売れる(逆日歩が発生しうる)のは'貸借'だけ。信用残と同じく東証の行だけを見る。
+// 区分は残高と無関係なので、残高が'-'の行でも採る。貸借区分が空の行は含めない。
+export function parseTaisyakuMarginNames(csvText: string): Map<string, string> {
+  const codeIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('銘柄コード');
+  const marketIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('市場区分');
+  const marginNameIdx = TAISYAKU_BALANCE_CSV_HEADER.indexOf('貸借区分');
+
+  const names = new Map<string, string>();
+  for (const cols of readTaisyakuCsvRows(csvText)) {
+    if (cols[marketIdx] !== '東証' || cols[marginNameIdx] === '') continue;
+    names.set(cols[codeIdx], cols[marginNameIdx]);
+  }
+  return names;
+}
+
 function sleep(ms: number): Promise<void> {
   return ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // 基準日dateの全銘柄CSV(デコード済みテキスト)を取得する。検索結果が0件ならCSVを取らずnullを返す。
 // 一覧ページ(GET)→検索(POST)→CSV(GET)の3ステップで、CSRFトークンとセッションCookieを使い回す。
-// intervalMsは3リクエストの各間に空ける待ち時間。ヘッダーの検証はparseTaisyakuBalanceCsvに任せる。
+// intervalMsは3リクエストの各間に空ける待ち時間。ヘッダーの検証はparseTaisyakuBalanceCsv・parseTaisyakuMarginNamesに任せる。
 export async function fetchTaisyakuBalanceCsv(date: string, intervalMs: number): Promise<string | null> {
   const pageUrl = `${TAISYAKU_BASE_URL}/app/stock`;
   const pageResponse = await fetch(pageUrl, { headers: { 'User-Agent': USER_AGENT } });
