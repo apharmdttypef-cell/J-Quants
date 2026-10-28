@@ -451,7 +451,7 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
   const template = synth();
 
   // Verify the Lambda function exists with exact environment variables (not a superset like ReferenceApiFunction).
-  // Use Match.exact() to ensure only these four env vars are present, distinguishing it from ReferenceApiFunction
+  // Use Match.exact() to ensure only these three env vars are present, distinguishing it from ReferenceApiFunction
   // which has many more env vars (FINANCIAL_TABLE_NAME, GYAKUHIBU_ACTUAL_TABLE_NAME, MARGIN_BALANCE_TABLE_NAME, YUTAI_TDNET_EVENT_TABLE_NAME).
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',

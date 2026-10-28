@@ -111,7 +111,7 @@ function sleep(ms: number): Promise<void> {
 
 // 基準日dateの全銘柄CSV(デコード済みテキスト)を取得する。検索結果が0件ならCSVを取らずnullを返す。
 // 一覧ページ(GET)→検索(POST)→CSV(GET)の3ステップで、CSRFトークンとセッションCookieを使い回す。
-// intervalMsは3リクエストの各間に空ける待ち時間。ヘッダーの検証はparseTaisyakuBalanceCsvに任せる。
+// intervalMsは3リクエストの各間に空ける待ち時間。ヘッダーの検証はparseTaisyakuBalanceCsv・parseTaisyakuMarginNamesに任せる。
 export async function fetchTaisyakuBalanceCsv(date: string, intervalMs: number): Promise<string | null> {
   const pageUrl = `${TAISYAKU_BASE_URL}/app/stock`;
   const pageResponse = await fetch(pageUrl, { headers: { 'User-Agent': USER_AGENT } });

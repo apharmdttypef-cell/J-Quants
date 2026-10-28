@@ -113,7 +113,7 @@ test('writes null risk amounts when there is no price data for the ticker', asyn
 test('writes the numeric risk fields including closePrice, and removes the old riskStatus verdict', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
-    .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', date: '2026-08-12', close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500 }] }) // latest close
     .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
@@ -134,7 +134,7 @@ test('writes the numeric risk fields including closePrice, and removes the old r
 test('computes maxGyakuhibu/maxRate/days even when value is null (優待価値が抽出できない銘柄)', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9001', marginName: '貸借', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan (valueフィールド無し = 東武鉄道のような銘柄)
-    .mockResolvedValueOnce({ Items: [{ ticker: '9001', marginName: '貸借', date: '2026-08-12', close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-12', close: 500 }] }) // latest close
     .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
@@ -243,7 +243,7 @@ test('applies the rights-day 4x rate multiplier (taisyaku.jp「倍率適用」) 
   try {
     mockSend
       .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', date: '2026-07-31', close: 500 }] }) // latest close
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-07-31', close: 500 }] }) // latest close
       .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
     await handler();
