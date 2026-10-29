@@ -1,26 +1,17 @@
 # J-Quants株価ビューア
 
-J-Quants API(Freeプラン)で取得した株価・財務データを蓄積し、Webで閲覧するための個人用アプリ。
+株価をSoftHompo、信用残・逆日歩・貸借区分をtaisyaku.jpから取得して蓄積し、Webで閲覧するための個人用アプリ。
 CDK(TypeScript)でインフラを定義し、フロントはVite + React + TypeScriptのSPA。
 
 ## アーキテクチャ
 
 ```
-EventBridge(毎日 JST18:00)
+EventBridge(平日 JST09:30)
   → PriceBatchFunction(Lambda)
       - JQuantsYutaiMasterテーブルを読んで対象銘柄を取得
-      - J-Quants API(x-api-keyヘッダー認証)から、日付ごとに東証全銘柄分の四本値を1回で取得し
-        (対象銘柄でフィルタしてupsert)、5req/分のレート制限を守るため呼び出しごとに13秒待機
-      - 株価は日次更新が適切
+      - SoftHompoの日次株価ファイル(東証全銘柄、前営業日分が翌朝公表)を直近7日分取得
+        (当月分は日次zip、前月以前は月次zip)し、対象銘柄の四本値・出来高をupsert
       → JQuantsStockPrices に upsert
-
-EventBridge(毎週月曜 JST20:00)
-  → FinancialSummaryBatchFunction(Lambda)
-      - JQuantsYutaiMasterテーブルを読んで対象銘柄を取得
-      - J-Quants API(x-api-keyヘッダー認証)から決算サマリを取得
-        (5req/分のレート制限を守るため呼び出しごとに13秒待機)
-      - 決算サマリは四半期ごとにしか更新されないため週次で十分
-      → JQuantsFinancialSummary に upsert
 
 EventBridge(平日 JST19:15)
   → MarginBalanceBatchFunction(Lambda)
@@ -75,7 +66,7 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
 | テーブル | キー | 用途 |
 |---|---|---|
 | `JQuantsStockPrices` | PK `ticker` / SK `date` | 四本値・出来高 |
-| `JQuantsFinancialSummary` | PK `ticker` / SK `discDate` | 決算サマリ(売上・利益・EPS等) |
+| `JQuantsFinancialSummary` | PK `ticker` / SK `discDate` | 決算サマリ(売上・利益・EPS等)。2026-10に財務サマリーは廃止。テーブルはデータを残したまま使っていない |
 | `JQuantsYutaiMaster` | PK `ticker` | 優待マスタ本体(`companyName` / `content` / `value` / `unitShares` / `rightsMonths`〔権利確定月の配列、例`[3, 9]`〕)。`YutaiMasterSyncBatchFunction`(初回・手動)がkabuyutai.comから一括バックフィルし、`YutaiTdnetWatchBatchFunction`(週次)がTDnet開示をトリガーに継続更新する。**自動投入テーブル**(旧: アプリ外から手動投入する読み取り専用テーブルだったが自動化済み) |
 | `JQuantsMarginBalance` | PK `ticker` / SK `date` | 信用残時系列(`financingBalance`融資残・`lendingBalance`貸株残・`source`=`weekly`\|`daily-alert`) |
 | `JQuantsGyakuhibuActual` | PK `ticker` / SK `rightsDate` | taisyaku.jpから取得した権利日ごとの実績逆日歩(`totalAmount` / `days` / `avgRate`)。直近3年分のみ存在しうる。2026-09-05以降、逆日歩予測機能のため残高・レート・措置列(`financingBalance`/`lendingBalance`/`lendingPrice`/`maxRateActual`/`bidRank`/`restriction`/`emergencyMeasure`)と取得済みフラグ`enriched`を追加。拡張前からの既存行は`GyakuhibuHistoryBatchFunction`が`enriched`無しの行として検知し順次バックフィルする |
@@ -85,13 +76,9 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
 `cdk destroy` してもこの7テーブルは残る。次シーズンまたデプロイすれば同じデータから再開できる。
 なお、本節に挙げた7テーブルとは別に、廃止した`JQuantsWatchlist`テーブルの実体はCDK管理外のままAWSアカウント内に残っている(`RemovalPolicy.RETAIN`のため)。不要であれば`aws dynamodb delete-table --table-name JQuantsWatchlist`で手動削除できる。
 
-### シークレット
-
-| シークレット名 | 内容 | 投入方法 |
-|---|---|---|
-| `JQuantsApiKey` | J-Quants APIキー(V2) | `cdk deploy`後に手動: `aws secretsmanager put-secret-value --secret-id JQuantsApiKey --secret-string <APIキー>` |
-
 ### J-Quants Freeプランの実際の挙動(実機で判明)
+
+(2026-10の移行でJ-Quantsは使わなくなった。以下は経緯の記録)
 
 要件定義段階では「直近12週間分のみ取得可能」と想定していたが、実際に接続して判明した正しい仕様は次の通り:
 
@@ -102,6 +89,8 @@ EventBridge(毎日 JST19:40、YutaiRiskPrecomputeBatchFunctionの後)
 - **`/markets/calendar`(取引カレンダー)にも同じ12週間遅延が適用される**ことが本番運用中に判明した(直近の営業日を要求すると`/equities/bars/daily`と同様にHTTP 400になる)。優待クロス機能は「今日〜近い未来」の営業日を常に必要とするため、この制約を回避できず、`lambda/shared/trading-calendar.ts`の`getLocalTradingCalendar`/`isJpHoliday`で日本の祝日(振替休日・国民の休日を含む)をJ-Quantsに頼らずローカル計算する方式に切り替えた(`fetchTradingCalendar`はJ-Quants呼び出し版として残置。Standardプランへ移行しこの制約が無くなっているか再確認する用)。
 
 ### J-Quants Standardプランへの移行に向けた準備メモ
+
+(2026-10の移行でJ-Quantsは使わなくなった。以下は経緯の記録)
 
 `PriceBatchFunction`は当初、Freeプランの5req/分制限を前提にした銘柄ごとの直列取得(呼び出しごとに13秒待機)だったため、優待実施銘柄が1,000件規模まで増えると14分のLambdaタイムアウト内に収まらなくなる問題があったが、`date`のみ指定すると東証全銘柄分を1リクエストで取得できることが判明し、この方式に切り替えたことで解消済み(2026-08-24、`docs/superpowers/specs/2026-08-24-price-batch-bulk-fetch-design.md`参照)。レート制限の観点では`PriceBatchFunction`単体としてStandardプランへの移行は不要だったが、別途`DELIVERY_DELAY_DAYS`(Freeプランの配信12週間遅延を回避するための固定オフセット、デフォルト85日)がハードコードされたままだと、Standardプラン移行後もダミーの遅延で株価が85日古いまま取得され続ける問題があった(2026-09-03発見、実際に`/ticker/{code}`の前日終値が3か月前の値のままになっていた)。株価四本値は当日16:30頃に配信されるため、Standardプラン移行後は`DELIVERY_DELAY_DAYS=0`に変更し、当日分をそのまま取得するようにした。
 
@@ -158,12 +147,11 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 
 | 関数 | トリガー | 役割 |
 |---|---|---|
-| `PriceBatchFunction` | EventBridge(`cron(0 9 * * ? *)` = JST 18:00 毎日) | 対象銘柄(`JQuantsYutaiMaster`)の四本値を取得し`JQuantsStockPrices`へupsert |
-| `FinancialSummaryBatchFunction` | EventBridge(`cron(0 11 ? * MON *)` = 毎週月曜 JST 20:00) | 対象銘柄(`JQuantsYutaiMaster`)の決算サマリを取得し`JQuantsFinancialSummary`へupsert。四半期ごとの更新なので週次取得で十分 |
+| `PriceBatchFunction` | EventBridge(`cron(30 0 ? * MON-FRI *)` = JST平日 09:30) | SoftHompo(`https://softhompo.a.la9.jp/Data/StockData.html`)の日次株価ファイルを直近7日分取得し、対象銘柄(`JQuantsYutaiMaster`)の四本値・出来高を`JQuantsStockPrices`へupsert。午後に取引の無い銘柄は午前の値、終日取引の無い銘柄は書かない。取得・解析に失敗した日があれば最後に実行エラーにし、2日連続で失敗するとSNS経由でメール通知 |
 | `MarginBalanceBatchFunction` | EventBridge(`cron(15 10 ? * MON-FRI *)` = JST平日 19:15) | taisyaku.jpの全銘柄一括CSVを基準日ごとに取得し(検索→CSV取得の3リクエスト、各間と日付間に`REQUEST_INTERVAL_MS`=1000ms)、`JQuantsYutaiMaster`の銘柄の東証行の融資残・貸株残を`JQuantsMarginBalance`へ`source`=`taisyaku`でupsert(冪等)。カーソル行(`ticker`=`__cursor__`, `date`=`taisyaku`)の`lastFetchedDate`の日から最大`MAX_DATES_PER_RUN`=40日分(初回は3年前から)を古い順に処理し、カーソルの日自体も毎回取り直す。0件の日は、当日なら「未公表」としてカーソルを進めずに打ち切り、当日より前なら休場日または公開範囲外とみなして警告ログを出し先へ進む。取得失敗はその回の取得を打ち切る(カーソルは最後の成功日のまま)。失敗があり、カーソルが開始時の日より先へ進まなかった回(カーソル日の取り直しだけ成功し次の日が失敗する等)は実行エラーにする。取れたCSVのうち最新の申込日のものから、優待マスタの`marginName`(東証行の`貸借区分`)も値が変わった銘柄だけ更新する(更新に失敗した銘柄があれば、信用残の処理を終えてから実行エラーにする)。2日連続で失敗(Errors≧1が2日)するとSNS経由でメール通知 |
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
-| `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert。開示ごとに`JQuantsYutaiTdnetEvent`へイベント(`start`/`update`/`abolition`)を記録する(マスタが実際に変わらなかった場合は記録しない)。廃止検知による`JQuantsYutaiMaster`からの削除は、`PriceBatchFunction`/`FinancialSummaryBatchFunction`の対象銘柄取得も`ReferenceApiFunction`の`isKnownTicker`判定も同テーブルを参照する設計のため、その銘柄の株価・決算サマリ収集を止め、`GET /tickers/{ticker}/prices`・`summary`も404にする(意図した副作用だが、単一の削除操作が複数の挙動に波及する点に注意) |
+| `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert。開示ごとに`JQuantsYutaiTdnetEvent`へイベント(`start`/`update`/`abolition`)を記録する(マスタが実際に変わらなかった場合は記録しない)。廃止検知による`JQuantsYutaiMaster`からの削除は、`PriceBatchFunction`の対象銘柄取得も`ReferenceApiFunction`の`isKnownTicker`判定も同テーブルを参照する設計のため、その銘柄の株価収集を止め、`GET /tickers/{ticker}/prices`も404にする(意図した副作用だが、単一の削除操作が複数の挙動に波及する点に注意) |
 | `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし最大逆日歩などを事前計算・書き戻し。一覧API(`GET /yutai/forecast`)が銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため。貸借判定はマスタの`marginName`(信用残バッチが書く)で行い、J-Quantsは呼ばない |
 | `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 10 * * ? *)` = JST 19:40 毎日、逆日歩実績・信用残バッチの後) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`を読み、貸株超過率のビン別充足率分布から次回権利日の予測逆日歩(過去実績ベース)を算出し`JQuantsGyakuhibuForecast`へupsert。`JQuantsMarginBalance`も読み、日証金の貸借取引残高ベースの現在需給予測(`tseForecast`属性・`_POOL_TSE_`行)も併せて書く。信用残バッチ(JST19:15)の後に走るので当日公表分までの残高を使う。ただしtaisyaku.jpの公表時刻は未検証で、19:15時点で当日分が未公表なら前営業日までの残高で予測する(当日分は翌営業日の信用残バッチで取り込まれる) |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理。呼び出し元(`sub`)と`routeKey`を構造化ログに出す |
@@ -174,8 +162,7 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | メソッド/パス | 内容 |
 |---|---|
 | `GET /tickers/{ticker}/prices?range=12w` | 保存済みデータのうち直近12週間分(≈60営業日)の四本値・出来高。日付フィルタではなく最新N件取得なので、配信遅延で古い日付になっていても正しく返る |
-| `GET /tickers/{ticker}/summary` | 直近の決算サマリ。バッチが1度も取得していなければ404 |
-| `GET /yutai/{ticker}` | 優待マスタ情報 + 銘柄基本情報(前日終値・出来高・PER・決算サマリ主要項目)+ 最大逆日歩の計算結果(最高料率・最大逆日歩額・品貸日数、次回権利日ベース。判定は`GET /yutai/{ticker}/forecast`)+ `rightsHistory`(過去の権利日ごとの実績逆日歩、taisyaku.jp直近3年分) |
+| `GET /yutai/{ticker}` | 優待マスタ情報 + 銘柄基本情報(前日終値・出来高)+ 最大逆日歩の計算結果(最高料率・最大逆日歩額・品貸日数、次回権利日ベース。判定は`GET /yutai/{ticker}/forecast`)+ `rightsHistory`(過去の権利日ごとの実績逆日歩、taisyaku.jp直近3年分) |
 | `GET /yutai/{ticker}/margin-trend` | 信用残(日証金の融資残・貸株残)の時系列。`source`=`taisyaku`の直近365日、各点に`lendingRatio`(融資残÷貸株残) |
 | `GET /yutai/forecast?rightsDateFrom=&rightsDateTo=&keyword=&forecastStatus=` | 優待クロス一覧(予測付き)。各銘柄の「次回の権利日」・キーワード(会社名・優待内容の部分一致)・株価/必要資金の範囲・長期保有(`crossEligible`)で絞り込み、`forecastStatus`(`safe`\|`caution`\|`danger`\|`general-only`\|`na`\|`all`、省略時`all`)でも絞り込み可能。`currentMonthLastTradableDate`(当月の権利付き最終日)を含む。各行に予測分布(発生確率・予測逆日歩P50/P90・判定・根拠件数)を含む。各アイテムに`tseForecast`(現在需給ベース予測、残高が無ければnull) |
 | `GET /yutai/{ticker}/forecast` | 銘柄別の予測詳細。予測分布・過去権利日ごとの実績(残高・超過率・充足率・応札・措置)・全銘柄プールのビン別統計・信用残トレンド直近値をまとめて返す。`tseForecast`を含む |
@@ -224,7 +211,7 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 | パス | 画面 |
 |---|---|
 | `/` | `/yutai`へリダイレクト |
-| `/tickers/:ticker` | 個別銘柄詳細(ローソク足・出来高棒グラフ・決算サマリ) |
+| `/tickers/:ticker` | 個別銘柄詳細(ローソク足・出来高棒グラフ) |
 | `/yutai` | 優待クロス一覧(読み取り専用、旧「優待クロス」と旧「逆日歩予測」を統合)。権利日範囲(デフォルト当月1日〜末日)・キーワード・株価/必要資金・長期保有・判定(危険/注意/安全/制度信用不可/対象外のチェックボックス、既定は危険以外)で絞り込み、判定→期待値差の順でデフォルトソート。列は「基本」(銘柄・優待内容・権利日・判定・想定逆日歩(最悪)・長期保有・必要資金・前回逆日歩)と「詳細」(想定逆日歩・発生確率・最大逆日歩・前日株価・優待価値・必要株数を追加)を切り替え(ブラウザに記憶)。詳細表示に「想定逆日歩(現在需給)」「貸株残(4週前比)」 |
 | `/yutai/:ticker` | 銘柄詳細(旧2つの詳細を統合)。`GET /yutai/{ticker}`と`GET /yutai/{ticker}/forecast`を並行取得し、判定サマリ(判定・発生確率・想定逆日歩・最大逆日歩)→優待内容→株数段階別の優待条件→銘柄基本情報→予測の根拠(貸株超過率と充足率のグラフ・感度表・過去権利日)→現在需給ベース・信用残トレンド、の順 |
 | `/yutai/forecast`・`/yutai/:ticker/forecast` | 旧URL。それぞれ`/yutai`・`/yutai/:ticker`へリダイレクト |
@@ -232,17 +219,11 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 
 デザイン: 日本市場の慣例に合わせ**上昇=赤/下落=緑**(米国式とは逆)。数値は`JetBrains Mono`のtabular-numsで統一表示。
 
-### スコープを絞った点
-
-- `GET /tickers/{ticker}/summary`はバッチが一度もその銘柄の決算を取得できていない場合404を返す(データを捏造しない)。
-
 ### 逆日歩予測機能のバックフィル状況(2026-09-05時点、デプロイ前)
 
 `JQuantsGyakuhibuActual`の既存行(残高列拡張前)は約5,000件と見込まれ、`MAX_GYAKUHIBU_FETCHES_PER_RUN`の既定値(200件/回)のままだと約25日かかる計算のため、デプロイ直後は一時的に引き上げてバックフィルを加速する運用を想定している(コード変更不要、CDK環境変数のみ)。ただし`GyakuhibuHistoryBatchFunction`の14分タイムアウト内では、1件あたり3回のHTTPラウンドトリップ+`TAISYAKU_REQUEST_INTERVAL_MS`(既定1000ms)の待機がかかるため、実際に完走できる上限は300〜400件程度が目安(800まで上げてもタイムアウトで打ち切られ、EventBridgeの自動リトライで逆にtaisyaku.jpへの負荷が増える)。実際にバックフィルへ要した日数、`GyakuhibuForecastBatchFunction`が算出したビン別サンプル数(`_POOL_`行の`bins[].n`)の実測、`MAX_GYAKUHIBU_FETCHES_PER_RUN`を既定値へ戻した日付は、デプロイ・バックフィル完了後にこの節へ追記する。
 
 ## 主要コマンド
-
-deploy後に`JQuantsApiKey`へ投入するJ-Quants APIキーが必要。
 
 ```bash
 # バックエンド(ルート)
@@ -250,10 +231,6 @@ npm run build          # tsc
 npm test               # jest(スタック合成テスト + Lambda単体テスト)
 npx cdk synth          # 合成確認
 npx cdk deploy         # デプロイ
-
-# デプロイ後、J-Quants APIキーを投入(初回のみ)
-aws secretsmanager put-secret-value \
-  --secret-id JQuantsApiKey --secret-string <APIキー>
 
 # フロントエンド(frontend/)
 cd frontend
@@ -291,10 +268,9 @@ aws cloudfront create-invalidation --distribution-id <DistributionId> --paths '/
 
 貸借区分(`marginName`)も、J-Quants `/equities/master`の`MrgnNm`からtaisyaku.jpの全銘柄一括CSVの`貸借区分`(東証行)へ移した(`docs/superpowers/specs/2026-10-27-margin-name-taisyaku-design.md`)。値はtaisyaku.jpの表記(`貸借`/`貸借融資`/`非貸借`)のまま保存する。デプロイ後、最初に信用残バッチが動くまではJ-Quantsの値(`信用`/`その他`)が残るが、判定は`貸借`かどうかと`null`かどうかしか見ないので結果は変わらない。これでJ-Quantsに残る依存は株価(`PriceBatchFunction`)と財務(`FinancialSummaryBatchFunction`)だけになった。
 
+株価もJ-Quants `/equities/bars/daily`からSoftHompoの日次株価ファイルへ移し、財務サマリー(取得・API・画面表示)とPERの表示は廃止した(`docs/superpowers/specs/2026-10-29-price-softhompo-design.md`)。これでJ-Quantsを呼ぶ処理は無くなり、APIキーのシークレット`JQuantsApiKey`もスタックから削除した。J-QuantsはFreeプランへの変更・解約ができる。SoftHompoは前営業日分を翌営業日の朝に公表するため、夜の貸借判定バッチ(JST 18:20)が使う終値は前営業日のものになる。SoftHompoは個人のサイトで利用規約の記載が無い(本アプリは個人利用に限る)。デプロイはフロント(`aws s3 sync` + CloudFront invalidation)が先、`cdk deploy`が後(旧フロントは`/tickers/{ticker}/summary`が無いとエラー表示になるため)。
+
 ## コスト目安
 
-- 稼働中: 月$1未満(内訳はほぼ`JQuantsApiKey`の固定費 $0.40)。DynamoDB・Lambda・API Gateway・CloudFront・Cognito(Essentialsの無料枠内)はこの利用規模ではほぼ無料。
-- `cdk destroy`後: DynamoDB・User Pool(RETAIN)のストレージ代のみでほぼ$0。ただしシークレットは既定で最大30日「削除保留」状態のまま$0.40/月が発生し続ける。即ゼロにしたい場合:
-  ```bash
-  aws secretsmanager delete-secret --secret-id JQuantsApiKey --force-delete-without-recovery
-  ```
+- 稼働中: 月$1未満。DynamoDB・Lambda・API Gateway・CloudFront・Cognito(Essentialsの無料枠内)はこの利用規模ではほぼ無料。
+- `cdk destroy`後: DynamoDB・User Pool(RETAIN)のストレージ代のみでほぼ$0。
