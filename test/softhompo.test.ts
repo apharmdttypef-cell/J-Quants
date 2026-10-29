@@ -38,6 +38,13 @@ describe('parseSoftHompoCsv', () => {
     expect([...bars.keys()].sort()).toEqual(['1301', '1787', '1793', '2301', '256A', '3469']);
   });
 
+  // 最終気配に桁区切りカンマ入りのクォート値が入る行がある(2026-10-23のファイルで観測)
+  test('does not split on a comma inside a quoted value', () => {
+    const quoted = '"6898","",100,"トミタ電機",5300,5300,4830,4840,4895,4895,4895,4895,"ｶ4,990.00","－",4994.1667,0.6,2996.5,';
+    const bars = parseSoftHompoCsv(`${fixture.trimEnd()}\n${quoted}\n`);
+    expect(bars.get('6898')).toEqual({ open: 5300, high: 5300, low: 4830, close: 4895, volume: 600 });
+  });
+
   test('handles a leading BOM and CRLF line endings', () => {
     const bars = parseSoftHompoCsv('\uFEFF' + fixture.replace(/\r?\n/g, '\r\n'));
     expect(bars.get('2301')?.close).toBe(1673);
