@@ -14,8 +14,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   UpdateCommand: jest.fn((input: unknown) => input),
 }));
 
-// 貸借区分は信用残バッチがtaisyaku.jpのCSVからマスタに書く。このバッチはJ-Quantsを呼ばない。
-
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.TABLE_NAME = 'JQuantsStockPrices';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
@@ -366,7 +364,7 @@ test('a stored J-Quants-era 信用 value is still treated as 一般信用のみ 
   expect(updateValues()[':requiredInvestment']).toBe(80000);
 });
 
-test('never calls J-Quants and never writes marginName (the margin balance batch owns it)', async () => {
+test('never writes marginName (the margin balance batch owns it)', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', unitShares: 100, rightsMonths: [8], marginName: '貸借' }] })
     .mockResolvedValueOnce({ Items: [{ close: 500 }] })

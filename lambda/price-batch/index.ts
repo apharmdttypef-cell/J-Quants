@@ -38,7 +38,7 @@ async function scanYutaiTickers(): Promise<Set<string>> {
   return tickers;
 }
 
-// JSTの日付で数える(実行はJST 09:30で、UTCではまだ前日の00:30)。今日の分は未公表なので含めない。
+// JSTの日付で数える(手動実行がJST 0〜9時でもJSTの「今日」を基準にする)。今日の分は未公表なので含めない。
 function lookbackDates(now: number): string[] {
   const dates: string[] = [];
   for (let offset = LOOKBACK_DAYS; offset >= 1; offset--) {

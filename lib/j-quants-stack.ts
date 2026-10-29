@@ -162,6 +162,9 @@ export class JQuantsStack extends cdk.Stack {
       // SoftHompoの日次ファイル(東証全銘柄分)を直近7日分取り、優待銘柄の行だけ書く。
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
+      // 失敗時に7日分の取得を3回繰り返して個人サイトへの負荷が増えるのを避けるため、Lambdaの非同期リトライ
+      // (既定2回)を無効にする。取り直しは翌営業日の7日分の取り直しに任せる
+      retryAttempts: 0,
       // AWS SDK v3はNode.js 20系ランタイムに同梱されているためバンドルしない
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
@@ -176,7 +179,7 @@ export class JQuantsStack extends cdk.Stack {
     // SoftHompoは前営業日分を翌営業日の朝(8:30ごろ)に公表する。平日JST 09:30 = UTC 00:30。
     new events.Rule(this, 'PriceBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '30', hour: '0', weekDay: 'MON-FRI' }),
-      targets: [new targets.LambdaFunction(priceBatchFn)],
+      targets: [new targets.LambdaFunction(priceBatchFn, { retryAttempts: 0 })],
     });
 
     // 2日連続で失敗(エラーが出た日が2日続く)したらメールで知らせる。実行が無い日は欠測扱いで正常。
@@ -319,7 +322,7 @@ export class JQuantsStack extends cdk.Stack {
     this.gyakuhibuActualTable.grantReadData(yutaiRiskPrecomputeBatchFn);
 
     // 優待一覧の最大逆日歩などを事前計算し、reference-apiでの逐次クエリ(銘柄数に比例して
-    // 増える)を無くす。PriceBatchFunction(daily 09:00 UTC)の後に実行する。JST 18:20 = UTC 09:20。
+    // 増える)を無くす。JST 18:20 = UTC 09:20。前営業日の終値を使う(終値は平日JST 09:30のPriceBatchFunctionが書く)。
     new events.Rule(this, 'YutaiRiskPrecomputeBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '20', hour: '9' }),
       targets: [new targets.LambdaFunction(yutaiRiskPrecomputeBatchFn)],

@@ -10,27 +10,8 @@ interface RawCalendarDay {
   HolDiv: string;
 }
 
-interface CalendarResponse {
-  data: RawCalendarDay[];
-}
-
 export function isTradingDay(day: CalendarDay): boolean {
   return day.holDiv === '1' || day.holDiv === '2';
-}
-
-export async function fetchTradingCalendar(
-  apiBaseUrl: string,
-  apiKey: string,
-  from: string,
-  to: string,
-): Promise<CalendarDay[]> {
-  const params = new URLSearchParams({ from, to });
-  const response = await fetch(`${apiBaseUrl}/markets/calendar?${params}`, { headers: { 'x-api-key': apiKey } });
-  if (!response.ok) {
-    throw new Error(`J-Quants API error ${response.status}: ${await response.text()}`);
-  }
-  const body = (await response.json()) as CalendarResponse;
-  return body.data.map((d) => ({ date: d.Date, holDiv: d.HolDiv }));
 }
 
 // dateのn営業日後を返す(n=1なら翌営業日、n=2はsettlementDateが計算するT+2と同じ)。
@@ -63,7 +44,7 @@ export function calendarDaysBetween(from: string, to: string): number {
 // 適用されることが実機で判明した(直近の営業日を要求すると400エラー)。この機能は
 // 常に「今日〜近い未来」の営業日を必要とするため、J-Quantsに頼らず日本の祝日を
 // ローカルで計算する。スタンダードプラン移行後、この制約が無くなっていないか
-// fetchTradingCalendar(上記のJ-Quants呼び出し版)で再確認すること。
+// 再確認すること(J-Quants呼び出し版は2026-10に削除済み)。
 // ---------------------------------------------------------------------------
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
@@ -151,7 +132,7 @@ export function isJpHoliday(dateStr: string): boolean {
   return allHolidaysForYear(year).has(dateStr);
 }
 
-// fetchTradingCalendarの代替(J-Quantsを呼ばずローカルで完結)。土日・日本の祝日を
+// 取引カレンダー(J-Quantsを呼ばずローカルで完結)。土日・日本の祝日を
 // 非営業日(holDiv '0')、それ以外を営業日(holDiv '1')として、from〜to(両端含む)を返す。
 export function getLocalTradingCalendar(from: string, to: string): CalendarDay[] {
   const days: CalendarDay[] = [];

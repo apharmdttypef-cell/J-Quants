@@ -195,6 +195,12 @@ test('creates the price batch Lambda wired to the price/yutai tables (not financ
   template.hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'cron(30 0 ? * MON-FRI *)',
     State: 'ENABLED',
+    // 失敗時に7日分の取得を3回繰り返さない(取り直しは翌営業日に任せる)
+    Targets: [Match.objectLike({ RetryPolicy: { MaximumRetryAttempts: 0 } })],
+  });
+  template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+    FunctionName: { Ref: Match.stringLikeRegexp('PriceBatchFunction') },
+    MaximumRetryAttempts: 0,
   });
 
   const rules = template.findResources('AWS::Events::Rule');
@@ -204,8 +210,9 @@ test('creates the price batch Lambda wired to the price/yutai tables (not financ
   expect(scheduleExpressions).not.toContain('cron(0 9 * * ? *)');
 
   const policies = template.findResources('AWS::IAM::Policy');
-  const priceBatchCanReadSecret = Object.entries(policies)
-    .filter(([name]) => name.startsWith('PriceBatchFunction'))
+  const priceBatchPolicies = Object.entries(policies).filter(([name]) => name.startsWith('PriceBatchFunction'));
+  expect(priceBatchPolicies.length).toBeGreaterThan(0);
+  const priceBatchCanReadSecret = priceBatchPolicies
     .flatMap(([, p]) => (p as { Properties: { PolicyDocument: { Statement: Array<{ Action: string | string[] }> } } }).Properties.PolicyDocument.Statement)
     .some((stmt) => (Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]).includes('secretsmanager:GetSecretValue'));
   expect(priceBatchCanReadSecret).toBe(false);
@@ -499,7 +506,7 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
     },
   });
 
-  // Verify the EventBridge schedule rule exists with the correct timing (09:20 UTC, 20 min after price batch at 09:00 UTC).
+  // Verify the EventBridge schedule rule exists with the correct timing (09:20 UTC = JST 18:20。前営業日の終値を使う).
   template.hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'cron(20 9 * * ? *)',
     State: 'ENABLED',

@@ -66,7 +66,7 @@ function minOf(a: number | null, b: number | null): number | null {
 
 // 銘柄コード → 1日分の四本値と出来高。終日取引の無かった銘柄は含めない。
 export function parseSoftHompoCsv(csvText: string): Map<string, SoftHompoBar> {
-  const lines = csvText.replace(/^﻿/, '').split(/\r?\n/);
+  const lines = csvText.replace(/^\uFEFF/, '').split(/\r?\n/);
 
   const headerLine = lines.find((line) => line.startsWith('"! コード"'));
   if (headerLine === undefined) {

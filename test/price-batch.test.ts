@@ -87,6 +87,25 @@ test('fetches the seven JST days before today, oldest first, sharing one monthly
   expect([...caches][0]).toBeInstanceOf(Map);
 });
 
+test('counts days from the JST date even when run before 09:00 JST (UTC still the previous day)', async () => {
+  // JST 2026-10-29 08:30 = UTC 2026-10-28 23:30
+  jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-28T23:30:00Z'));
+  mockMasterTickers(['2301']);
+  mockFetchSoftHompoDay.mockResolvedValue(null);
+
+  await handler();
+
+  expect(mockFetchSoftHompoDay.mock.calls.map(([date]) => date)).toEqual([
+    '2026-10-22',
+    '2026-10-23',
+    '2026-10-24',
+    '2026-10-25',
+    '2026-10-26',
+    '2026-10-27',
+    '2026-10-28',
+  ]);
+});
+
 test('writes only the target tickers that traded, in the existing price row shape', async () => {
   // 1788は終日取引なし、1301は優待マスタに無い
   mockMasterTickers(['2301', '1793', '1788']);

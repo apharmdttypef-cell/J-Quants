@@ -3,7 +3,6 @@ import {
   settlementDate,
   businessDaysAfter,
   calendarDaysBetween,
-  fetchTradingCalendar,
   getLocalTradingCalendar,
   isJpHoliday,
   rightsDateForMonth,
@@ -101,7 +100,7 @@ describe('品貸日数(days) formula reproduces real taisyaku.jp data points for
 // J-QuantsのFreeプラン「12週間遅延」制約が/markets/calendarにも適用されることが実機で
 // 判明した(直近12週間分の営業日を要求すると400エラー)ため、暫定対応としてJ-Quantsに
 // 頼らないローカル祝日計算に切り替える(スタンダードプラン移行後、この制約が無くなって
-// いないか再度fetchTradingCalendarで確認すること)。
+// いないか再確認すること)。
 describe('isJpHoliday: known 2026 holidays, verified against public calendars', () => {
   test('元日(固定日) 2026-01-01', () => {
     expect(isJpHoliday('2026-01-01')).toBe(true);
@@ -158,21 +157,6 @@ describe('getLocalTradingCalendar', () => {
     const followingTradingDay = businessDaysAfter(calendar, settlement, 1);
     expect(calendarDaysBetween(settlement, followingTradingDay)).toBe(1);
   });
-});
-
-test('fetchTradingCalendar calls /markets/calendar with from/to and returns the data array', async () => {
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    json: async () => ({ data: [{ Date: '2026-08-14', HolDiv: '1' }] }),
-  });
-
-  const result = await fetchTradingCalendar('https://api.jquants.com/v2', 'test-api-key', '2026-08-01', '2026-08-31');
-
-  expect(mockFetch).toHaveBeenCalledWith(
-    'https://api.jquants.com/v2/markets/calendar?from=2026-08-01&to=2026-08-31',
-    { headers: { 'x-api-key': 'test-api-key' } },
-  );
-  expect(result).toEqual([{ date: '2026-08-14', holDiv: '1' }]);
 });
 
 describe('rightsDateForMonth', () => {

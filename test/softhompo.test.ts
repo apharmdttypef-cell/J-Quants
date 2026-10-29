@@ -39,7 +39,7 @@ describe('parseSoftHompoCsv', () => {
   });
 
   test('handles a leading BOM and CRLF line endings', () => {
-    const bars = parseSoftHompoCsv('﻿' + fixture.replace(/\r?\n/g, '\r\n'));
+    const bars = parseSoftHompoCsv('\uFEFF' + fixture.replace(/\r?\n/g, '\r\n'));
     expect(bars.get('2301')?.close).toBe(1673);
     expect(bars.size).toBe(6);
   });
@@ -85,7 +85,7 @@ describe('fetchSoftHompoDay', () => {
   const notFound = { status: 404, ok: false, arrayBuffer: async () => new ArrayBuffer(0) };
 
   test('reads the daily zip first', async () => {
-    mockFetch.mockResolvedValueOnce(zipResponse({ 'stq_20261028.csv': '﻿daily' }));
+    mockFetch.mockResolvedValueOnce(zipResponse({ 'stq_20261028.csv': '\uFEFFdaily' }));
 
     const csv = await fetchSoftHompoDay('2026-10-28', new Map());
 
