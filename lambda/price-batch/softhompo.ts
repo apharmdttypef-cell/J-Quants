@@ -2,6 +2,10 @@
 // 東証「株式相場表」を加工したCSVで、1日1ファイルに東証の全銘柄が入っている。
 // 前営業日分が翌営業日の朝に公表される。
 
+import { unzipSync } from 'fflate';
+
+const SOFTHOMPO_STOCK_BASE_URL = 'https://softhompo.a.la9.jp/Data/stock';
+
 export interface SoftHompoBar {
   open: number;
   high: number;
@@ -100,4 +104,45 @@ export function parseSoftHompoCsv(csvText: string): Map<string, SoftHompoBar> {
     });
   }
   return bars;
+}
+
+// キーはYYYYMM。値は月次ファイルの中身(ファイル名 → バイト列)、月次ファイルが無ければnull。
+export type MonthlyArchiveCache = Map<string, Record<string, Uint8Array> | null>;
+
+// zipを取って展開する。404はnull(休場日・未公表・月次へ移った後の日次など)。
+async function fetchZip(url: string): Promise<Record<string, Uint8Array> | null> {
+  const response = await fetch(url);
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`softhompo: HTTP ${response.status} fetching ${url}`);
+  }
+  return unzipSync(new Uint8Array(await response.arrayBuffer()));
+}
+
+// TextDecoderは先頭のBOMを取り除く。
+function decodeUtf8(bytes: Uint8Array): string {
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+// dateはYYYY-MM-DD。当月分は日次ファイル、前月以前は月次ファイルにある。前月分は翌月第2営業日ごろに
+// 日次から月次へ移るので、日次が404なら月次を見る。どちらにも無ければnull(休場日・未公表)。
+export async function fetchSoftHompoDay(date: string, monthlyCache: MonthlyArchiveCache): Promise<string | null> {
+  const ymd = date.replace(/-/g, '');
+  const fileName = `stq_${ymd}.csv`;
+
+  const daily = await fetchZip(`${SOFTHOMPO_STOCK_BASE_URL}/thisMonth/stq_${ymd}.zip`);
+  if (daily !== null) {
+    const entry = daily[fileName];
+    if (entry === undefined) {
+      throw new Error(`softhompo: ${fileName} not found in the daily zip`);
+    }
+    return decodeUtf8(entry);
+  }
+
+  const yearMonth = ymd.slice(0, 6);
+  if (!monthlyCache.has(yearMonth)) {
+    monthlyCache.set(yearMonth, await fetchZip(`${SOFTHOMPO_STOCK_BASE_URL}/pastMonth/${yearMonth}.zip`));
+  }
+  const entry = monthlyCache.get(yearMonth)?.[fileName];
+  return entry === undefined ? null : decodeUtf8(entry);
 }

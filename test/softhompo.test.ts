@@ -1,6 +1,12 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { parseSoftHompoCsv, SoftHompoCsvFormatError } from '../lambda/price-batch/softhompo';
+import { strToU8, zipSync } from 'fflate';
+import {
+  fetchSoftHompoDay,
+  parseSoftHompoCsv,
+  SoftHompoCsvFormatError,
+  type MonthlyArchiveCache,
+} from '../lambda/price-batch/softhompo';
 
 const fixture = readFileSync(join(__dirname, 'fixtures', 'softhompo', 'stq_20261028.csv'), 'utf8');
 
@@ -52,5 +58,89 @@ describe('parseSoftHompoCsv', () => {
 
   test('throws when a data row has an unexpected number of columns', () => {
     expect(() => parseSoftHompoCsv(fixture.replace('"2301","",100,', '"2301",100,'))).toThrow(SoftHompoCsvFormatError);
+  });
+});
+
+describe('fetchSoftHompoDay', () => {
+  const mockFetch = jest.fn();
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    global.fetch = mockFetch as unknown as typeof fetch;
+  });
+
+  afterAll(() => {
+    global.fetch = originalFetch;
+  });
+
+  function zipResponse(files: Record<string, string>) {
+    const bytes = zipSync(Object.fromEntries(Object.entries(files).map(([name, text]) => [name, strToU8(text)])));
+    return {
+      status: 200,
+      ok: true,
+      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+    };
+  }
+  const notFound = { status: 404, ok: false, arrayBuffer: async () => new ArrayBuffer(0) };
+
+  test('reads the daily zip first', async () => {
+    mockFetch.mockResolvedValueOnce(zipResponse({ 'stq_20261028.csv': '﻿daily' }));
+
+    const csv = await fetchSoftHompoDay('2026-10-28', new Map());
+
+    expect(csv).toBe('daily');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://softhompo.a.la9.jp/Data/stock/thisMonth/stq_20261028.zip');
+  });
+
+  test('falls back to the monthly zip when the daily zip is gone', async () => {
+    mockFetch
+      .mockResolvedValueOnce(notFound)
+      .mockResolvedValueOnce(zipResponse({ 'stq_20260930.csv': 'sep30', 'stq_20260929.csv': 'sep29' }));
+
+    const csv = await fetchSoftHompoDay('2026-09-30', new Map());
+
+    expect(csv).toBe('sep30');
+    expect(mockFetch.mock.calls[1][0]).toBe('https://softhompo.a.la9.jp/Data/stock/pastMonth/202609.zip');
+  });
+
+  test('returns null when neither the daily nor the monthly zip has the day', async () => {
+    mockFetch.mockResolvedValueOnce(notFound).mockResolvedValueOnce(notFound);
+
+    expect(await fetchSoftHompoDay('2026-10-25', new Map())).toBeNull();
+  });
+
+  test('returns null when the monthly zip does not contain the day (a holiday)', async () => {
+    mockFetch.mockResolvedValueOnce(notFound).mockResolvedValueOnce(zipResponse({ 'stq_20260930.csv': 'sep30' }));
+
+    expect(await fetchSoftHompoDay('2026-09-27', new Map())).toBeNull();
+  });
+
+  test('fetches each monthly zip only once per run through the shared cache', async () => {
+    const cache: MonthlyArchiveCache = new Map();
+    mockFetch
+      .mockResolvedValueOnce(notFound)
+      .mockResolvedValueOnce(zipResponse({ 'stq_20260930.csv': 'sep30', 'stq_20260929.csv': 'sep29' }))
+      .mockResolvedValueOnce(notFound);
+
+    expect(await fetchSoftHompoDay('2026-09-30', cache)).toBe('sep30');
+    expect(await fetchSoftHompoDay('2026-09-29', cache)).toBe('sep29');
+
+    // 2日目は日次の404を確かめるだけで、月次ファイルは取り直さない
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(mockFetch.mock.calls[2][0]).toBe('https://softhompo.a.la9.jp/Data/stock/thisMonth/stq_20260929.zip');
+  });
+
+  test('throws on an HTTP error other than 404', async () => {
+    mockFetch.mockResolvedValueOnce({ status: 503, ok: false, arrayBuffer: async () => new ArrayBuffer(0) });
+
+    await expect(fetchSoftHompoDay('2026-10-28', new Map())).rejects.toThrow('503');
+  });
+
+  test('throws when the daily zip does not hold the expected file', async () => {
+    mockFetch.mockResolvedValueOnce(zipResponse({ 'other.csv': 'x' }));
+
+    await expect(fetchSoftHompoDay('2026-10-28', new Map())).rejects.toThrow('stq_20261028.csv');
   });
 });
