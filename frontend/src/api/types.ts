@@ -13,18 +13,6 @@ export interface PricesResponse {
   prices: PricePoint[];
 }
 
-export interface FinancialSummary {
-  ticker: string;
-  discDate: string;
-  docType: string;
-  curPerType: string;
-  sales: string;
-  operatingProfit: string;
-  ordinaryProfit: string;
-  netProfit: string;
-  eps: string;
-}
-
 export type YutaiCrossEligible = 'ok' | 'ng' | 'unknown';
 export type YutaiHoldingKind = 'none' | 'bonus' | 'required' | 'unknown';
 
@@ -94,11 +82,6 @@ export interface YutaiRightsHistoryPoint {
 export interface YutaiBasicInfo {
   closePrice: number | null;
   volume: number | null;
-  per: number | null;
-  sales: string | null;
-  operatingProfit: string | null;
-  netProfit: string | null;
-  eps: string | null;
 }
 
 export interface YutaiDetail extends YutaiBenefitFields {
