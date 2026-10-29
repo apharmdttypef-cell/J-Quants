@@ -167,10 +167,7 @@ export class JQuantsStack extends cdk.Stack {
       entry: path.join(__dirname, '..', 'lambda', 'price-batch', 'index.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
-      // 日付ごとに東証全銘柄分を1リクエストで取得する方式(LOOKBACK_DAYS+1回)に切り替え済み。
-      // 13秒間隔(5req/分制限)は日付単位のリクエストにのみかかるため、対象銘柄数が増えても
-      // API呼び出し回数は変わらない。ただし対象銘柄が増えるとDynamoDBへのupsert件数が
-      // 増えるため、その分の余裕は引き続き必要。
+      // SoftHompoの日次ファイル(東証全銘柄分)を直近7日分取り、優待銘柄の行だけ書く。
       timeout: cdk.Duration.minutes(14),
       memorySize: 256,
       // AWS SDK v3はNode.js 20系ランタイムに同梱されているためバンドルしない
@@ -178,21 +175,28 @@ export class JQuantsStack extends cdk.Stack {
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
-        SECRET_ARN: this.apiKeySecret.secretArn,
       },
     });
 
     this.stockPricesTable.grantWriteData(priceBatchFn);
     this.yutaiMasterTable.grantReadData(priceBatchFn);
-    this.apiKeySecret.grantRead(priceBatchFn);
 
-    // 株価四本値は当日16:30頃に配信される(https://jpx-jquants.com/ja/spec/data-update)。
-    // Standardプラン移行によりFreeプランの12週間遅延制約は解消済みのため、それ以降の時刻に
-    // 実行する必要がある。JST 18:00 = UTC 09:00 に毎日実行(16:30より十分後)。
+    // SoftHompoは前営業日分を翌営業日の朝(8:30ごろ)に公表する。平日JST 09:30 = UTC 00:30。
     new events.Rule(this, 'PriceBatchSchedule', {
-      schedule: events.Schedule.cron({ minute: '0', hour: '9' }),
+      schedule: events.Schedule.cron({ minute: '30', hour: '0', weekDay: 'MON-FRI' }),
       targets: [new targets.LambdaFunction(priceBatchFn)],
     });
+
+    // 2日連続で失敗(エラーが出た日が2日続く)したらメールで知らせる。実行が無い日は欠測扱いで正常。
+    new cloudwatch.Alarm(this, 'PriceBatchErrorsAlarm', {
+      metric: priceBatchFn.metricErrors({ period: cdk.Duration.days(1), statistic: 'Sum' }),
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      evaluationPeriods: 2,
+      datapointsToAlarm: 2,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: '株価バッチ(SoftHompo)が2日連続で失敗',
+    }).addAlarmAction(new cloudwatch_actions.SnsAction(this.batchAlarmTopic));
 
     const financialSummaryBatchFn = new nodejs.NodejsFunction(this, 'FinancialSummaryBatchFunction', {
       entry: path.join(__dirname, '..', 'lambda', 'financial-summary-batch', 'index.ts'),

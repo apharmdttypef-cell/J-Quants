@@ -1,106 +1,64 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { getApiKey, scanTickerColumn, fetchWithRetry, normalizeDate, formatDate } from '../shared/jquants-batch-client';
+import { DynamoDBDocumentClient, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { fetchSoftHompoDay, parseSoftHompoCsv, type MonthlyArchiveCache, type SoftHompoBar } from './softhompo';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
-const SECRET_ARN = process.env.SECRET_ARN!;
-const API_BASE_URL = process.env.API_BASE_URL ?? 'https://api.jquants.com/v2';
+// SoftHompoは前営業日分を翌営業日の朝に公表する。直近7日分を毎回取り直し、遅れた公表や訂正を拾う。
 const LOOKBACK_DAYS = Number(process.env.LOOKBACK_DAYS ?? '7');
-// Standardプラン移行(2026-09-02)によりFreeプランの「配信12週間遅延」制約(直近12週間分の
-// データが取得できず400エラーになる)は解消済み。株価四本値は当日16:30頃に配信されるため
-// (https://jpx-jquants.com/ja/spec/data-update)、当日分をそのまま取得できる。
-const DELIVERY_DELAY_DAYS = Number(process.env.DELIVERY_DELAY_DAYS ?? '0');
-// 価格・信用残高等の一般エンドポイントは1つのAPIキーで120req/分を共有(決算系エンドポイントは
-// 60req/分の別枠のレート制限を持つため、financial-summary-batchのREQUEST_INTERVAL_MSとは
-// 独立して調整してよい)。
-const REQUEST_INTERVAL_MS = Number(process.env.REQUEST_INTERVAL_MS ?? '13000');
-const MAX_RETRIES = 5;
+// ファイル(日付)ごとに空ける間隔。個人のサイトなので間を空ける。
+const REQUEST_INTERVAL_MS = Number(process.env.SOFTHOMPO_REQUEST_INTERVAL_MS ?? '1000');
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
-interface DailyBar {
-  Code: string;
-  Date: string;
-  O: number | null;
-  H: number | null;
-  L: number | null;
-  C: number | null;
-  Vo: number | null;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-interface DailyBarsResponse {
-  data: DailyBar[];
-  pagination_key?: string;
-}
-
-// codeを付けずdateのみ指定すると、その日の全上場銘柄分のデータが1回のリクエストで返る
-// (実機検証済み: 2026-05-26〜28で東証全銘柄4,446〜4,453件がpaginationなしで1レスポンスに
-// 収まった)。pagination_keyのページング処理は取引日によって件数が変動する可能性に備えて残す。
-async function fetchAllBarsForDate(date: string, apiKey: string): Promise<DailyBar[]> {
-  const bars: DailyBar[] = [];
-  let paginationKey: string | undefined;
+async function scanYutaiTickers(): Promise<Set<string>> {
+  const tickers = new Set<string>();
+  let exclusiveStartKey: Record<string, unknown> | undefined;
 
   do {
-    const params = new URLSearchParams({ date });
-    if (paginationKey) params.set('pagination_key', paginationKey);
-
-    const response = await fetchWithRetry(
-      `${API_BASE_URL}/equities/bars/daily?${params}`,
-      apiKey,
-      REQUEST_INTERVAL_MS,
-      MAX_RETRIES,
+    const result = await ddbDocClient.send(
+      new ScanCommand({
+        TableName: YUTAI_MASTER_TABLE_NAME,
+        ProjectionExpression: 'ticker',
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
     );
-    const body = (await response.json()) as DailyBarsResponse;
-    bars.push(...body.data);
-    paginationKey = body.pagination_key;
-  } while (paginationKey);
+    for (const item of result.Items ?? []) {
+      if (typeof item.ticker === 'string') tickers.add(item.ticker);
+    }
+    exclusiveStartKey = result.LastEvaluatedKey;
+  } while (exclusiveStartKey);
 
-  return bars;
+  return tickers;
 }
 
-// 一括取得したレスポンスのCodeは5桁(例: '13010')。アプリ内のtickerは通常4桁(例: '1301')だが、
-// ウォッチリストでは優先株式等を指定するために5桁のticker(例: '72030')もありうる
-// (reference-api/index.tsのTICKER_CODE_PATTERN=/^\d{4,5}$/参照)。そのため5桁の完全一致と
-// 4桁prefixの一致の両方をチェックする(yutai-tdnet-watch-batchのtoTicker()と同じ変換)。
-// 普通株式・優先株式等が両方上場している銘柄では同じ4桁prefixに複数のCodeが存在しうる。
-// 従来はcodeに4桁を渡すとAPI側が自動的に普通株式のみ返していたが、一括取得ではこの自動選択が
-// 効かないため、4桁prefixで突き合わせる場合は5桁目が'0'(普通株式)のレコードを優先することで
-// 同じ結果になるようにする。
-function resolveTargetBars(bars: DailyBar[], targetTickers: Set<string>): Map<string, DailyBar> {
-  const resolved = new Map<string, DailyBar>();
-
-  for (const bar of bars) {
-    const isCommonStock = bar.Code[4] === '0';
-
-    if (targetTickers.has(bar.Code)) {
-      resolved.set(bar.Code, bar);
-    }
-
-    const prefix = bar.Code.slice(0, 4);
-    if (targetTickers.has(prefix)) {
-      const existing = resolved.get(prefix);
-      if (!existing || isCommonStock) {
-        resolved.set(prefix, bar);
-      }
-    }
+// JSTの日付で数える(実行はJST 09:30で、UTCではまだ前日の00:30)。今日の分は未公表なので含めない。
+function lookbackDates(now: number): string[] {
+  const dates: string[] = [];
+  for (let offset = LOOKBACK_DAYS; offset >= 1; offset--) {
+    dates.push(new Date(now + JST_OFFSET_MS - offset * DAY_MS).toISOString().slice(0, 10));
   }
-
-  return resolved;
+  return dates;
 }
 
-async function upsertBar(ticker: string, bar: DailyBar): Promise<void> {
+async function upsertBar(ticker: string, date: string, bar: SoftHompoBar): Promise<void> {
   await ddbDocClient.send(
     new PutCommand({
       TableName: TABLE_NAME,
       Item: {
         ticker,
-        date: normalizeDate(bar.Date),
-        open: bar.O,
-        high: bar.H,
-        low: bar.L,
-        close: bar.C,
-        volume: bar.Vo,
+        date,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume,
         updated_at: new Date().toISOString(),
       },
     }),
@@ -108,30 +66,39 @@ async function upsertBar(ticker: string, bar: DailyBar): Promise<void> {
 }
 
 export const handler = async (): Promise<void> => {
-  const tickers = await scanTickerColumn(YUTAI_MASTER_TABLE_NAME);
-  if (tickers.length === 0) {
+  const tickers = await scanYutaiTickers();
+  if (tickers.size === 0) {
     console.warn('No target tickers (yutai master is empty); nothing to fetch');
     return;
   }
-  const targetTickers = new Set(tickers);
 
-  const apiKey = await getApiKey(SECRET_ARN);
+  const monthlyCache: MonthlyArchiveCache = new Map();
+  const failedDates: string[] = [];
 
-  const dates: string[] = [];
-  for (let offset = DELIVERY_DELAY_DAYS + LOOKBACK_DAYS; offset >= DELIVERY_DELAY_DAYS; offset--) {
-    dates.push(formatDate(new Date(Date.now() - offset * 24 * 60 * 60 * 1000)));
+  for (const [index, date] of lookbackDates(Date.now()).entries()) {
+    if (index > 0) await sleep(REQUEST_INTERVAL_MS);
+    try {
+      const csv = await fetchSoftHompoDay(date, monthlyCache);
+      if (csv === null) {
+        console.log(`${date}: no file (holiday or not yet published)`);
+        continue;
+      }
+      const bars = parseSoftHompoCsv(csv);
+      let written = 0;
+      for (const [ticker, bar] of bars) {
+        if (!tickers.has(ticker)) continue;
+        await upsertBar(ticker, date, bar);
+        written++;
+      }
+      console.log(`${date}: wrote ${written} of ${tickers.size} target tickers (${bars.size} rows in file)`);
+    } catch (error) {
+      console.error(`${date}: failed to fetch/parse/write SoftHompo prices`, error);
+      failedDates.push(date);
+    }
   }
 
-  for (const date of dates) {
-    try {
-      const bars = await fetchAllBarsForDate(date, apiKey);
-      const matched = resolveTargetBars(bars, targetTickers);
-      for (const [ticker, bar] of matched) {
-        await upsertBar(ticker, bar);
-      }
-      console.log(`${date}: matched ${matched.size} of ${targetTickers.size} target tickers (${bars.length} bars in market snapshot)`);
-    } catch (error) {
-      console.error(`${date}: failed to fetch/upsert daily bars`, error);
-    }
+  // 失敗した日があれば、他の日を処理し終えてから実行エラーにする(2日連続失敗のアラーム用)。
+  if (failedDates.length > 0) {
+    throw new Error(`price-batch: failed on ${failedDates.length} dates: ${failedDates.join(', ')}`);
   }
 };

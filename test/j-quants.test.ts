@@ -172,25 +172,55 @@ test('creates the J-Quants API key secret without an inline value', () => {
   });
 });
 
-test('creates the price batch Lambda wired to the price/yutai tables (not financial) and a daily schedule', () => {
+test('creates the price batch Lambda wired to the price/yutai tables (not financial, no J-Quants key) and a weekday morning schedule', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Environment: {
-      Variables: Match.objectLike({
+      Variables: Match.exact({
         TABLE_NAME: Match.anyValue(),
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
-        SECRET_ARN: Match.anyValue(),
-        FINANCIAL_TABLE_NAME: Match.absent(),
-        WATCHLIST_TABLE_NAME: Match.absent(),
       }),
     },
   });
+  // SoftHompoは前営業日分を翌朝に公表する。平日JST 09:30 = UTC 00:30
   template.hasResourceProperties('AWS::Events::Rule', {
-    ScheduleExpression: 'cron(0 9 * * ? *)',
+    ScheduleExpression: 'cron(30 0 ? * MON-FRI *)',
     State: 'ENABLED',
+  });
+
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  expect(scheduleExpressions).not.toContain('cron(0 9 * * ? *)');
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const priceBatchCanReadSecret = Object.entries(policies)
+    .filter(([name]) => name.startsWith('PriceBatchFunction'))
+    .flatMap(([, p]) => (p as { Properties: { PolicyDocument: { Statement: Array<{ Action: string | string[] }> } } }).Properties.PolicyDocument.Statement)
+    .some((stmt) => (Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]).includes('secretsmanager:GetSecretValue'));
+  expect(priceBatchCanReadSecret).toBe(false);
+});
+
+test('notifies by email when the price batch fails two days in a row', () => {
+  const template = synth();
+
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    Namespace: 'AWS/Lambda',
+    MetricName: 'Errors',
+    Statistic: 'Sum',
+    Period: 86400,
+    EvaluationPeriods: 2,
+    DatapointsToAlarm: 2,
+    Threshold: 1,
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    TreatMissingData: 'notBreaching',
+    AlarmDescription: '株価バッチ(SoftHompo)が2日連続で失敗',
+    AlarmActions: [{ Ref: Match.stringLikeRegexp('JQuantsBatchAlarmTopic') }],
+    Dimensions: [{ Name: 'FunctionName', Value: { Ref: Match.stringLikeRegexp('PriceBatchFunction') } }],
   });
 });
 
