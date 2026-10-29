@@ -3,8 +3,6 @@ import { SHRINKAGE_K } from '../lambda/shared/gyakuhibu-forecast';
 
 const mockDdbSend = jest.fn();
 const mockS3Send = jest.fn();
-const mockGetApiKey = jest.fn();
-const mockFetchWithRetry = jest.fn();
 const mockFetchTaisyakuCsv = jest.fn();
 const mockParseTaisyakuCsv = jest.fn();
 const mockResolveTargetTickers = jest.fn();
@@ -19,10 +17,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(() => ({ send: mockS3Send })),
   PutObjectCommand: jest.fn((input: unknown) => input),
-}));
-jest.mock('../lambda/shared/jquants-batch-client', () => ({
-  getApiKey: (...args: unknown[]) => mockGetApiKey(...args),
-  fetchWithRetry: (...args: unknown[]) => mockFetchWithRetry(...args),
 }));
 jest.mock('../lambda/gyakuhibu-history-batch/taisyaku-client', () => ({
   fetchTaisyakuCsv: (...args: unknown[]) => mockFetchTaisyakuCsv(...args),
@@ -49,8 +43,6 @@ beforeEach(() => {
   // 意味し、maxRatePerShare/closePriceがnullになるだけで例外は起きない。
   mockDdbSend.mockResolvedValue({ Items: [] });
   mockS3Send.mockReset();
-  mockGetApiKey.mockReset();
-  mockFetchWithRetry.mockReset();
   mockFetchTaisyakuCsv.mockReset();
   mockParseTaisyakuCsv.mockReset();
   mockResolveTargetTickers.mockReset();
@@ -83,17 +75,6 @@ describe('resolveTargetTickers', () => {
     expect(result).toEqual([
       { ticker: '1111', companyName: 'A社', value: 1000, unitShares: 100, maxGyakuhibu: 5000, rightsMonths: [9] },
     ]);
-  });
-
-  test('does not call J-Quants', async () => {
-    mockDdbSend.mockResolvedValueOnce({
-      Items: [{ ticker: '1111', companyName: 'A社', value: 1000, unitShares: 100, maxGyakuhibu: 5000, rightsMonths: [9], marginName: '貸借' }],
-    });
-
-    await realResolveTargetTickers(9);
-
-    expect(mockGetApiKey).not.toHaveBeenCalled();
-    expect(mockFetchWithRetry).not.toHaveBeenCalled();
   });
 
   test('paginates the yutai master DynamoDB scan using LastEvaluatedKey', async () => {

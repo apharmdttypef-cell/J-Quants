@@ -1,7 +1,6 @@
 import * as path from 'path';
 import * as cdk from 'aws-cdk-lib/core';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -40,7 +39,6 @@ export class JQuantsStack extends cdk.Stack {
   public readonly gyakuhibuForecastTable: dynamodb.Table;
   public readonly yutaiTdnetEventTable: dynamodb.Table;
   public readonly gyakuhibuValidationBucket: s3.Bucket;
-  public readonly apiKeySecret: secretsmanager.Secret;
   public readonly batchAlarmTopic: sns.Topic;
   public readonly api: apigwv2.HttpApi;
   public readonly frontendBucket: s3.Bucket;
@@ -75,6 +73,7 @@ export class JQuantsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // 財務サマリーは2026-10に廃止した(取得・API・表示とも)。データは消さずに残している。
     // 開示は四半期ごとで頻度は低いが、価格データと同じ理由(Freeプランは
     // 直近12週間分は取得できない)でRETAIN + PITRにする。
     this.financialSummaryTable = new dynamodb.Table(this, 'JQuantsFinancialSummaryTable', {
@@ -156,13 +155,6 @@ export class JQuantsStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // APIキーの値自体はCDKに含めず、deploy後に
-    // `aws secretsmanager put-secret-value` で投入する想定。
-    this.apiKeySecret = new secretsmanager.Secret(this, 'JQuantsApiKeySecret', {
-      secretName: 'JQuantsApiKey',
-      description: 'J-Quants API key (V2)',
-    });
-
     const priceBatchFn = new nodejs.NodejsFunction(this, 'PriceBatchFunction', {
       entry: path.join(__dirname, '..', 'lambda', 'price-batch', 'index.ts'),
       handler: 'handler',
@@ -197,35 +189,6 @@ export class JQuantsStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       alarmDescription: '株価バッチ(SoftHompo)が2日連続で失敗',
     }).addAlarmAction(new cloudwatch_actions.SnsAction(this.batchAlarmTopic));
-
-    const financialSummaryBatchFn = new nodejs.NodejsFunction(this, 'FinancialSummaryBatchFunction', {
-      entry: path.join(__dirname, '..', 'lambda', 'financial-summary-batch', 'index.ts'),
-      handler: 'handler',
-      runtime: lambda.Runtime.NODEJS_22_X,
-      // 新規銘柄の初回バックフィル(銘柄ごと直列)+直近日付の一括チェックの合計時間を
-      // 見込んで長めに確保(lambda/financial-summary-batch/index.tsのMAX_BACKFILL_TICKERS_PER_RUN
-      // 参照)。
-      timeout: cdk.Duration.minutes(14),
-      memorySize: 256,
-      bundling: { externalModules: ['@aws-sdk/*'] },
-      environment: {
-        FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
-        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
-        SECRET_ARN: this.apiKeySecret.secretArn,
-      },
-    });
-
-    this.financialSummaryTable.grantWriteData(financialSummaryBatchFn);
-    this.financialSummaryTable.grantReadData(financialSummaryBatchFn);
-    this.yutaiMasterTable.grantReadData(financialSummaryBatchFn);
-    this.apiKeySecret.grantRead(financialSummaryBatchFn);
-
-    // 決算サマリは四半期ごとしか更新されないため週次で十分。
-    // JST 月曜20:00 = UTC 月曜11:00。
-    new events.Rule(this, 'FinancialSummaryBatchSchedule', {
-      schedule: events.Schedule.cron({ minute: '0', hour: '11', weekDay: 'MON' }),
-      targets: [new targets.LambdaFunction(financialSummaryBatchFn)],
-    });
 
     const marginBalanceBatchFn = new nodejs.NodejsFunction(this, 'MarginBalanceBatchFunction', {
       entry: path.join(__dirname, '..', 'lambda', 'margin-balance-batch', 'index.ts'),
@@ -331,8 +294,7 @@ export class JQuantsStack extends cdk.Stack {
     this.yutaiTdnetEventTable.grantWriteData(yutaiTdnetWatchBatchFn);
 
     // TDnetの直近開示から株主優待関連の新設・変更・廃止を検知する。既存の週次バッチ
-    // (FinancialSummaryBatchSchedule: 月11:00 UTC、MarginBalanceBatchSchedule: 平日10:15 UTC)
-    // と重ならない時間帯。JST 月曜21:00 = UTC 月曜12:00。
+    // (MarginBalanceBatchSchedule: 平日10:15 UTC)と重ならない時間帯。JST 月曜21:00 = UTC 月曜12:00。
     new events.Rule(this, 'YutaiTdnetWatchBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '0', hour: '12', weekDay: 'MON' }),
       targets: [new targets.LambdaFunction(yutaiTdnetWatchBatchFn)],
@@ -475,7 +437,6 @@ export class JQuantsStack extends cdk.Stack {
       bundling: { externalModules: ['@aws-sdk/*'] },
       environment: {
         TABLE_NAME: this.stockPricesTable.tableName,
-        FINANCIAL_TABLE_NAME: this.financialSummaryTable.tableName,
         YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
         MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
         GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
@@ -485,7 +446,6 @@ export class JQuantsStack extends cdk.Stack {
     });
 
     this.stockPricesTable.grantReadData(referenceApiFn);
-    this.financialSummaryTable.grantReadData(referenceApiFn);
     this.yutaiMasterTable.grantReadData(referenceApiFn);
     this.marginBalanceTable.grantReadData(referenceApiFn);
     this.gyakuhibuActualTable.grantReadData(referenceApiFn);
@@ -726,11 +686,6 @@ export class JQuantsStack extends cdk.Stack {
 
     this.api.addRoutes({
       path: '/tickers/{ticker}/prices',
-      methods: [apigwv2.HttpMethod.GET],
-      integration: referenceApiIntegration,
-    });
-    this.api.addRoutes({
-      path: '/tickers/{ticker}/summary',
       methods: [apigwv2.HttpMethod.GET],
       integration: referenceApiIntegration,
     });

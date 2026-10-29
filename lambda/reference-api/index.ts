@@ -6,7 +6,6 @@ import { excessRatio, fillRatio, shiftIsoDate } from '../shared/gyakuhibu-foreca
 import type { GyakuhibuActualRef } from '../shared/gyakuhibu-actual-summary';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
-const FINANCIAL_TABLE_NAME = process.env.FINANCIAL_TABLE_NAME!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const MARGIN_BALANCE_TABLE_NAME = process.env.MARGIN_BALANCE_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
@@ -63,39 +62,6 @@ async function getPrices(ticker: string, range: string | undefined): Promise<API
     .reverse();
 
   return jsonResponse(200, { ticker, range: '12w', prices });
-}
-
-async function getSummary(ticker: string): Promise<APIGatewayProxyResultV2> {
-  if (!(await isKnownTicker(ticker))) {
-    return jsonResponse(404, { message: `Unknown ticker: ${ticker}` });
-  }
-
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: FINANCIAL_TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker',
-      ExpressionAttributeValues: { ':ticker': ticker },
-      ScanIndexForward: false,
-      Limit: 1,
-    }),
-  );
-
-  const latest = result.Items?.[0];
-  if (!latest) {
-    return jsonResponse(404, { message: `No financial summary available yet for ${ticker}` });
-  }
-
-  return jsonResponse(200, {
-    ticker,
-    discDate: latest.discDate,
-    docType: latest.docType,
-    curPerType: latest.curPerType,
-    sales: latest.sales,
-    operatingProfit: latest.operatingProfit,
-    ordinaryProfit: latest.ordinaryProfit,
-    netProfit: latest.netProfit,
-    eps: latest.eps,
-  });
 }
 
 type CrossEligible = 'ok' | 'ng' | 'unknown';
@@ -474,19 +440,6 @@ async function latestPricePoint(ticker: string): Promise<{ close: number; volume
   return { close: latest.close, volume: latest.volume ?? null };
 }
 
-async function latestFinancialSummary(ticker: string) {
-  const result = await ddbDocClient.send(
-    new QueryCommand({
-      TableName: FINANCIAL_TABLE_NAME,
-      KeyConditionExpression: 'ticker = :ticker',
-      ExpressionAttributeValues: { ':ticker': ticker },
-      ScanIndexForward: false,
-      Limit: 1,
-    }),
-  );
-  return result.Items?.[0];
-}
-
 async function gyakuhibuHistory(ticker: string) {
   const result = await ddbDocClient.send(
     new QueryCommand({
@@ -514,9 +467,6 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
   if (!master) return jsonResponse(404, { message: `Unknown yutai ticker: ${ticker}` });
 
   const price = await latestPricePoint(ticker);
-  const summary = await latestFinancialSummary(ticker);
-  const eps = summary?.eps ? Number(summary.eps) : undefined;
-  const per = price && eps && eps > 0 ? price.close / eps : null;
 
   const rightsDate = nextRightsDate(master.rightsMonths);
   const history = await gyakuhibuHistory(ticker);
@@ -531,11 +481,6 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
     basicInfo: {
       closePrice: price?.close ?? null,
       volume: price?.volume ?? null,
-      per,
-      sales: summary?.sales ?? null,
-      operatingProfit: summary?.operatingProfit ?? null,
-      netProfit: summary?.netProfit ?? null,
-      eps: summary?.eps ?? null,
     },
     risk: {
       maxGyakuhibu: master.maxGyakuhibu,
@@ -745,8 +690,6 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
       return ticker
         ? getPrices(ticker, event.queryStringParameters?.range)
         : jsonResponse(400, { message: 'Missing ticker' });
-    case 'GET /tickers/{ticker}/summary':
-      return ticker ? await getSummary(ticker) : jsonResponse(400, { message: 'Missing ticker' });
     case 'GET /yutai/tdnet-events':
       return listTdnetEvents();
     case 'GET /yutai/{ticker}':

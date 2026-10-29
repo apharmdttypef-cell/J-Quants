@@ -15,11 +15,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 }));
 
 // 貸借区分は信用残バッチがtaisyaku.jpのCSVからマスタに書く。このバッチはJ-Quantsを呼ばない。
-const mockGetApiKey = jest.fn();
-jest.mock('../lambda/shared/jquants-batch-client', () => ({
-  getApiKey: (...args: unknown[]) => mockGetApiKey(...args),
-  fetchWithRetry: jest.fn(),
-}));
 
 process.env.YUTAI_MASTER_TABLE_NAME = 'JQuantsYutaiMaster';
 process.env.TABLE_NAME = 'JQuantsStockPrices';
@@ -30,7 +25,6 @@ const { handler } = require('../lambda/yutai-risk-precompute-batch/index') as { 
 
 beforeEach(() => {
   mockSend.mockReset();
-  mockGetApiKey.mockReset();
 });
 
 function updateCalls() {
@@ -381,7 +375,6 @@ test('never calls J-Quants and never writes marginName (the margin balance batch
 
   await handler();
 
-  expect(mockGetApiKey).not.toHaveBeenCalled();
   const update = updateCalls()[0][0] as { UpdateExpression: string; ExpressionAttributeValues: Record<string, unknown> };
   expect(update.UpdateExpression).not.toContain('marginName');
   expect(update.ExpressionAttributeValues).not.toHaveProperty(':marginName');
