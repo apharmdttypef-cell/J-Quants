@@ -3,6 +3,7 @@
 // 前営業日分が翌営業日の朝に公表される。
 
 import { unzipSync } from 'fflate';
+import { splitCsvLine } from '../gyakuhibu-history-batch/taisyaku-client';
 
 const SOFTHOMPO_STOCK_BASE_URL = 'https://softhompo.a.la9.jp/Data/stock';
 
@@ -38,9 +39,10 @@ export const SOFTHOMPO_CSV_HEADER: readonly string[] = [
 // 見出しや列数が想定と違う(仕様変更・エラーページなど)場合に投げる。バッチを失敗させて気づけるようにする。
 export class SoftHompoCsvFormatError extends Error {}
 
-// 値にカンマは含まれない(実ファイルで確認)。各行の末尾にカンマがあり、空の列が1つ付くので落とす。
+// 最終気配には桁区切りカンマ入りのクォート値("ｶ4,990.00")が入ることがあるので、クォート内のカンマでは
+// 区切らない(taisyaku.jpと同じ分割関数を使う)。各行の末尾にカンマがあり、空の列が1つ付くので落とす。
 function splitRow(line: string): string[] {
-  const cols = line.split(',').map((col) => col.replace(/^"|"$/g, ''));
+  const cols = splitCsvLine(line);
   if (cols[cols.length - 1] === '') cols.pop();
   return cols;
 }
