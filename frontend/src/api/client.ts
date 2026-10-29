@@ -1,5 +1,4 @@
 import type {
-  FinancialSummary,
   YutaiCrossEligible,
   MarginTrendResponse,
   PricesResponse,
@@ -66,10 +65,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchPrices(ticker: string): Promise<PricesResponse> {
   return request(`/tickers/${ticker}/prices?range=12w`);
-}
-
-export function fetchSummary(ticker: string): Promise<FinancialSummary> {
-  return request(`/tickers/${ticker}/summary`);
 }
 
 export interface YutaiListParams {

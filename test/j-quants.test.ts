@@ -164,59 +164,99 @@ test('does not create a JQuantsWatchlist table (watchlist feature removed)', () 
   expect(tableNames).not.toContain('JQuantsWatchlist');
 });
 
-test('creates the J-Quants API key secret without an inline value', () => {
+test('no longer keeps a J-Quants API key secret (nothing calls J-Quants)', () => {
   const template = synth();
 
-  template.hasResourceProperties('AWS::SecretsManager::Secret', {
-    Name: 'JQuantsApiKey',
-  });
+  const secrets = template.findResources('AWS::SecretsManager::Secret');
+  const names = Object.values(secrets).map((s) => (s as { Properties: { Name?: string } }).Properties.Name);
+  expect(names).not.toContain('JQuantsApiKey');
+
+  const functions = template.findResources('AWS::Lambda::Function');
+  const envVars = Object.values(functions).flatMap((f) =>
+    Object.keys((f as { Properties: { Environment?: { Variables?: Record<string, unknown> } } }).Properties.Environment?.Variables ?? {}),
+  );
+  expect(envVars).not.toContain('SECRET_ARN');
 });
 
-test('creates the price batch Lambda wired to the price/yutai tables (not financial) and a daily schedule', () => {
+test('creates the price batch Lambda wired to the price/yutai tables (not financial, no J-Quants key) and a weekday morning schedule', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Environment: {
-      Variables: Match.objectLike({
+      Variables: Match.exact({
         TABLE_NAME: Match.anyValue(),
         YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
-        SECRET_ARN: Match.anyValue(),
-        FINANCIAL_TABLE_NAME: Match.absent(),
-        WATCHLIST_TABLE_NAME: Match.absent(),
       }),
     },
   });
+  // SoftHompoは前営業日分を翌朝に公表する。平日JST 09:30 = UTC 00:30
   template.hasResourceProperties('AWS::Events::Rule', {
-    ScheduleExpression: 'cron(0 9 * * ? *)',
+    ScheduleExpression: 'cron(30 0 ? * MON-FRI *)',
     State: 'ENABLED',
+    // 失敗時に7日分の取得を3回繰り返さない(取り直しは翌営業日に任せる)
+    Targets: [Match.objectLike({ RetryPolicy: { MaximumRetryAttempts: 0 } })],
   });
+  template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+    FunctionName: { Ref: Match.stringLikeRegexp('PriceBatchFunction') },
+    MaximumRetryAttempts: 0,
+  });
+
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  expect(scheduleExpressions).not.toContain('cron(0 9 * * ? *)');
+
+  const policies = template.findResources('AWS::IAM::Policy');
+  const priceBatchPolicies = Object.entries(policies).filter(([name]) => name.startsWith('PriceBatchFunction'));
+  expect(priceBatchPolicies.length).toBeGreaterThan(0);
+  const priceBatchCanReadSecret = priceBatchPolicies
+    .flatMap(([, p]) => (p as { Properties: { PolicyDocument: { Statement: Array<{ Action: string | string[] }> } } }).Properties.PolicyDocument.Statement)
+    .some((stmt) => (Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action]).includes('secretsmanager:GetSecretValue'));
+  expect(priceBatchCanReadSecret).toBe(false);
 });
 
-test('creates the financial summary batch Lambda wired to the financial/yutai tables (not price) and a weekly schedule', () => {
+test('notifies by email when the price batch fails two days in a row', () => {
   const template = synth();
 
-  template.hasResourceProperties('AWS::Lambda::Function', {
-    Handler: 'index.handler',
-    Runtime: 'nodejs22.x',
-    Environment: {
-      Variables: Match.objectLike({
-        FINANCIAL_TABLE_NAME: Match.anyValue(),
-        YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
-        SECRET_ARN: Match.anyValue(),
-        TABLE_NAME: Match.absent(),
-        WATCHLIST_TABLE_NAME: Match.absent(),
-      }),
-    },
-  });
-  template.hasResourceProperties('AWS::Events::Rule', {
-    ScheduleExpression: 'cron(0 11 ? * MON *)',
-    State: 'ENABLED',
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    Namespace: 'AWS/Lambda',
+    MetricName: 'Errors',
+    Statistic: 'Sum',
+    Period: 86400,
+    EvaluationPeriods: 2,
+    DatapointsToAlarm: 2,
+    Threshold: 1,
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    TreatMissingData: 'notBreaching',
+    AlarmDescription: '株価バッチ(SoftHompo)が2日連続で失敗',
+    AlarmActions: [{ Ref: Match.stringLikeRegexp('JQuantsBatchAlarmTopic') }],
+    Dimensions: [{ Name: 'FunctionName', Value: { Ref: Match.stringLikeRegexp('PriceBatchFunction') } }],
   });
 });
 
-test('creates the HTTP API with the price/summary and yutai routes', () => {
+test('no longer runs a financial summary batch, but keeps the table', () => {
+  const template = synth();
+
+  const functions = template.findResources('AWS::Lambda::Function');
+  expect(Object.keys(functions).some((id) => id.startsWith('FinancialSummaryBatchFunction'))).toBe(false);
+  const envVars = Object.values(functions).flatMap((f) =>
+    Object.keys((f as { Properties: { Environment?: { Variables?: Record<string, unknown> } } }).Properties.Environment?.Variables ?? {}),
+  );
+  expect(envVars).not.toContain('FINANCIAL_TABLE_NAME');
+
+  const rules = template.findResources('AWS::Events::Rule');
+  const scheduleExpressions = Object.values(rules).map(
+    (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
+  );
+  expect(scheduleExpressions).not.toContain('cron(0 11 ? * MON *)');
+
+  template.hasResourceProperties('AWS::DynamoDB::Table', { TableName: 'JQuantsFinancialSummary' });
+});
+
+test('creates the HTTP API with the price and yutai routes', () => {
   const template = synth();
 
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
@@ -225,7 +265,6 @@ test('creates the HTTP API with the price/summary and yutai routes', () => {
 
   const routeKeys = [
     'GET /tickers/{ticker}/prices',
-    'GET /tickers/{ticker}/summary',
     'GET /yutai/{ticker}',
     'GET /yutai/{ticker}/margin-trend',
     'GET /yutai/forecast',
@@ -243,6 +282,8 @@ test('creates the HTTP API with the price/summary and yutai routes', () => {
   expect(actualRouteKeys).not.toContain('DELETE /tickers/{ticker}');
   // 優待クロス一覧はGET /yutai/forecastに一本化した
   expect(actualRouteKeys).not.toContain('GET /yutai');
+  // 財務サマリーは廃止した
+  expect(actualRouteKeys).not.toContain('GET /tickers/{ticker}/summary');
 });
 
 test('creates the JQuantsYutaiMaster table with ticker key and RETAIN policy', () => {
@@ -432,10 +473,10 @@ test('creates the yutai-master-sync-batch Lambda with write access to the yutai 
   const scheduleExpressions = Object.values(rules).map(
     (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
   );
-  // yutai-master-sync-batch自体のスケジュールは存在しない。他バッチの4つのスケジュール
-  // (price/financial-summary/margin-balance/gyakuhibu-history)+tdnet-watch+yutai-risk-precompute
-  // +gyakuhibu-forecastの7つのみ。
-  expect(scheduleExpressions.filter(Boolean)).toHaveLength(7);
+  // yutai-master-sync-batch自体のスケジュールは存在しない。他バッチの3つのスケジュール
+  // (price/margin-balance/gyakuhibu-history)+tdnet-watch+yutai-risk-precompute
+  // +gyakuhibu-forecastの6つのみ。
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
 });
 
 test('creates the yutai-tdnet-watch-batch Lambda on a weekly Monday schedule', () => {
@@ -452,7 +493,7 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
 
   // Verify the Lambda function exists with exact environment variables (not a superset like ReferenceApiFunction).
   // Use Match.exact() to ensure only these three env vars are present, distinguishing it from ReferenceApiFunction
-  // which has many more env vars (FINANCIAL_TABLE_NAME, GYAKUHIBU_ACTUAL_TABLE_NAME, MARGIN_BALANCE_TABLE_NAME, YUTAI_TDNET_EVENT_TABLE_NAME).
+  // which has many more env vars (GYAKUHIBU_ACTUAL_TABLE_NAME, MARGIN_BALANCE_TABLE_NAME, YUTAI_TDNET_EVENT_TABLE_NAME).
   template.hasResourceProperties('AWS::Lambda::Function', {
     Handler: 'index.handler',
     Timeout: 840, // 14 minutes in seconds
@@ -465,7 +506,7 @@ test('creates the yutai-risk-precompute-batch Lambda with read/write access to t
     },
   });
 
-  // Verify the EventBridge schedule rule exists with the correct timing (09:20 UTC, 20 min after price batch at 09:00 UTC).
+  // Verify the EventBridge schedule rule exists with the correct timing (09:20 UTC = JST 18:20。前営業日の終値を使う).
   template.hasResourceProperties('AWS::Events::Rule', {
     ScheduleExpression: 'cron(20 9 * * ? *)',
     State: 'ENABLED',
@@ -923,13 +964,13 @@ test('creates the ForecastSnapshotFunction wired to master/actual/price tables, 
   ).toBe(true);
 
   // Task 2の時点ではスケジュールを追加しない(EventBridge SchedulerでのTask 3の対象)。
-  // 既存7スケジュール(price/financial-summary/margin-balance/gyakuhibu-history/
+  // 既存6スケジュール(price/margin-balance/gyakuhibu-history/
   // tdnet-watch/yutai-risk-precompute/gyakuhibu-forecast)から増えていないことを確認する。
   const rules = template.findResources('AWS::Events::Rule');
   const scheduleExpressions = Object.values(rules).map(
     (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
   );
-  expect(scheduleExpressions.filter(Boolean)).toHaveLength(7);
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
 });
 
 test('schedules the two one-time forecast validation snapshots via EventBridge Scheduler at the correct JST wall-clock times', () => {

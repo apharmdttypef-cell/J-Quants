@@ -177,22 +177,6 @@ export function YutaiDetailPage() {
           <div className="summary-item__label">出来高</div>
           <div className="summary-item__value">{formatVolume(data.basicInfo.volume)}</div>
         </div>
-        <div className="summary-item">
-          <div className="summary-item__label">PER</div>
-          <div className="summary-item__value">{data.basicInfo.per !== null ? `${data.basicInfo.per.toFixed(1)}倍` : '—'}</div>
-        </div>
-        <div className="summary-item">
-          <div className="summary-item__label">決算サマリ</div>
-          <div className="summary-item__value" style={{ fontSize: '0.85rem', lineHeight: 1.6 }}>
-            売上 {formatFinancialYen(data.basicInfo.sales ?? undefined)}
-            <br />
-            営業利益 {formatFinancialYen(data.basicInfo.operatingProfit ?? undefined)}
-            <br />
-            純利益 {formatFinancialYen(data.basicInfo.netProfit ?? undefined)}
-            <br />
-            EPS {data.basicInfo.eps ?? '—'}
-          </div>
-        </div>
       </div>
 
       {forecast && (

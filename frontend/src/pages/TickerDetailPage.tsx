@@ -1,8 +1,8 @@
 import { useParams } from 'react-router-dom';
 import { Bar, BarChart, CartesianGrid, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { ApiError, fetchPrices, fetchSummary } from '../api/client';
+import { fetchPrices } from '../api/client';
 import { StatusNote } from '../components/StatusNote';
-import { formatFinancialYen, formatPrice, formatVolume } from '../lib/format';
+import { formatPrice, formatVolume } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 
 interface CandleShapeProps {
@@ -40,16 +40,6 @@ export function TickerDetailPage() {
     return await fetchPrices(ticker);
   }, [ticker]);
 
-  const summaryState = useAsync(async () => {
-    if (!ticker) return undefined;
-    try {
-      return await fetchSummary(ticker);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 404) return undefined;
-      throw error;
-    }
-  }, [ticker]);
-
   if (detailState.loading) return <StatusNote kind="loading" message="読み込み中…" />;
   if (detailState.error) return <StatusNote kind="error" message={`取得に失敗しました: ${detailState.error.message}`} />;
   if (!detailState.data) return null;
@@ -62,7 +52,7 @@ export function TickerDetailPage() {
   return (
     <>
       <h1 className="page-title">{ticker}</h1>
-      <p className="page-subtitle">直近12週間の値動きと直近決算のサマリです。</p>
+      <p className="page-subtitle">直近12週間の値動きです。</p>
 
       {chartData.length === 0 ? (
         <StatusNote kind="empty" message="まだ価格データがありません。次回バッチ取得をお待ちください。" />
@@ -104,40 +94,6 @@ export function TickerDetailPage() {
             </ResponsiveContainer>
           </div>
         </>
-      )}
-
-      <div className="section-heading">財務サマリ</div>
-      {summaryState.loading && <StatusNote kind="loading" message="読み込み中…" />}
-      {summaryState.error && (
-        <StatusNote kind="error" message={`取得に失敗しました: ${summaryState.error.message}`} />
-      )}
-      {!summaryState.loading && !summaryState.error && !summaryState.data && (
-        <StatusNote kind="empty" message="まだ決算データがありません(開示があるとバッチ取得で反映されます)。" />
-      )}
-      {summaryState.data && (
-        <div className="card">
-          <p className="page-subtitle" style={{ margin: '0 0 0.75rem' }}>
-            {summaryState.data.discDate} 開示・{summaryState.data.curPerType}
-          </p>
-          <div className="summary-grid">
-            <div className="summary-item">
-              <div className="summary-item__label">売上高</div>
-              <div className="summary-item__value">{formatFinancialYen(summaryState.data.sales)}</div>
-            </div>
-            <div className="summary-item">
-              <div className="summary-item__label">営業利益</div>
-              <div className="summary-item__value">{formatFinancialYen(summaryState.data.operatingProfit)}</div>
-            </div>
-            <div className="summary-item">
-              <div className="summary-item__label">当期純利益</div>
-              <div className="summary-item__value">{formatFinancialYen(summaryState.data.netProfit)}</div>
-            </div>
-            <div className="summary-item">
-              <div className="summary-item__label">EPS</div>
-              <div className="summary-item__value">{summaryState.data.eps || '—'}</div>
-            </div>
-          </div>
-        </div>
       )}
     </>
   );
