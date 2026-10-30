@@ -323,6 +323,7 @@ export class JQuantsStack extends cdk.Stack {
 
     // 優待一覧の最大逆日歩などを事前計算し、reference-apiでの逐次クエリ(銘柄数に比例して
     // 増える)を無くす。JST 18:20 = UTC 09:20。前営業日の終値を使う(終値は平日JST 09:30のPriceBatchFunctionが書く)。
+    // 株価からRSI(14)も計算して優待マスタに書き戻す。
     new events.Rule(this, 'YutaiRiskPrecomputeBatchSchedule', {
       schedule: events.Schedule.cron({ minute: '20', hour: '9' }),
       targets: [new targets.LambdaFunction(yutaiRiskPrecomputeBatchFn)],

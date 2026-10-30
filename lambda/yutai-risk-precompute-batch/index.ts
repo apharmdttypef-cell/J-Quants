@@ -3,6 +3,7 @@ import { DynamoDBDocumentClient, QueryCommand, ScanCommand, UpdateCommand } from
 import { calcMaxGyakuhibu, calcMaxRate, RIGHTS_DAY_RATE_MULTIPLIER } from '../shared/gyakuhibu-calc';
 import { summarizeActuals } from '../shared/gyakuhibu-actual-summary';
 import { isGeneralMarginOnly } from '../shared/margin-name';
+import { computeRsiSnapshot, RSI_PRICE_LOOKBACK } from '../shared/rsi-calc';
 import {
   getLocalTradingCalendar,
   settlementDate,
@@ -62,18 +63,28 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
   return rows;
 }
 
-async function latestClose(ticker: string): Promise<number | undefined> {
+// 直近の株価を新しい順に取る。RSIの計算と、最大逆日歩・必要資金の終値(先頭の行)の両方に使う。
+async function fetchRecentPrices(ticker: string): Promise<Array<Record<string, unknown>>> {
   const result = await ddbDocClient.send(
     new QueryCommand({
       TableName: TABLE_NAME,
       KeyConditionExpression: 'ticker = :ticker',
       ExpressionAttributeValues: { ':ticker': ticker },
       ScanIndexForward: false,
-      Limit: 1,
+      Limit: RSI_PRICE_LOOKBACK,
     }),
   );
-  const close = result.Items?.[0]?.close;
+  return result.Items ?? [];
+}
+
+function latestClose(prices: Array<Record<string, unknown>>): number | undefined {
+  const close = prices[0]?.close;
   return typeof close === 'number' ? close : undefined;
+}
+
+// RSIの鮮度判定に使う、JSTの今日(YYYY-MM-DD)
+function todayJst(): string {
+  return new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
 }
 
 // その銘柄の逆日歩実績を全件取る。権利日は年1〜2回なので、数年分でも数十行に収まる。
@@ -120,17 +131,16 @@ function fetchTradingCalendarCached(from: string, to: string, cache: Map<string,
 }
 
 async function calcRisk(
-  ticker: string,
   marginName: string | null,
   shares: number,
   rightsDate: string | undefined,
   calendarCache: Map<string, CalendarDay[]>,
+  closePrice: number | undefined,
 ): Promise<RiskResult> {
   if (!rightsDate) return NA_RISK;
   // 貸借銘柄でなければ(区分不明のnullを含む)逆日歩は見積もれない
   if (marginName !== '貸借') return NA_RISK;
 
-  const closePrice = await latestClose(ticker);
   if (closePrice === undefined) return NA_RISK;
 
   const calendarTo = new Date(rightsDate);
@@ -151,8 +161,7 @@ async function calcRisk(
 
 // 制度信用で売れない銘柄(貸借融資・非貸借)には逆日歩が発生しえないので、最大逆日歩は出さない。
 // クロスは一般信用で組むことになり、その場合も必要資金は要るので終値と必要資金だけ出す。
-async function calcGeneralMarginOnlyRisk(ticker: string, shares: number): Promise<RiskResult> {
-  const closePrice = await latestClose(ticker);
+function calcGeneralMarginOnlyRisk(shares: number, closePrice: number | undefined): RiskResult {
   return {
     ...NA_RISK,
     closePrice: closePrice ?? null,
@@ -163,10 +172,14 @@ async function calcGeneralMarginOnlyRisk(ticker: string, shares: number): Promis
 export const handler = async (): Promise<void> => {
   const rows = await scanYutaiMaster();
   const calendarCache = new Map<string, CalendarDay[]>();
+  const today = todayJst();
 
   let updated = 0;
   for (const row of rows) {
     try {
+      const prices = await fetchRecentPrices(row.ticker);
+      const closePrice = latestClose(prices);
+      const rsi = computeRsiSnapshot(prices, today);
       const rightsDate = nextRightsDate(row.rightsMonths);
       // requiredSharesが未取得(yutai-detail-sync-batchがまだ回っていない)なら
       // 単元株数で代用する。代用したことはsummarizeActualsがbasedOnUnitSharesで
@@ -174,8 +187,8 @@ export const handler = async (): Promise<void> => {
       const shares = row.requiredShares ?? row.unitShares;
       const generalMarginOnly = isGeneralMarginOnly(row.marginName);
       const risk = generalMarginOnly
-        ? await calcGeneralMarginOnlyRisk(row.ticker, shares)
-        : await calcRisk(row.ticker, row.marginName, shares, rightsDate, calendarCache);
+        ? calcGeneralMarginOnlyRisk(shares, closePrice)
+        : await calcRisk(row.marginName, shares, rightsDate, calendarCache, closePrice);
       // 実績の集計は最大逆日歩の計算とは独立(貸借区分が不明で最大逆日歩が出せない銘柄でも、
       // 過去に実際に取られたコストは出す価値がある)。ただし制度信用で売れない銘柄の実績は
       // 全て「発生しなかった」記録なので、「前回0円」と見せると誤解を招くため出さない。
@@ -193,7 +206,8 @@ export const handler = async (): Promise<void> => {
           UpdateExpression:
             'SET maxGyakuhibu = :maxGyakuhibu, maxRate = :maxRate, #days = :days, ' +
             'closePrice = :closePrice, requiredInvestment = :requiredInvestment, ' +
-            'lastGyakuhibu = :lastGyakuhibu, sameMonthLastYearGyakuhibu = :sameMonthLastYearGyakuhibu ' +
+            'lastGyakuhibu = :lastGyakuhibu, sameMonthLastYearGyakuhibu = :sameMonthLastYearGyakuhibu, ' +
+            'rsi14 = :rsi14, rsiLabel = :rsiLabel, rsiAsOf = :rsiAsOf ' +
             'REMOVE riskStatus',
           ExpressionAttributeNames: { '#days': 'days' },
           ExpressionAttributeValues: {
@@ -204,6 +218,9 @@ export const handler = async (): Promise<void> => {
             ':requiredInvestment': risk.requiredInvestment,
             ':lastGyakuhibu': actuals.last,
             ':sameMonthLastYearGyakuhibu': actuals.sameMonthLastYear,
+            ':rsi14': rsi.rsi14,
+            ':rsiLabel': rsi.rsiLabel,
+            ':rsiAsOf': rsi.rsiAsOf,
           },
         }),
       );

@@ -35,6 +35,7 @@ test('writes null risk amounts when rightsMonths is empty (no upcoming rights da
   mockSend.mockResolvedValueOnce({
     Items: [{ ticker: '1234', marginName: '貸借', value: 1000, unitShares: 100, rightsMonths: [] }],
   }); // yutai master scan
+  mockSend.mockResolvedValueOnce({ Items: [] }); // recent prices
   mockSend.mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
@@ -74,6 +75,7 @@ test('the master scan projects only the attributes the batch reads', async () =>
 test('writes null risk amounts when the margin classification is unknown (no stored marginName)', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9942', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }) // recent prices
     .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals(区分不明でも走る)
     .mockResolvedValueOnce({}); // update
 
@@ -84,13 +86,13 @@ test('writes null risk amounts when the margin classification is unknown (no sto
   expect(calls[0][0]).toMatchObject({
     ExpressionAttributeValues: { ':maxGyakuhibu': null, ':maxRate': null, ':days': null, ':closePrice': null },
   });
-  expect(mockSend).toHaveBeenCalledTimes(3); // 株価Queryは呼ばない
+  expect(mockSend).toHaveBeenCalledTimes(4); // 価格Queryは全銘柄で1回
 });
 
 test('writes null risk amounts when there is no price data for the ticker', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', value: 1000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
-    .mockResolvedValueOnce({ Items: [] }) // latest close: none
+    .mockResolvedValueOnce({ Items: [] }) // recent prices: none
     .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
@@ -105,7 +107,7 @@ test('writes null risk amounts when there is no price data for the ticker', asyn
 test('writes the numeric risk fields including closePrice, and removes the old riskStatus verdict', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
-    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-08-12', close: 500 }] }) // recent prices
     .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
@@ -126,7 +128,7 @@ test('writes the numeric risk fields including closePrice, and removes the old r
 test('computes maxGyakuhibu/maxRate/days even when value is null (優待価値が抽出できない銘柄)', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9001', marginName: '貸借', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan (valueフィールド無し = 東武鉄道のような銘柄)
-    .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-12', close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [{ ticker: '9001', date: '2026-08-12', close: 500 }] }) // recent prices
     .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
   await handler();
@@ -143,7 +145,7 @@ test('uses requiredShares instead of estimating from minInvestment', async () =>
   // 第一興商: 単元100株だが優待は200株。推定ではなく個別ページ由来の正確値を使う。
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '7458', marginName: '貸借', value: 5000, unitShares: 100, minInvestment: 400000, requiredShares: 200, rightsMonths: [3] }] })
-    .mockResolvedValueOnce({ Items: [{ close: 2000 }] }) // 直近終値
+    .mockResolvedValueOnce({ Items: [{ close: 2000 }] }) // recent prices
     .mockResolvedValueOnce({ Items: [] }) // 逆日歩実績なし
     .mockResolvedValueOnce({}); // update
 
@@ -215,6 +217,7 @@ test('still aggregates the actual history when maxGyakuhibu cannot be computed',
   // 独立した事実なので一覧に出す価値がある。
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9942', value: 3000, unitShares: 100, requiredShares: 100, rightsMonths: [3] }] })
+    .mockResolvedValueOnce({ Items: [] }) // recent prices
     .mockResolvedValueOnce({ Items: [{ rightsDate: '2025-03-27', avgRate: 1.0, days: 2 }] })
     .mockResolvedValueOnce({});
 
@@ -235,7 +238,7 @@ test('applies the rights-day 4x rate multiplier (taisyaku.jp「倍率適用」) 
   try {
     mockSend
       .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', value: 100000, unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
-      .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-07-31', close: 500 }] }) // latest close
+      .mockResolvedValueOnce({ Items: [{ ticker: '1234', date: '2026-07-31', close: 500 }] }) // recent prices
       .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actuals
 
     await handler();
@@ -265,8 +268,10 @@ test('continues past a single row failure and processes the remaining rows', asy
           { ticker: '2222', marginName: '貸借', value: 1000, unitShares: 100, rightsMonths: [] },
         ],
       }) // yutai master scan
+      .mockResolvedValueOnce({ Items: [] }) // 1111's recent prices
       .mockResolvedValueOnce({ Items: [] }) // 1111's gyakuhibu actuals
       .mockRejectedValueOnce(new Error('DynamoDB error')) // 1111's UpdateCommand fails
+      .mockResolvedValueOnce({ Items: [] }) // 2222's recent prices
       .mockResolvedValueOnce({ Items: [] }) // 2222's gyakuhibu actuals
       .mockResolvedValueOnce({}); // 2222's UpdateCommand succeeds
 
@@ -296,7 +301,7 @@ function updateValues(): Record<string, unknown> {
 test('computes the gyakuhibu amounts for a ticker whose stored classification is 貸借', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', unitShares: 100, rightsMonths: [8], marginName: '貸借' }] }) // yutai master scan
-    .mockResolvedValueOnce({ Items: [{ close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [{ close: 500 }] }) // recent prices
     .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
     .mockResolvedValueOnce({}); // update
 
@@ -308,7 +313,7 @@ test('computes the gyakuhibu amounts for a ticker whose stored classification is
 test('for a 貸借融資 ticker (cannot be shorted under 制度信用), writes no gyakuhibu amounts or past costs but keeps the investment amount', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1380', unitShares: 100, requiredShares: 100, rightsMonths: [8], marginName: '貸借融資' }] }) // yutai master scan
-    .mockResolvedValueOnce({ Items: [{ close: 800 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [{ close: 800 }] }) // recent prices
     .mockResolvedValueOnce({}); // update
 
   await handler();
@@ -323,13 +328,14 @@ test('for a 貸借融資 ticker (cannot be shorted under 制度信用), writes n
   // 一般信用でクロスする場合も必要資金は要る
   expect(values[':closePrice']).toBe(800);
   expect(values[':requiredInvestment']).toBe(80000);
-  // 信用残の有無も逆日歩実績も見に行かない(scan・終値・updateの3回だけ)
+  // 信用残の有無も逆日歩実績も見に行かない(scan・価格・updateの3回だけ)
   expect(mockSend).toHaveBeenCalledTimes(3);
 });
 
 test('treats a ticker without a stored classification (no TSE row) as unknown, not as 一般信用のみ', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '9942', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }) // recent prices
     .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
     .mockResolvedValueOnce({}); // update
 
@@ -342,7 +348,7 @@ test('treats a ticker without a stored classification (no TSE row) as unknown, n
 test('never queries the margin balance table', async () => {
   mockSend
     .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
-    .mockResolvedValueOnce({ Items: [{ close: 500 }] }) // latest close
+    .mockResolvedValueOnce({ Items: [{ close: 500 }] }) // recent prices
     .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
     .mockResolvedValueOnce({}); // update
 
@@ -376,4 +382,93 @@ test('never writes marginName (the margin balance batch owns it)', async () => {
   const update = updateCalls()[0][0] as { UpdateExpression: string; ExpressionAttributeValues: Record<string, unknown> };
   expect(update.UpdateExpression).not.toContain('marginName');
   expect(update.ExpressionAttributeValues).not.toHaveProperty(':marginName');
+});
+
+// JSTの今日からn日前(YYYY-MM-DD)。バッチの鮮度判定と同じ基準で日付を作る。
+function jstDaysAgo(n: number): string {
+  return new Date(Date.now() + 9 * 3600_000 - n * 86_400_000).toISOString().slice(0, 10);
+}
+
+// 最新がlatestDaysAgo日前で、そこから1日ずつ遡る15件の終値(毎日+1の上昇、RSI=100)。Queryの降順で返す。
+function risingPrices(ticker: string, latestDaysAgo: number) {
+  return Array.from({ length: 15 }, (_, i) => ({ ticker, date: jstDaysAgo(latestDaysAgo + i), close: 1014 - i }));
+}
+
+test('queries the latest 60 prices in descending order once per ticker and writes the RSI', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: risingPrices('1234', 1) }) // recent prices
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
+    .mockResolvedValueOnce({}); // update
+
+  await handler();
+
+  const priceQueries = mockSend.mock.calls.filter(([cmd]) => (cmd as { TableName?: string }).TableName === 'JQuantsStockPrices');
+  expect(priceQueries).toHaveLength(1);
+  expect(priceQueries[0][0]).toMatchObject({ ScanIndexForward: false, Limit: 60 });
+
+  const values = updateCalls()[0][0].ExpressionAttributeValues as Record<string, unknown>;
+  expect(values).toMatchObject({ ':rsi14': 100, ':rsiLabel': 'high', ':rsiAsOf': jstDaysAgo(1), ':closePrice': 1014 });
+  const expression = updateCalls()[0][0].UpdateExpression as string;
+  expect(expression).toContain('rsi14 = :rsi14');
+  expect(expression).toContain('rsiLabel = :rsiLabel');
+  expect(expression).toContain('rsiAsOf = :rsiAsOf');
+});
+
+test('writes na when the latest close is 8 days old, and computes when it is 7 days old', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '1111', marginName: '貸借', unitShares: 100, rightsMonths: [] },
+        { ticker: '2222', marginName: '貸借', unitShares: 100, rightsMonths: [] },
+      ],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: risingPrices('1111', 8) }) // recent prices 1111
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals 1111
+    .mockResolvedValueOnce({}) // update 1111
+    .mockResolvedValueOnce({ Items: risingPrices('2222', 7) }) // recent prices 2222
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals 2222
+    .mockResolvedValueOnce({}); // update 2222
+
+  await handler();
+
+  const [stale, fresh] = updateCalls().map(([cmd]) => cmd.ExpressionAttributeValues as Record<string, unknown>);
+  expect(stale).toMatchObject({ ':rsi14': null, ':rsiLabel': 'na', ':rsiAsOf': null });
+  expect(fresh).toMatchObject({ ':rsi14': 100, ':rsiLabel': 'high', ':rsiAsOf': jstDaysAgo(7) });
+});
+
+test('writes na without failing when the ticker has no prices', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Items: [{ ticker: '1234', marginName: '貸借', unitShares: 100, rightsMonths: [8] }] }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }) // recent prices
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals
+    .mockResolvedValueOnce({}); // update
+
+  await handler();
+
+  expect(updateCalls()[0][0].ExpressionAttributeValues).toMatchObject({ ':rsi14': null, ':rsiLabel': 'na', ':rsiAsOf': null, ':closePrice': null });
+});
+
+test('writes the RSI for tickers with no rights month or an unknown margin classification', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '1111', marginName: '貸借', unitShares: 100, rightsMonths: [] },
+        { ticker: '2222', unitShares: 100, rightsMonths: [3] },
+      ],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: risingPrices('1111', 1) }) // recent prices 1111
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals 1111
+    .mockResolvedValueOnce({}) // update 1111
+    .mockResolvedValueOnce({ Items: risingPrices('2222', 1) }) // recent prices 2222
+    .mockResolvedValueOnce({ Items: [] }) // gyakuhibu actuals 2222
+    .mockResolvedValueOnce({}); // update 2222
+
+  await handler();
+
+  for (const [cmd] of updateCalls()) {
+    expect(cmd.ExpressionAttributeValues).toMatchObject({ ':rsi14': 100, ':rsiLabel': 'high' });
+    // 最大逆日歩は出せない(権利日なし・区分不明)が、RSIは出す
+    expect(cmd.ExpressionAttributeValues).toMatchObject({ ':maxGyakuhibu': null });
+  }
 });
