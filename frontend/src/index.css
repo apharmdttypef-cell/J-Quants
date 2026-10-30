@@ -390,6 +390,29 @@ a {
   border: 1px dashed var(--border);
 }
 
+/* RSI(14)の高め/低め。判定バッジの横に小さく並べる */
+.rsi-badge {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  margin-left: 0.35rem;
+  display: inline-block;
+  border: 1px solid currentColor;
+}
+
+.rsi-badge--high {
+  color: var(--up);
+}
+
+.rsi-badge--low {
+  color: var(--down);
+}
+
+.summary-item__note {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
 /* 単元株数と必要株数が違う銘柄(第一興商の200株など)は見落とすと優待が取れない */
 .shares-above-unit {
   font-weight: 700;
