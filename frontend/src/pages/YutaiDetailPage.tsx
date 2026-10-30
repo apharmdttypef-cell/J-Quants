@@ -26,7 +26,8 @@ const HOLDING_NOTE: Record<HoldingRequirement, string> = {
 
 // 例: 「72.4（2026-10-28時点）」。naは価格不足・鮮度切れ・分割直後。
 function formatRsi(data: YutaiDetail): string {
-  if (data.rsiLabel === 'na' || data.rsi14 === null) return '算出不可';
+  // デプロイ過渡期に旧APIが応答すると3項目とも undefined になるため、== null で判定する。
+  if (data.rsiLabel === 'na' || data.rsi14 == null || data.rsiAsOf == null) return '算出不可';
   return `${data.rsi14.toFixed(1)}（${data.rsiAsOf}時点）`;
 }
 
