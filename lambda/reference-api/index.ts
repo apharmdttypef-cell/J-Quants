@@ -4,6 +4,7 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda
 import { getLocalTradingCalendar, isTradingDay, nextRightsDate } from '../shared/trading-calendar';
 import { excessRatio, fillRatio, shiftIsoDate } from '../shared/gyakuhibu-forecast';
 import type { GyakuhibuActualRef } from '../shared/gyakuhibu-actual-summary';
+import type { RsiLabel } from '../shared/rsi-calc';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
@@ -92,6 +93,10 @@ interface YutaiMasterRow {
   requiredInvestment: number | null;
   lastGyakuhibu: GyakuhibuActualRef | null;
   sameMonthLastYearGyakuhibu: GyakuhibuActualRef | null;
+  // yutai-risk-precompute-batchが書くRSI(14)。バッチ未実行の行はna/null。
+  rsi14: number | null;
+  rsiLabel: RsiLabel;
+  rsiAsOf: string | null;
   benefitGroups: BenefitGroup[];
 }
 
@@ -119,6 +124,9 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
     requiredInvestment: item.requiredInvestment ?? null,
     lastGyakuhibu: item.lastGyakuhibu ?? null,
     sameMonthLastYearGyakuhibu: item.sameMonthLastYearGyakuhibu ?? null,
+    rsi14: item.rsi14 ?? null,
+    rsiLabel: item.rsiLabel ?? 'na',
+    rsiAsOf: item.rsiAsOf ?? null,
     benefitGroups: item.benefitGroups ?? [],
   };
 }
@@ -137,7 +145,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
 const YUTAI_LIST_PROJECTION =
   'ticker, companyName, #content, #value, unitShares, rightsMonths, maxGyakuhibu, closePrice, ' +
   'requiredShares, crossEligible, holdingKind, holdingMinMonths, minTierValueYen, benefitParseWarning, ' +
-  'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu';
+  'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu, rsiLabel';
 
 async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
   const rows: YutaiMasterRow[] = [];
@@ -401,6 +409,7 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
       value: row.value,
       rightsDate: rightsDate ?? null,
       maxGyakuhibu: row.maxGyakuhibu,
+      rsiLabel: row.rsiLabel,
       forecast,
       tseForecast: buildTseForecast(forecastByTicker.get(row.ticker)),
       ...buildCrossFields(row),
@@ -478,6 +487,9 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
     content: master.content,
     value: master.value,
     rightsDate: rightsDate ?? null,
+    rsi14: master.rsi14,
+    rsiLabel: master.rsiLabel,
+    rsiAsOf: master.rsiAsOf,
     basicInfo: {
       closePrice: price?.close ?? null,
       volume: price?.volume ?? null,
