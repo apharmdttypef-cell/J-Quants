@@ -15,7 +15,7 @@
 
 - RSI(14)の算出・分割検出・ラベル判定の純粋関数(`lambda/shared/rsi-calc.ts`)
 - `YutaiRiskPrecomputeBatchFunction`での計算と`JQuantsYutaiMaster`への書き戻し
-- `GET /yutai`・`GET /yutai/{ticker}`のレスポンスへの項目追加
+- `GET /yutai/forecast`(一覧)・`GET /yutai/{ticker}`(詳細)のレスポンスへの項目追加
 - 一覧画面のラベル表示、詳細画面のRSI値・算出基準日の表示
 
 **含まない**
@@ -93,7 +93,7 @@ RSIはWilderの平滑化方式、期間14(定数`RSI_PERIOD = 14`)で算出し�
 
 **API(`lambda/reference-api/index.ts`)**
 
-- `GET /yutai`: 各要素に`rsiLabel`を追加。`YUTAI_LIST_PROJECTION`にも`rsiLabel`を足す(足し忘れると黙って既定値になる)
+- `GET /yutai/forecast`(一覧画面が使う): 各要素に`rsiLabel`を追加。`YUTAI_LIST_PROJECTION`にも`rsiLabel`を足す(足し忘れると黙って既定値になる)
 - `GET /yutai/{ticker}`: `rsi14`・`rsiLabel`・`rsiAsOf`を追加
 - 属性が未設定の旧レコード(バッチ未実行)は`rsiLabel: "na"`、他は`null`として返す
 
