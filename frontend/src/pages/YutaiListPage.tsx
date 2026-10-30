@@ -4,7 +4,7 @@ import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable } from '@
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table';
 import * as HoverCard from '@radix-ui/react-hover-card';
 import { fetchYutaiForecastList } from '../api/client';
-import type { YutaiForecastListItem, YutaiForecastStatus, YutaiTseForecast } from '../api/types';
+import type { RsiLabel, YutaiForecastListItem, YutaiForecastStatus, YutaiTseForecast } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
@@ -67,6 +67,16 @@ function compareByDefaultOrder(a: YutaiForecastListItem, b: YutaiForecastListIte
   const netA = a.forecast.expectedNet ?? Infinity;
   const netB = b.forecast.expectedNet ?? Infinity;
   return netA - netB;
+}
+
+// RSI(14)が70以上/30以下の銘柄だけ小さく出す。neutral・naは何も出さない。
+function RsiBadge({ label }: { label: RsiLabel }) {
+  if (label !== 'high' && label !== 'low') return null;
+  return (
+    <span className={`rsi-badge rsi-badge--${label}`} title="RSI(14)。70以上で高め、30以下で低め。テクニカル指標は参考値です。">
+      {label === 'high' ? 'RSI高め' : 'RSI低め'}
+    </span>
+  );
 }
 
 function formatPercent(value: number | null): string {
@@ -212,12 +222,15 @@ function buildColumns(): ColumnDef<YutaiForecastListItem>[] {
       sortingFn: (rowA, rowB) =>
         STATUS_SORT_RANK[rowA.original.forecast.forecastStatus] - STATUS_SORT_RANK[rowB.original.forecast.forecastStatus],
       cell: ({ row }) => (
-        <span
-          className={`risk-badge risk-badge--${row.original.forecast.forecastStatus}`}
-          title={riskStatusTitle(row.original.forecast.forecastStatus)}
-        >
-          {RISK_STATUS_LABEL[row.original.forecast.forecastStatus]}
-        </span>
+        <>
+          <span
+            className={`risk-badge risk-badge--${row.original.forecast.forecastStatus}`}
+            title={riskStatusTitle(row.original.forecast.forecastStatus)}
+          >
+            {RISK_STATUS_LABEL[row.original.forecast.forecastStatus]}
+          </span>
+          <RsiBadge label={row.original.rsiLabel} />
+        </>
       ),
     },
     numberColumn(

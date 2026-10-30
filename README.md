@@ -152,7 +152,7 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `GyakuhibuHistoryBatchFunction` | EventBridge(`cron(0 10 * * ? *)` = JST 19:00 毎日) | `JQuantsYutaiMaster`の`rightsMonths`から過去の権利日を計算し(`rightsDateForMonth`)、そのうち`JQuantsGyakuhibuActual`未取得のものについて、taisyaku.jpから実績逆日歩を取得しupsert。1回の実行で実際に取得する件数は`MAX_GYAKUHIBU_FETCHES_PER_RUN`(既定200件)で上限を設け、超過分は翌日以降に自然と持ち越す |
 | `YutaiMasterSyncBatchFunction` | 手動invokeのみ(EventBridgeスケジュールなし) | kabuyutai.comの月別一覧ページ(1〜12月)から優待実施銘柄を一括取得し`JQuantsYutaiMaster`へupsert。初回導入時・大量の追加銘柄バックフィル用 |
 | `YutaiTdnetWatchBatchFunction` | EventBridge(`cron(0 12 ? * MON *)` = 毎週月曜 JST 21:00) | TDnetの直近7日分の開示から「株主優待」関連のキーワードを含む開示(新設・変更・廃止)を検知し、該当銘柄をkabuyutai.comで再取得して`JQuantsYutaiMaster`へupsert。開示ごとに`JQuantsYutaiTdnetEvent`へイベント(`start`/`update`/`abolition`)を記録する(マスタが実際に変わらなかった場合は記録しない)。廃止検知による`JQuantsYutaiMaster`からの削除は、`PriceBatchFunction`の対象銘柄取得も`ReferenceApiFunction`の`isKnownTicker`判定も同テーブルを参照する設計のため、その銘柄の株価収集を止め、`GET /tickers/{ticker}/prices`も404にする(意図した副作用だが、単一の削除操作が複数の挙動に波及する点に注意) |
-| `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし最大逆日歩などを事前計算・書き戻し。一覧API(`GET /yutai/forecast`)が銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため。貸借判定はマスタの`marginName`(信用残バッチが書く)で行い、J-Quantsは呼ばない |
+| `YutaiRiskPrecomputeBatchFunction` | EventBridge(`cron(20 9 * * ? *)` = JST 18:20 毎日) | `JQuantsYutaiMaster`を全件スキャンし最大逆日歩などを事前計算・書き戻し。RSI(14)も計算して優待マスタに書き戻す(調整前終値なので分割・併合の日以降だけで計算、15件未満・最新終値が7日より古い銘柄は算出不可)。一覧API(`GET /yutai/forecast`)が銘柄数に比例した逐次DynamoDBクエリを行わずに済むようにするため。貸借判定はマスタの`marginName`(信用残バッチが書く)で行い、J-Quantsは呼ばない |
 | `GyakuhibuForecastBatchFunction` | EventBridge(`cron(40 10 * * ? *)` = JST 19:40 毎日、逆日歩実績・信用残バッチの後) | `JQuantsYutaiMaster`・`JQuantsGyakuhibuActual`を読み、貸株超過率のビン別充足率分布から次回権利日の予測逆日歩(過去実績ベース)を算出し`JQuantsGyakuhibuForecast`へupsert。`JQuantsMarginBalance`も読み、日証金の貸借取引残高ベースの現在需給予測(`tseForecast`属性・`_POOL_TSE_`行)も併せて書く。信用残バッチ(JST19:15)の後に走るので当日公表分までの残高を使う。ただしtaisyaku.jpの公表時刻は未検証で、19:15時点で当日分が未公表なら前営業日までの残高で予測する(当日分は翌営業日の信用残バッチで取り込まれる) |
 | `ReferenceApiFunction` | API Gateway(HTTP API) | `/tickers` 系・`/yutai` 系エンドポイントの実処理。呼び出し元(`sub`)と`routeKey`を構造化ログに出す |
 | `PreTokenGenerationFunction` | Cognito User PoolのPre Token Generationトリガー(V2) | アクセストークンに`email`クレームを足す |
@@ -212,8 +212,8 @@ Vite + React + TypeScript(SPA)。`react-router-dom`でルーティング、`rech
 |---|---|
 | `/` | `/yutai`へリダイレクト |
 | `/tickers/:ticker` | 個別銘柄詳細(ローソク足・出来高棒グラフ) |
-| `/yutai` | 優待クロス一覧(読み取り専用、旧「優待クロス」と旧「逆日歩予測」を統合)。権利日範囲(デフォルト当月1日〜末日)・キーワード・株価/必要資金・長期保有・判定(危険/注意/安全/制度信用不可/対象外のチェックボックス、既定は危険以外)で絞り込み、判定→期待値差の順でデフォルトソート。列は「基本」(銘柄・優待内容・権利日・判定・想定逆日歩(最悪)・長期保有・必要資金・前回逆日歩)と「詳細」(想定逆日歩・発生確率・最大逆日歩・前日株価・優待価値・必要株数を追加)を切り替え(ブラウザに記憶)。詳細表示に「想定逆日歩(現在需給)」「貸株残(4週前比)」 |
-| `/yutai/:ticker` | 銘柄詳細(旧2つの詳細を統合)。`GET /yutai/{ticker}`と`GET /yutai/{ticker}/forecast`を並行取得し、判定サマリ(判定・発生確率・想定逆日歩・最大逆日歩)→優待内容→株数段階別の優待条件→銘柄基本情報→予測の根拠(貸株超過率と充足率のグラフ・感度表・過去権利日)→現在需給ベース・信用残トレンド、の順 |
+| `/yutai` | 優待クロス一覧(読み取り専用、旧「優待クロス」と旧「逆日歩予測」を統合)。権利日範囲(デフォルト当月1日〜末日)・キーワード・株価/必要資金・長期保有・判定(危険/注意/安全/制度信用不可/対象外のチェックボックス、既定は危険以外)で絞り込み、判定→期待値差の順でデフォルトソート。列は「基本」(銘柄・優待内容・権利日・判定・想定逆日歩(最悪)・長期保有・必要資金・前回逆日歩)と「詳細」(想定逆日歩・発生確率・最大逆日歩・前日株価・優待価値・必要株数を追加)を切り替え(ブラウザに記憶)。詳細表示に「想定逆日歩(現在需給)」「貸株残(4週前比)」。判定列にはRSI(14)が70以上/30以下の銘柄だけ「RSI高め/低め」の小さなバッジを添える |
+| `/yutai/:ticker` | 銘柄詳細(旧2つの詳細を統合)。`GET /yutai/{ticker}`と`GET /yutai/{ticker}/forecast`を並行取得し、判定サマリ(判定・発生確率・想定逆日歩・最大逆日歩)→優待内容→株数段階別の優待条件→銘柄基本情報→予測の根拠(貸株超過率と充足率のグラフ・感度表・過去権利日)→現在需給ベース・信用残トレンド、の順。銘柄基本情報にはRSI(14)の値(例「72.4(2026-10-28時点)」、算出不可なら「算出不可」)を参考値として出す |
 | `/yutai/forecast`・`/yutai/:ticker/forecast` | 旧URL。それぞれ`/yutai`・`/yutai/:ticker`へリダイレクト |
 | `/yutai/tdnet-events` | 優待変更履歴(読み取り専用)。開示日 / 銘柄コード / 会社名 / 種別バッジ(開始・変更・廃止) / 開示タイトルの一覧。ナビゲーションから直接遷移 |
 

@@ -201,10 +201,52 @@ test('the yutai list scan projects only the attributes the list returns', async 
     'requiredInvestment',
     'lastGyakuhibu',
     'sameMonthLastYearGyakuhibu',
+    'rsiLabel',
   ]);
   // content / value はDynamoDBの予約語なので素のままでは射影に書けない
   expect(scanInput.ExpressionAttributeNames).toEqual({ '#content': 'content', '#value': 'value' });
   expect(scanInput.ProjectionExpression).not.toContain('benefitGroups');
+});
+
+test('GET /yutai/forecast returns the stored RSI label, and na for rows the batch has not reached', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '1234', content: 'QUOカード', value: 1000, unitShares: 100, rightsMonths: [8], rsiLabel: 'high' },
+        { ticker: '5678', content: '自社製品', value: 3000, unitShares: 100, rightsMonths: [8] },
+      ],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }); // forecast scan
+
+  const result = await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: {} }));
+
+  const parsed = body(result) as { tickers: Array<Record<string, unknown>> };
+  expect(parsed.tickers.find((t) => t.ticker === '1234')).toHaveProperty('rsiLabel', 'high');
+  expect(parsed.tickers.find((t) => t.ticker === '5678')).toHaveProperty('rsiLabel', 'na');
+});
+
+test('GET /yutai/{ticker} returns the stored RSI', async () => {
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '1234', content: 'QUOカード', value: 1000, unitShares: 100, rightsMonths: [8], rsi14: 72.4, rsiLabel: 'high', rsiAsOf: '2026-10-28' },
+    }) // yutai master get
+    .mockResolvedValueOnce({ Items: [] }) // latest price
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actual history
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '1234' } }));
+
+  expect(body(result)).toMatchObject({ rsi14: 72.4, rsiLabel: 'high', rsiAsOf: '2026-10-28' });
+});
+
+test('GET /yutai/{ticker} returns na and nulls for a row without RSI attributes', async () => {
+  mockSend
+    .mockResolvedValueOnce({ Item: { ticker: '1234', content: 'QUOカード', value: 1000, unitShares: 100, rightsMonths: [8] } }) // yutai master get
+    .mockResolvedValueOnce({ Items: [] }) // latest price
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actual history
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '1234' } }));
+
+  expect(body(result)).toMatchObject({ rsi14: null, rsiLabel: 'na', rsiAsOf: null });
 });
 
 test('GET /yutai/forecast filters by keyword against company name and content', async () => {

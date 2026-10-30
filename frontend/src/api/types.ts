@@ -84,6 +84,9 @@ export interface YutaiBasicInfo {
   volume: number | null;
 }
 
+// yutai-risk-precompute-batchが計算するRSI(14)のラベル。naは算出不可(価格不足・鮮度切れ・分割直後)。
+export type RsiLabel = 'high' | 'low' | 'neutral' | 'na';
+
 export interface YutaiDetail extends YutaiBenefitFields {
   ticker: string;
   companyName: string | null;
@@ -94,6 +97,9 @@ export interface YutaiDetail extends YutaiBenefitFields {
   basicInfo: YutaiBasicInfo;
   risk: YutaiRiskInfo;
   rightsHistory: YutaiRightsHistoryPoint[];
+  rsi14: number | null;
+  rsiLabel: RsiLabel;
+  rsiAsOf: string | null;
 }
 
 export interface MarginTrendPoint {
@@ -144,6 +150,7 @@ export interface YutaiTseForecast extends YutaiForecast {
 }
 
 export interface YutaiForecastListItem extends YutaiCrossFields {
+  rsiLabel: RsiLabel;
   ticker: string;
   companyName?: string;
   content: string;

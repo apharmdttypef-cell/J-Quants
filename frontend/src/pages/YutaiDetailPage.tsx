@@ -1,6 +1,6 @@
 import { Link, useParams } from 'react-router-dom';
 import { fetchYutaiDetail, fetchYutaiForecastDetail } from '../api/client';
-import type { BenefitGroup } from '../api/types';
+import type { BenefitGroup, YutaiDetail } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import {
   ForecastBasis,
@@ -23,6 +23,13 @@ const HOLDING_NOTE: Record<HoldingRequirement, string> = {
   required: '長期保有者限定です(クロスでは取得不可)',
   unknown: '判定できません。下の優待条件の原文を確認してください',
 };
+
+// 例: 「72.4（2026-10-28時点）」。naは価格不足・鮮度切れ・分割直後。
+function formatRsi(data: YutaiDetail): string {
+  // デプロイ過渡期に旧APIが応答すると3項目とも undefined になるため、== null で判定する。
+  if (data.rsiLabel === 'na' || data.rsi14 == null || data.rsiAsOf == null) return '算出不可';
+  return `${data.rsi14.toFixed(1)}（${data.rsiAsOf}時点）`;
+}
 
 function holdingLabel(group: BenefitGroup): string {
   if (group.holdingMonths === null) return '継続保有条件なし';
@@ -176,6 +183,11 @@ export function YutaiDetailPage() {
         <div className="summary-item">
           <div className="summary-item__label">出来高</div>
           <div className="summary-item__value">{formatVolume(data.basicInfo.volume)}</div>
+        </div>
+        <div className="summary-item">
+          <div className="summary-item__label">RSI(14)</div>
+          <div className="summary-item__value">{formatRsi(data)}</div>
+          <div className="summary-item__note">テクニカル指標は参考値です</div>
         </div>
       </div>
 
