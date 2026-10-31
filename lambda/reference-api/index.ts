@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { getLocalTradingCalendar, isTradingDay, nextRightsDate } from '../shared/trading-calendar';
+import { getLocalTradingCalendar, isTradingDay, nextRightsDate, todayJst } from '../shared/trading-calendar';
 import { excessRatio, fillRatio, shiftIsoDate } from '../shared/gyakuhibu-forecast';
 import type { GyakuhibuActualRef } from '../shared/gyakuhibu-actual-summary';
 import type { RsiLabel } from '../shared/rsi-calc';
@@ -416,9 +416,9 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
     });
   }
 
-  const now = new Date();
-  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
-  const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+  const today = todayJst();
+  const monthStart = `${today.slice(0, 7)}-01`;
+  const monthEnd = new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)), 0)).toISOString().slice(0, 10);
   const monthCalendar = getLocalTradingCalendar(monthStart, monthEnd);
 
   return jsonResponse(200, {

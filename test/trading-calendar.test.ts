@@ -7,6 +7,7 @@ import {
   isJpHoliday,
   rightsDateForMonth,
   nextRightsDate,
+  todayJst,
   type CalendarDay,
 } from '../lambda/shared/trading-calendar';
 
@@ -151,6 +152,19 @@ describe('getLocalTradingCalendar', () => {
     ]);
   });
 
+  test('marks the TSE year-end closures (12/31, 1/2, 1/3) as non-trading', () => {
+    const calendar = getLocalTradingCalendar('2026-12-30', '2027-01-05');
+    expect(calendar).toEqual([
+      { date: '2026-12-30', holDiv: '1' }, // 水、大納会
+      { date: '2026-12-31', holDiv: '0' }, // 木、休場
+      { date: '2027-01-01', holDiv: '0' }, // 金、元日
+      { date: '2027-01-02', holDiv: '0' }, // 土
+      { date: '2027-01-03', holDiv: '0' }, // 日
+      { date: '2027-01-04', holDiv: '1' }, // 月、大発会
+      { date: '2027-01-05', holDiv: '1' },
+    ]);
+  });
+
   test('reproduces the same 品貸日数 formula results as the manually-constructed calendar fixture above', () => {
     const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-20');
     const settlement = settlementDate(calendar, '2026-08-13');
@@ -170,6 +184,11 @@ describe('rightsDateForMonth', () => {
     expect(rightsDateForMonth(calendar, 2026, 2)).toBe('2026-02-25');
   });
 
+  test('2026-12 (大納会12/30・水曜) -> 2026-12-28(T、2営業日前)', () => {
+    const calendar = getLocalTradingCalendar('2026-12-01', '2026-12-31');
+    expect(rightsDateForMonth(calendar, 2026, 12)).toBe('2026-12-28');
+  });
+
   test('該当月に営業日が1件も無いカレンダーではundefinedを返す', () => {
     const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-31');
     expect(rightsDateForMonth(calendar, 2026, 9)).toBeUndefined();
@@ -186,10 +205,22 @@ describe('nextRightsDate', () => {
     expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
+  test('keeps the current month through its rights date and moves to next year the day after', () => {
+    expect(nextRightsDate([10], '2026-10-28')).toBe('2026-10-28');
+    expect(nextRightsDate([10], '2026-10-29')).toBe('2027-10-27');
+  });
+
   test('the returned date is always today or later', () => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayJst();
     const result = nextRightsDate([1, 4, 7, 10]);
     expect(result).toBeDefined();
     expect(result! >= today).toBe(true);
+  });
+});
+
+describe('todayJst', () => {
+  test('uses the JST date, which is a day ahead of UTC between 00:00 and 09:00 JST', () => {
+    expect(todayJst(Date.parse('2026-10-28T15:00:00Z'))).toBe('2026-10-29'); // JST 10/29 00:00
+    expect(todayJst(Date.parse('2026-10-28T14:59:59Z'))).toBe('2026-10-28'); // JST 10/28 23:59
   });
 });
