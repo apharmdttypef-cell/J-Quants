@@ -5,11 +5,6 @@ export interface CalendarDay {
   holDiv: string;
 }
 
-interface RawCalendarDay {
-  Date: string;
-  HolDiv: string;
-}
-
 export function isTradingDay(day: CalendarDay): boolean {
   return day.holDiv === '1' || day.holDiv === '2';
 }
@@ -132,7 +127,10 @@ export function isJpHoliday(dateStr: string): boolean {
   return allHolidaysForYear(year).has(dateStr);
 }
 
-// 取引カレンダー(J-Quantsを呼ばずローカルで完結)。土日・日本の祝日を
+// 東証の年末年始休業日(12/31・1/2・1/3)。祝日ではないのでisJpHolidayには入れない。
+const isTseYearEndClosure = (dateStr: string): boolean => ['12-31', '01-02', '01-03'].includes(dateStr.slice(5));
+
+// 取引カレンダー(J-Quantsを呼ばずローカルで完結)。土日・日本の祝日・東証の年末年始休業日を
 // 非営業日(holDiv '0')、それ以外を営業日(holDiv '1')として、from〜to(両端含む)を返す。
 export function getLocalTradingCalendar(from: string, to: string): CalendarDay[] {
   const days: CalendarDay[] = [];
@@ -140,7 +138,7 @@ export function getLocalTradingCalendar(from: string, to: string): CalendarDay[]
   while (cursor <= to) {
     const dow = dayOfWeek(cursor);
     const isWeekend = dow === 0 || dow === 6;
-    const holDiv = !isWeekend && !isJpHoliday(cursor) ? '1' : '0';
+    const holDiv = !isWeekend && !isJpHoliday(cursor) && !isTseYearEndClosure(cursor) ? '1' : '0';
     days.push({ date: cursor, holDiv });
     cursor = addDays(cursor, 1);
   }
@@ -160,14 +158,20 @@ export function rightsDateForMonth(calendar: CalendarDay[], year: number, month:
   return idx >= 2 ? tradingDays[idx - 2] : undefined;
 }
 
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+// 日本時間の今日(YYYY-MM-DD)。LambdaはUTCで動くので、toISOStringのままだとJST 0〜9時に前日になる。
+export function todayJst(now: number = Date.now()): string {
+  return new Date(now + JST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 // rightsMonthsの各月について、今年・来年の最終営業日から2営業日前(権利付き最終日T)を
 // 計算し、今日以降で最も近いものを返す(JQuantsYutaiRightsDateテーブル廃止に伴う代替)。
 const yearCalendarCache = new Map<number, CalendarDay[]>();
 
-export function nextRightsDate(rightsMonths: number[]): string | undefined {
+export function nextRightsDate(rightsMonths: number[], today: string = todayJst()): string | undefined {
   if (rightsMonths.length === 0) return undefined;
 
-  const today = new Date().toISOString().slice(0, 10);
   const year = Number(today.slice(0, 4));
   let calendar = yearCalendarCache.get(year);
   if (!calendar) {

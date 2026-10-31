@@ -23,7 +23,7 @@ describe('planFetchDates', () => {
   });
   it('初回で上限が大きければ今日まで', () => {
     const r = planFetchDates({ today: '2026-10-23', lastFetchedDate: null, maxDates: 10000 });
-    expect(r).toHaveLength(738);
+    expect(r).toHaveLength(731); // 年末年始休場(12/31・1/2・1/3)の平日7日を除く
     expect(r[r.length - 1]).toBe('2026-10-23');
   });
   it('カーソル日を取り直す', () => {

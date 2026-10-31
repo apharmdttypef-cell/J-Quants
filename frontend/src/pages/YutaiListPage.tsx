@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { flexRender, getCoreRowModel, getSortedRowModel, useReactTable } from '@tanstack/react-table';
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table';
 import * as HoverCard from '@radix-ui/react-hover-card';
+import { getLocalTradingCalendar, rightsDateForMonth, todayJst } from '../../../lambda/shared/trading-calendar';
 import { fetchYutaiForecastList } from '../api/client';
 import type { RsiLabel, YutaiForecastListItem, YutaiForecastStatus, YutaiTseForecast } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
@@ -39,13 +40,22 @@ function HeaderTooltip({ label, tooltip }: { label: string; tooltip: string }) {
   );
 }
 
-function monthRange(): { from: string; to: string } {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = now.getMonth();
+// 一覧の権利日は「今日以降で最も近い権利付き最終日」なので、当月の権利付き最終日を過ぎると当月の銘柄は
+// 来年の日付になり、当月の範囲から消える。その場合は翌月をデフォルトにする。
+function defaultRightsRange(): { from: string; to: string } {
   const pad = (n: number) => String(n).padStart(2, '0');
-  const lastDay = new Date(y, m + 1, 0).getDate();
-  return { from: `${y}-${pad(m + 1)}-01`, to: `${y}-${pad(m + 1)}-${pad(lastDay)}` };
+  const monthRange = (y: number, m: number) => ({
+    from: `${y}-${pad(m)}-01`,
+    to: `${y}-${pad(m)}-${pad(new Date(Date.UTC(y, m, 0)).getUTCDate())}`,
+  });
+
+  const today = todayJst();
+  const y = Number(today.slice(0, 4));
+  const m = Number(today.slice(5, 7));
+  const thisMonth = monthRange(y, m);
+  const thisMonthRightsDate = rightsDateForMonth(getLocalTradingCalendar(thisMonth.from, thisMonth.to), y, m);
+  if (thisMonthRightsDate === undefined || thisMonthRightsDate >= today) return thisMonth;
+  return m === 12 ? monthRange(y + 1, 1) : monthRange(y, m + 1);
 }
 
 // 判定は危険→注意→安全→制度信用不可→対象外の順に並ぶ方が意味があるため、
@@ -373,7 +383,7 @@ const ALL_STATUSES: readonly YutaiForecastStatus[] = ['danger', 'caution', 'safe
 
 export function YutaiListPage() {
   const navigate = useNavigate();
-  const defaultRange = monthRange();
+  const defaultRange = defaultRightsRange();
   const [rightsDateFrom, setRightsDateFrom] = useState(defaultRange.from);
   const [rightsDateTo, setRightsDateTo] = useState(defaultRange.to);
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
