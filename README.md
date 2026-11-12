@@ -191,12 +191,25 @@ APIは全ルートがGET(書き込み系は無い)。CORSの`allowOrigins`はClo
 | 操作 | コマンド | 効果 |
 |---|---|---|
 | 招待 | `aws cognito-idp admin-create-user --user-pool-id <id> --username <email> --user-attributes Name=email,Value=<email> Name=email_verified,Value=true --desired-delivery-mediums EMAIL` | 仮パスワード付きの招待メールが届く。初回ログイン時にパスワード変更 |
+| メールなしで発行 | `aws cognito-idp admin-create-user --user-pool-id <id> --username <email> --user-attributes Name=email,Value=<email> Name=email_verified,Value=true --message-action SUPPRESS` → `aws cognito-idp admin-set-user-password --user-pool-id <id> --username <email> --password '<password>' --permanent` | 招待メールは送られない。`--permanent`でパスワードが確定し、初回ログイン時の変更は不要。2つ目を省くと仮パスワードが届かずログインできない |
 | 一時停止 | `aws cognito-idp admin-disable-user --user-pool-id <id> --username <email>` → `aws cognito-idp admin-user-global-sign-out --user-pool-id <id> --username <email>` | 新規ログインとトークン更新が止まる。発行済みアクセストークンは最大1時間有効 |
 | 再開 | `aws cognito-idp admin-enable-user --user-pool-id <id> --username <email>` | ログインできる状態に戻る |
 | 削除 | `aws cognito-idp admin-delete-user --user-pool-id <id> --username <email>` | ユーザーを完全に削除 |
 | 一覧 | `aws cognito-idp list-users --user-pool-id <id>` | 招待済みユーザーと状態の確認 |
 
 招待メールはCognito既定の送信元を使う(1日あたりの送信数に上限があるが、数名の招待には十分)。User Poolは削除保護+`RETAIN`なので、スタックを作り直しても招待済みユーザーは残る。
+
+### 優待の廃止予告
+
+TDnetバッチは、優待制度そのものの廃止・終了の開示(タイトルに「株主優待」と「廃止」または「終了」を含み、
+「一部」を含まないもの)を検知すると、kabuyutai.comにまだ載っている銘柄のマスタ行に`abolitionNotice`を記録する。
+一覧に「廃止予告」バッジ、詳細に警告が出る。自動で行ごと消えるのは、廃止予告の開示がTDnetバッチの9日間の遡及期間内にあり、同じ週の実行でkabuyutai.comからも銘柄が消えていた場合だけ。廃止は通常かなり前に告知されるため、多くの場合は下の手順で手動で消すまで残る。
+
+| 操作 | コマンド |
+|---|---|
+| 過去分の反映(確認) | `npx ts-node scripts/backfill-abolition-notice.ts` |
+| 過去分の反映(書き込み) | `npx ts-node scripts/backfill-abolition-notice.ts --execute` |
+| 誤検知を消す | `aws dynamodb update-item --table-name JQuantsYutaiMaster --key '{"ticker":{"S":"<コード>"}}' --update-expression "REMOVE abolitionNotice"` |
 
 ### 既知の残存リスク(許容範囲と判断)
 
