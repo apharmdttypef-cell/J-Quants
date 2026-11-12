@@ -197,10 +197,9 @@ CLI ではなく Node の SDK から直接読み、UTF-8 でファイルに書�
 ## 次に手動実行すべき目安
 
 - `conditionCheckedAt` のクールダウンは **90日**。次の全件取得は **2027-01-01 前後**。
-- ただし detail-sync は EventBridge スケジュールを持たない(手動運用)。TDnet 検知で
-  `conditionCheckedAt` が消された銘柄は、次に手動で回すまで再取得されない。
-  この「誰もキューを消費しない」問題は
-  `2026-10-02-yutai-condition-master-operational-decisions.md` で保留とした。
+- 2026-11-12 から detail-sync は **毎週火曜 JST 21:00 に自動実行** する(`YutaiDetailSyncSchedule`)。
+  TDnet 検知で `conditionCheckedAt` が消された銘柄は翌日に取り直される。手動実行は急ぐときだけでよい。
+  設計: `docs/superpowers/specs/2026-11-12-yutai-change-apply-design.md`
 - `yutai-master-sync-batch` を回したら、**`detailUrl` が無い行を数える**こと。
   サイトから消えた銘柄(優待廃止・上場廃止)の検出手段はこれしかない。今回6件見つかった
   (`2026-10-02-yutai-master-stale-rows.md` 参照)。

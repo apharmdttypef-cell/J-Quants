@@ -398,11 +398,20 @@ export class JQuantsStack extends cdk.Stack {
     });
     detailSyncMap.itemProcessor(detailSyncBucket);
 
-    new stepfunctions.StateMachine(this, 'YutaiDetailSyncStateMachine', {
+    const detailSyncStateMachine = new stepfunctions.StateMachine(this, 'YutaiDetailSyncStateMachine', {
       stateMachineName: 'JQuantsYutaiDetailSync',
       definitionBody: stepfunctions.DefinitionBody.fromChainable(detailSyncSeed.next(detailSyncMap)),
       // 9バケット直列で約33分。リトライ込みでも余裕を持たせる。
       timeout: cdk.Duration.hours(2),
+    });
+
+    // TDnetバッチ(YutaiTdnetWatchBatchSchedule: 月曜 UTC 12:00)がconditionCheckedAtを消した銘柄を、
+    // 翌日に取り直す。JST 火曜21:00 = UTC 火曜12:00で、kabuyutai.comを叩く他の処理と重ならない。
+    // 対象選定(未取得 or 90日超)はハンドラ側なので入力は空でよい。通常週は数十件で1分程度、
+    // 90日のクールダウンが一斉に切れる週は全件(約33分)になるが、ステートマシンのタイムアウト(2時間)に収まる。
+    new events.Rule(this, 'YutaiDetailSyncSchedule', {
+      schedule: events.Schedule.cron({ minute: '0', hour: '12', weekDay: 'TUE' }),
+      targets: [new targets.SfnStateMachine(detailSyncStateMachine)],
     });
 
     const gyakuhibuForecastBatchFn = new nodejs.NodejsFunction(this, 'GyakuhibuForecastBatchFunction', {

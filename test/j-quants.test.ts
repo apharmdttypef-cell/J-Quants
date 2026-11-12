@@ -475,8 +475,8 @@ test('creates the yutai-master-sync-batch Lambda with write access to the yutai 
   );
   // yutai-master-sync-batch自体のスケジュールは存在しない。他バッチの3つのスケジュール
   // (price/margin-balance/gyakuhibu-history)+tdnet-watch+yutai-risk-precompute
-  // +gyakuhibu-forecastの6つのみ。
-  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
+  // +gyakuhibu-forecast+detail-sync(ステートマシン)の7つのみ。
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(7);
 });
 
 test('creates the yutai-tdnet-watch-batch Lambda on a weekly Monday schedule', () => {
@@ -859,6 +859,23 @@ test('the detail sync batch has no EventBridge schedule of its own', () => {
   expect(targetArns).not.toContain('YutaiDetailSyncBatchFunction');
 });
 
+test('runs the detail sync state machine every Tuesday at JST 21:00, the day after the TDnet watch', () => {
+  // TDnetバッチ(月曜 UTC 12:00)がconditionCheckedAtを消した銘柄を翌日に取り直す。
+  // 対象選定(未取得 or 90日超)はハンドラ側なので、入力は空でよい。
+  const template = synth();
+  const machines = template.findResources('AWS::StepFunctions::StateMachine');
+  const machineId = Object.keys(machines)[0];
+
+  const rules = Object.values(template.findResources('AWS::Events::Rule')) as Array<{
+    Properties: { ScheduleExpression?: string; State?: string; Targets?: Array<{ Arn?: unknown }> };
+  }>;
+  const rule = rules.find((r) => r.Properties.ScheduleExpression === 'cron(0 12 ? * TUE *)');
+  expect(rule).toBeDefined();
+  expect(rule!.Properties.State).toBe('ENABLED');
+  expect(rule!.Properties.Targets).toHaveLength(1);
+  expect(rule!.Properties.Targets![0].Arn).toEqual({ Ref: machineId });
+});
+
 test('creates the gyakuhibu validation bucket with Object Lock (Governance, retain until 2026-12-31), versioning, and RETAIN policy', () => {
   const template = synth();
 
@@ -964,13 +981,13 @@ test('creates the ForecastSnapshotFunction wired to master/actual/price tables, 
   ).toBe(true);
 
   // Task 2の時点ではスケジュールを追加しない(EventBridge SchedulerでのTask 3の対象)。
-  // 既存6スケジュール(price/margin-balance/gyakuhibu-history/
-  // tdnet-watch/yutai-risk-precompute/gyakuhibu-forecast)から増えていないことを確認する。
+  // 既存7スケジュール(price/margin-balance/gyakuhibu-history/
+  // tdnet-watch/yutai-risk-precompute/gyakuhibu-forecast/detail-sync)から増えていないことを確認する。
   const rules = template.findResources('AWS::Events::Rule');
   const scheduleExpressions = Object.values(rules).map(
     (r) => (r as { Properties?: { ScheduleExpression?: string } }).Properties?.ScheduleExpression,
   );
-  expect(scheduleExpressions.filter(Boolean)).toHaveLength(6);
+  expect(scheduleExpressions.filter(Boolean)).toHaveLength(7);
 });
 
 test('schedules the two one-time forecast validation snapshots via EventBridge Scheduler at the correct JST wall-clock times', () => {
