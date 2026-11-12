@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "aws-cdk-lib": "^2.260.0",
+    "aws-jwt-verify": "^5.2.1",
     "constructs": "^10.5.0"
   }
 }
