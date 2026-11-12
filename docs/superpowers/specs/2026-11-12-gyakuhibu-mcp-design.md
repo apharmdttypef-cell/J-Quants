@@ -36,7 +36,8 @@ claude.aiが自分の分析のために読むことは私的利用の範囲と�
 
 - **共有モジュール** `lambda/shared/yutai-forecast-detail.ts`:
   `reference-api`の`getYutaiForecast`から、DynamoDBを読んでレスポンスを組み立てる部分を
-  `loadYutaiForecastDetail(ticker): Promise<YutaiForecastDetail | null>`として移す。
+  `loadYutaiForecastDetail(ticker): Promise<{ detail: YutaiForecastDetail; abolitionNotice } | null>`として移す
+  (`abolitionNotice`はAPIのレスポンスに無い項目なので`detail`の外に置く)。
   reference-apiはこれを呼んで`jsonResponse`で包むだけにする。APIとMCPは同じ結果を返す。
   切り出し前後でAPIのレスポンスが変わらないことをテストで確認する。
 - **MCP Lambda** `lambda/mcp-server/index.ts`: Streamable HTTPのステートレス方式(セッションIDを発行しない、
@@ -50,17 +51,24 @@ claude.aiが自分の分析のために読むことは私的利用の範囲と�
   - `GET /.well-known/oauth-protected-resource`(RFC 9728。`resource`=`{apiEndpoint}/mcp`、`authorization_servers`=`[apiEndpoint]`)
   - `GET /.well-known/oauth-authorization-server`(RFC 8414。Cognitoの`authorization_endpoint`/`token_endpoint`/
     `revocation_endpoint`/`jwks_uri`等を案内し、`code_challenge_methods_supported: ['S256']`を含める)
+  - クライアントによって探しに行く場所が違うため、`GET /.well-known/oauth-protected-resource/mcp`(RFC 9728のパス付き形式)と
+    `GET /.well-known/openid-configuration`(中身は認可サーバーのメタデータと同じ)も返す。
+  - `{apiEndpoint}`はリクエストの`requestContext.domainName`から組む(CDKでAPIのURLをLambdaに渡すと依存が増えるため)。
   - API GatewayのJWTオーソライザーは、MCPのOAuth検出に必要な`WWW-Authenticate`ヘッダーを付けられないため使わない。
 - CORSは変更しない(claude.aiはサーバー側から接続するため)。
 
 ## 3. 認証と利用者の制限
 
 - Cognitoにclaude.ai専用のアプリクライアント`JQuantsClaudeMcpClient`を追加する。
-  シークレットあり、認可コードフロー、スコープ`openid email`、コールバック`https://claude.ai/api/mcp/auth_callback`。
+  シークレットあり、認可コードフロー、スコープ`openid email`、コールバック`https://claude.ai/api/mcp/auth_callback`と
+  `https://claude.com/api/mcp/auth_callback`(claude.com側のドメインから戻る場合に備える)。
+  新しいManaged Loginはクライアントごとにブランディングが無いとログイン画面が出ないため、このクライアント用にも作る。
   トークン有効期限は既存Webクライアントと同じ(アクセス1時間、リフレッシュ7日)。
 - Lambda内で`aws-jwt-verify`の`CognitoJwtVerifier`(`tokenUse: 'access'`、`clientId`=MCPクライアント)で、
   署名・有効期限・client_idを検証する。
 - 検証後、`sub`が環境変数`MCP_ALLOWED_SUBS`(カンマ区切り)に無ければ403。空なら全員403(フェイルクローズ)。
+  値は通知先メールと同じく、SSM Parameter Store(`/j-quants/mcp-allowed-subs`、String)から`cdk deploy`時に読む。
+  Stringは空にできないため、誰も通さないときは`none`を置く。
 - トークンが無い/無効なら401と`WWW-Authenticate: Bearer resource_metadata="{apiEndpoint}/.well-known/oauth-protected-resource"`。
 - 呼び出しは既存APIと同じく`sub`とメソッド名・ツール名をCloudWatch Logsに出す(メールアドレスは出さない)。
 - claude.ai側はコネクタの詳細設定にクライアントIDとシークレットを入力する(CognitoはDynamic Client Registration非対応)。
@@ -68,12 +76,15 @@ claude.aiが自分の分析のために読むことは私的利用の範囲と�
 
 ## 4. 進め方
 
-1. **接続の検証(最初に行う)**: 認証まわり+ダミーツール(固定文字列を返す)だけをデプロイし、claude.aiから
-   コネクタ追加 → Cognitoのログイン画面 → トークン取得 → ツール呼び出しまで通るかを確かめる。
-   通らなければ、原因(メタデータの検出・issuerの不一致・トークン交換の認証方式など)を調べ、
-   必要ならOAuthの仲介エンドポイントを自前で足す方針に切り替えて設計書を更新する。
-2. 共有モジュールへの切り出し(API側の回帰テスト込み)。
-3. 本物のツールに差し替え、claude.aiから実際の銘柄で確認する。
+当初はダミーツールで接続だけを先に確かめる予定だったが、ツールと共有モジュールはOAuthの方式が変わっても
+そのまま使えるため、実装をすべて終えてから1回だけデプロイして確かめる(デプロイの承認を1回で済ませるため)。
+
+1. 共有モジュールへの切り出し(API側の回帰テスト込み)。
+2. 認証・メタデータ・ツール・CDKの実装。
+3. **接続の検証**: デプロイし、claude.aiからコネクタ追加 → Cognitoのログイン画面 → トークン取得 →
+   実際の銘柄でのツール呼び出しまで通るかを確かめる。
+   通らなければ、原因(メタデータの検出・`resource`パラメータをCognitoが受け付けない・issuerの不一致・
+   トークン交換の認証方式など)を調べ、必要ならOAuthの仲介エンドポイントを自前で足す方針に切り替えて設計書を更新する。
 
 ## テスト
 
