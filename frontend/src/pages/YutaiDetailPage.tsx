@@ -131,6 +131,13 @@ export function YutaiDetailPage() {
         </Link>
       </div>
 
+      {data.abolitionNotice && (
+        <p className="abolition-notice" role="alert">
+          {data.abolitionNotice.disclosedAt}に優待制度の廃止が開示されています(「{data.abolitionNotice.title}」)。
+          最後の権利日を開示で確認してください。
+        </p>
+      )}
+
       <div className="section-heading">逆日歩の判定</div>
       {forecastState.loading && <StatusNote kind="loading" message="予測を読み込み中…" />}
       {forecastState.error && (

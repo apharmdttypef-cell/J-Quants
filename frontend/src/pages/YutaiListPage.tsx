@@ -5,7 +5,7 @@ import type { ColumnDef, VisibilityState } from '@tanstack/react-table';
 import * as HoverCard from '@radix-ui/react-hover-card';
 import { getLocalTradingCalendar, rightsDateForMonth, todayJst } from '../../../lambda/shared/trading-calendar';
 import { fetchYutaiForecastList } from '../api/client';
-import type { RsiLabel, YutaiForecastListItem, YutaiForecastStatus, YutaiTseForecast } from '../api/types';
+import type { AbolitionNotice, RsiLabel, YutaiForecastListItem, YutaiForecastStatus, YutaiTseForecast } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { formatFinancialYen } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
@@ -85,6 +85,15 @@ function RsiBadge({ label }: { label: RsiLabel }) {
   return (
     <span className={`rsi-badge rsi-badge--${label}`} title="RSI(14)。70以上で高め、30以下で低め。テクニカル指標は参考値です。">
       {label === 'high' ? 'RSI高め' : 'RSI低め'}
+    </span>
+  );
+}
+
+function AbolitionBadge({ notice }: { notice: AbolitionNotice | null }) {
+  if (!notice) return null;
+  return (
+    <span className="abolition-badge" title={`${notice.disclosedAt} ${notice.title}`}>
+      廃止予告
     </span>
   );
 }
@@ -240,6 +249,7 @@ function buildColumns(): ColumnDef<YutaiForecastListItem>[] {
             {RISK_STATUS_LABEL[row.original.forecast.forecastStatus]}
           </span>
           <RsiBadge label={row.original.rsiLabel} />
+          <AbolitionBadge notice={row.original.abolitionNotice} />
         </>
       ),
     },

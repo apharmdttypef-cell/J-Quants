@@ -100,6 +100,7 @@ export interface YutaiDetail extends YutaiBenefitFields {
   rsi14: number | null;
   rsiLabel: RsiLabel;
   rsiAsOf: string | null;
+  abolitionNotice: AbolitionNotice | null;
 }
 
 export interface MarginTrendPoint {
@@ -149,8 +150,15 @@ export interface YutaiTseForecast extends YutaiForecast {
   lendingGrowth4w: number | null;
 }
 
+// 優待制度そのものの廃止予告(TDnetの開示)。最後の権利日までは優待が出ることもあるので、一覧からは外さない。
+export interface AbolitionNotice {
+  disclosedAt: string;
+  title: string;
+}
+
 export interface YutaiForecastListItem extends YutaiCrossFields {
   rsiLabel: RsiLabel;
+  abolitionNotice: AbolitionNotice | null;
   ticker: string;
   companyName?: string;
   content: string;
@@ -224,7 +232,7 @@ export interface YutaiForecastDetail {
   marginTrend: { latest: YutaiForecastMarginLatest | null };
 }
 
-export type YutaiTdnetEventType = 'start' | 'update' | 'abolition';
+export type YutaiTdnetEventType = 'start' | 'update' | 'abolition' | 'abolition-notice';
 
 export interface YutaiTdnetEvent {
   ticker: string;

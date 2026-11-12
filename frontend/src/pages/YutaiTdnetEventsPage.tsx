@@ -4,11 +4,17 @@ import type { YutaiTdnetEventType } from '../api/types';
 import { StatusNote } from '../components/StatusNote';
 import { useAsync } from '../lib/useAsync';
 
-const EVENT_TYPE_LABEL: Record<YutaiTdnetEventType, string> = { start: '開始', update: '変更', abolition: '廃止' };
+const EVENT_TYPE_LABEL: Record<YutaiTdnetEventType, string> = {
+  start: '開始',
+  update: '変更',
+  abolition: '廃止',
+  'abolition-notice': '廃止予告',
+};
 const EVENT_TYPE_CLASS: Record<YutaiTdnetEventType, string> = {
   start: 'event-badge--start',
   update: 'event-badge--update',
   abolition: 'event-badge--abolition',
+  'abolition-notice': 'event-badge--abolition-notice',
 };
 
 export function YutaiTdnetEventsPage() {

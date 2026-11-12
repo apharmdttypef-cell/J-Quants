@@ -408,6 +408,27 @@ a {
   color: var(--down);
 }
 
+/* 廃止予告。次の権利日に優待が出ないかもしれないので、判定バッジと並べて目立たせる */
+.abolition-badge {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  margin-left: 0.35rem;
+  display: inline-block;
+  color: var(--caution);
+  border: 1px solid currentColor;
+  font-weight: 600;
+}
+
+.abolition-notice {
+  margin: 0.5rem 0 1rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  color: var(--caution);
+  background: color-mix(in srgb, var(--caution) 12%, transparent);
+  font-size: 0.9rem;
+}
+
 .summary-item__note {
   font-size: 0.72rem;
   color: var(--text-muted);
@@ -460,6 +481,11 @@ a {
 .event-badge--abolition {
   color: var(--up);
   background: color-mix(in srgb, var(--up) 14%, transparent);
+}
+
+.event-badge--abolition-notice {
+  color: var(--caution);
+  background: color-mix(in srgb, var(--caution) 14%, transparent);
 }
 
 .cutoff-banner {
