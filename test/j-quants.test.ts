@@ -846,9 +846,10 @@ test('the detail sync state machine fans out to nine code-prefix buckets one at 
   );
 });
 
-test('the detail sync batch has no EventBridge schedule of its own', () => {
-  // 優待条件は年1回も変わらないため手動運用。スケジュールを足すと
-  // kabuyutai.comへ無意味な定期アクセスを続けることになる。
+test('the detail sync Lambda is not scheduled directly (the weekly rule targets the state machine)', () => {
+  // Lambda関数そのものにはEventBridgeのルールを直接付けない。週次のルール
+  // (YutaiDetailSyncSchedule、火曜 JST 21:00)はステートマシンを起動し、ステートマシンが
+  // 9バケットを直列に処理するため、kabuyutai.comへの1秒1リクエストの上限が守られる。
   const template = synth();
   // 関数が存在しないと「含まない」が自明に成り立つため、先に存在を確認する。
   const functionIds = Object.keys(template.findResources('AWS::Lambda::Function'));

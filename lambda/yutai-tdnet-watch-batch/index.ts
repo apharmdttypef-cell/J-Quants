@@ -235,6 +235,8 @@ async function recordEvents(
       // 再判定されてしまう。既に'start'として記録済みの行をこれで上書きしないよう
       // ガードする(ただし'update'→'abolition'への自己修正は許可: kabuyutai.com側の
       // 反映が遅れて先週'update'扱いになった廃止開示が、翌週追いつくケースがあるため)。
+      // なお、eventTypeは開示タイトルごとに決まるため、'abolition-notice'の行も再走査で
+      // 同じ方法で再判定され、'start'として記録された行だけが上書きから守られる。
       await ddbDocClient.send(
         new PutCommand({
           TableName: YUTAI_TDNET_EVENT_TABLE_NAME,

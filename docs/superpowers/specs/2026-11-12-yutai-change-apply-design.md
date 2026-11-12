@@ -67,7 +67,7 @@ tickerごとの分岐を次のようにする(`sawAbolitionKeyword`は上の判�
 - 既存の上書き用`UpdateCommand`の`SET`に足す(別コマンドにしない)。廃止予告でない更新では
   `abolitionNotice`に触れない(過去に付いたフラグを消さない)。
 - 他のバッチ(master-sync / detail-sync / risk-precompute)はいずれも`UpdateCommand`で特定の項目だけを
-  SETしているため、`abolitionNotice`は消えない。消えるのは、kabuyutai.comからも消えて行ごと削除されたとき。
+  SETしているため、`abolitionNotice`は消えない。行ごと削除されるのは、廃止予告の開示がTDnetバッチの9日間の遡及期間内にあり、かつ同じ週の実行でkabuyutai.comからも銘柄が消えているときだけ。廃止は通常かなり前に告知されるため、実際には`abolitionNotice`は手動で消すまで残る。kabuyutai.comから消えた廃止予告行を自動で削除する掃除処理(`abolitionNotice`があり、kabuyutai.comに無い行を削除)は今後の追加候補。
 - 誤検知だった場合に手で消すCLI手順(`aws dynamodb update-item ... REMOVE abolitionNotice`)をREADMEに書く。
 - `eventType`の型に`'abolition-notice'`を追加する。
 
