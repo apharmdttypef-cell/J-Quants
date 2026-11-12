@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { fetchAllListings, KabuyutaiEntry } from '../shared/kabuyutai-client';
+import { isAbolitionNotice, latestAbolitionNotice, type YutaiTdnetEventType } from '../shared/yutai-abolition';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const YUTAI_TDNET_EVENT_TABLE_NAME = process.env.YUTAI_TDNET_EVENT_TABLE_NAME!;
@@ -15,10 +16,6 @@ const REQUEST_INTERVAL_MS = Number(process.env.TDNET_REQUEST_INTERVAL_MS ?? '100
 const LOOKBACK_DAYS = Number(process.env.TDNET_LOOKBACK_DAYS ?? '9');
 // 実際の表記ゆれ(新設/一部変更/廃止 等)は実機で確認しながら調整する。
 const YUTAI_KEYWORDS = ['株主優待'];
-// 上記に加えてこのキーワードも含む場合、優待「廃止」の開示とみなす。kabuyutai.comの
-// 最新一覧に見当たらない、という状態と組み合わさった時だけ本当の廃止として削除する
-// (トランジェントなスクレイピング失敗だけでは削除しない、というゲート)。
-const ABOLITION_KEYWORDS = ['廃止'];
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -65,10 +62,6 @@ function parseDayPage(html: string, disclosedAt: string): Disclosure[] {
 
 function isYutaiRelated(title: string): boolean {
   return YUTAI_KEYWORDS.some((keyword) => title.includes(keyword));
-}
-
-function isAbolitionRelated(title: string): boolean {
-  return ABOLITION_KEYWORDS.some((keyword) => title.includes(keyword));
 }
 
 function totalPagesFor(html: string): number {
@@ -152,14 +145,17 @@ export const handler = async (): Promise<void> => {
   const listingsByTicker = new Map<string, KabuyutaiEntry>(listings.map((entry) => [entry.ticker, entry]));
 
   for (const [ticker, disclosures] of matchedTickers) {
-    const sawAbolitionKeyword = disclosures.some((d) => isAbolitionRelated(d.title));
+    // 優待制度そのものの廃止予告(lambda/shared/yutai-abolition.ts)。kabuyutai.comの最新一覧に
+    // 見当たらない、という状態と組み合わさった時だけ本当の廃止として削除する
+    // (トランジェントなスクレイピング失敗だけでは削除しない、というゲート)。
+    const abolitionNotice = latestAbolitionNotice(disclosures);
     try {
       const entry = listingsByTicker.get(ticker);
       // 廃止を示す開示があり、かつ最新のkabuyutai.com一覧にも見当たらない
       // (両方のシグナルが揃って初めて削除する。片方だけでは一時的な取得失敗の
       //  可能性があるため警告に留める)。
       if (!entry) {
-        if (sawAbolitionKeyword) {
+        if (abolitionNotice) {
           await ddbDocClient.send(new DeleteCommand({ TableName: YUTAI_MASTER_TABLE_NAME, Key: { ticker } }));
           console.log(`${ticker}: yutai program appears discontinued (abolition disclosure + not found on kabuyutai.com); deleted from master`);
           await recordEvents(ticker, disclosures, 'abolition');
@@ -176,8 +172,11 @@ export const handler = async (): Promise<void> => {
       // 新規登録(start)か既存更新(update)かはJQuantsYutaiMaster(自テーブル)側の既存有無で
       // 判定する(kabuyutai.com側の存在有無=entryとは別物)。
       const existing = await ddbDocClient.send(new GetCommand({ TableName: YUTAI_MASTER_TABLE_NAME, Key: { ticker } }));
-      const eventType: 'start' | 'update' = existing.Item ? 'update' : 'start';
+      const eventType: YutaiTdnetEventType = existing.Item ? 'update' : 'start';
 
+      // 廃止予告があれば記録する。予告でない更新ではabolitionNoticeに触れない
+      // (過去に付いた予告を、後続の発送日決定などの開示で消さないため)。
+      const setAbolitionNotice = abolitionNotice ? ', abolitionNotice = :abolitionNotice' : '';
       await ddbDocClient.send(
         new UpdateCommand({
           TableName: YUTAI_MASTER_TABLE_NAME,
@@ -186,7 +185,9 @@ export const handler = async (): Promise<void> => {
           // 「未取得」として拾い直す。ここで個別ページを同期取得しないのは、優待関連の
           // 開示が多い週に該当銘柄が増えると14分のタイムアウトに近づくため。
           UpdateExpression:
-            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths, detailUrl = :detailUrl, listBadge = :listBadge REMOVE conditionCheckedAt',
+            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths, detailUrl = :detailUrl, listBadge = :listBadge' +
+            setAbolitionNotice +
+            ' REMOVE conditionCheckedAt',
           ExpressionAttributeNames: { '#content': 'content', '#value': 'value' },
           ExpressionAttributeValues: {
             ':companyName': entry.companyName,
@@ -197,11 +198,18 @@ export const handler = async (): Promise<void> => {
             ':rightsMonths': entry.rightsMonths,
             ':detailUrl': entry.detailUrl ?? null,
             ':listBadge': entry.listBadge ?? null,
+            ...(abolitionNotice ? { ':abolitionNotice': abolitionNotice } : {}),
           },
         }),
       );
-      console.log(`${ticker}: upserted yutai master from TDnet-triggered re-sync`);
-      await recordEvents(ticker, disclosures, eventType);
+      console.log(
+        `${ticker}: upserted yutai master from TDnet-triggered re-sync${abolitionNotice ? ` (abolition notice: ${abolitionNotice.disclosedAt})` : ''}`,
+      );
+      // 同じ週に廃止予告と発送日決定などが並ぶことがあるため、種別は開示ごとに決める。
+      const noticeDisclosures = disclosures.filter((d) => isAbolitionNotice(d.title));
+      const otherDisclosures = disclosures.filter((d) => !isAbolitionNotice(d.title));
+      await recordEvents(ticker, noticeDisclosures, 'abolition-notice');
+      await recordEvents(ticker, otherDisclosures, eventType);
     } catch (error) {
       console.error(`${ticker}: failed to re-sync from TDnet match`, error);
     }
@@ -215,7 +223,7 @@ export const handler = async (): Promise<void> => {
 async function recordEvents(
   ticker: string,
   disclosures: Disclosure[],
-  eventType: 'start' | 'update' | 'abolition',
+  eventType: YutaiTdnetEventType,
 ): Promise<void> {
   const recordedAt = new Date().toISOString();
   for (const disclosure of disclosures) {

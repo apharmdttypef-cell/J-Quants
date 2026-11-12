@@ -406,3 +406,114 @@ test('removes conditionCheckedAt so the detail page is re-read after a TDnet cha
   expect(update!.ExpressionAttributeValues![':detailUrl']).toBe('https://www.kabuyutai.com/kobetu/toba.html');
   expect(update!.ExpressionAttributeValues![':listBadge']).toBe('chouki');
 });
+
+describe('abolition notices (abolition announced while kabuyutai.com still lists the program)', () => {
+  const listing = {
+    ticker: '3297',
+    companyName: '東武住販',
+    content: '下関市ゆかりの食品（1,000円相当～）',
+    rightsMonths: [5],
+    value: 1000,
+    minInvestment: 100000,
+  };
+
+  test('upserts the master with abolitionNotice and records an abolition-notice event', async () => {
+    const title = '2027年５月期配当予想の修正（無配）及び株主優待制度の廃止に関するお知らせ';
+    mockFetch.mockResolvedValueOnce({ ok: true, text: async () => dayListHtml([{ code: '32970', name: '東武住販', title }]) });
+    mockFetchAllListings.mockResolvedValueOnce([listing]);
+    mockSend.mockResolvedValueOnce({ Item: { ticker: '3297' } }); // Get: already in master
+    mockSend.mockResolvedValue({});
+
+    await handler();
+
+    const update = mockSend.mock.calls[1][0] as { UpdateExpression: string; ExpressionAttributeValues: Record<string, unknown> };
+    expect(update.UpdateExpression).toContain('abolitionNotice = :abolitionNotice');
+    expect(update.ExpressionAttributeValues[':abolitionNotice']).toEqual({
+      disclosedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+      title,
+    });
+    expect(mockSend.mock.calls[2][0]).toMatchObject({
+      TableName: 'JQuantsYutaiTdnetEvent',
+      Item: expect.objectContaining({ ticker: '3297', eventType: 'abolition-notice', disclosureTitle: title }),
+    });
+  });
+
+  test('an ordinary update leaves an existing abolitionNotice alone', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: async () => dayListHtml([{ code: '32970', name: '東武住販', title: '株主優待制度の変更に関するお知らせ' }]),
+    });
+    mockFetchAllListings.mockResolvedValueOnce([listing]);
+    mockSend.mockResolvedValueOnce({ Item: { ticker: '3297' } });
+    mockSend.mockResolvedValue({});
+
+    await handler();
+
+    const update = mockSend.mock.calls[1][0] as { UpdateExpression: string; ExpressionAttributeValues: Record<string, unknown> };
+    expect(update.UpdateExpression).not.toContain('abolitionNotice');
+    expect(update.ExpressionAttributeValues).not.toHaveProperty(':abolitionNotice');
+    expect(mockSend.mock.calls[2][0]).toMatchObject({ Item: expect.objectContaining({ eventType: 'update' }) });
+  });
+
+  test('a partial change mentioning 廃止 is an ordinary update', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: async () =>
+        dayListHtml([{ code: '32970', name: '東武住販', title: '株主優待制度の一部変更（デジタルギフトの廃止）のお知らせ' }]),
+    });
+    mockFetchAllListings.mockResolvedValueOnce([listing]);
+    mockSend.mockResolvedValueOnce({ Item: { ticker: '3297' } });
+    mockSend.mockResolvedValue({});
+
+    await handler();
+
+    const update = mockSend.mock.calls[1][0] as { UpdateExpression: string };
+    expect(update.UpdateExpression).not.toContain('abolitionNotice');
+    expect(mockSend.mock.calls[2][0]).toMatchObject({ Item: expect.objectContaining({ eventType: 'update' }) });
+  });
+
+  test('labels each disclosure separately when an abolition notice and an ordinary change arrive together', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: async () =>
+        dayListHtml([
+          { code: '32970', name: '東武住販', title: '株主優待制度の廃止に関するお知らせ' },
+          { code: '32970', name: '東武住販', title: '株主優待発送日の決定に関するお知らせ' },
+        ]),
+    });
+    mockFetchAllListings.mockResolvedValueOnce([listing]);
+    mockSend.mockResolvedValueOnce({ Item: { ticker: '3297' } });
+    mockSend.mockResolvedValue({});
+
+    await handler();
+
+    const puts = mockSend.mock.calls
+      .map((call) => call[0] as { TableName: string; Item?: { eventType: string; disclosureTitle: string } })
+      .filter((input) => input.TableName === 'JQuantsYutaiTdnetEvent');
+    expect(puts.map((p) => [p.Item!.disclosureTitle, p.Item!.eventType])).toEqual(
+      expect.arrayContaining([
+        ['株主優待制度の廃止に関するお知らせ', 'abolition-notice'],
+        ['株主優待発送日の決定に関するお知らせ', 'update'],
+      ]),
+    );
+  });
+
+  test('a termination disclosure for a program no longer on kabuyutai.com deletes the row', async () => {
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: async () => dayListHtml([{ code: '92230', name: '終了企業', title: '現行株主優待制度の終了に関するお知らせ' }]),
+      });
+      mockFetchAllListings.mockResolvedValueOnce([]);
+      mockSend.mockResolvedValue({});
+
+      await handler();
+
+      expect(mockSend.mock.calls[0][0]).toMatchObject({ TableName: 'JQuantsYutaiMaster', Key: { ticker: '9223' } });
+      expect(mockSend.mock.calls[1][0]).toMatchObject({ Item: expect.objectContaining({ eventType: 'abolition' }) });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
