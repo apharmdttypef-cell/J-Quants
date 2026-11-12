@@ -77,7 +77,7 @@ tickerごとの分岐を次のようにする(`sawAbolitionKeyword`は上の判�
 tickerが`JQuantsYutaiMaster`に残っているものについて`abolitionNotice`をSETし、
 該当イベント行の`eventType`を`abolition-notice`に書き換える。
 
-- 既定はdry-run(対象の銘柄・開示日・タイトルを表示するだけ)。`--apply`で書き込む。
+- 既定はdry-run(対象の銘柄・開示日・タイトルを表示するだけ)。`--execute`で書き込む。
 - 既存の`scripts/`のスクリプトと同じく、Node SDKから直接読む(AWS CLIはcp932で日本語を出力できないため)。
 
 ## 3. API・画面
@@ -94,7 +94,7 @@ tickerが`JQuantsYutaiMaster`に残っているものについて`abolitionNotic
 
 - TDnetバッチ: 廃止予告(kabuyutai.comにある)/「一部」を含む誤検知/「終了」/削除(kabuyutai.comに無い)/
   廃止予告でない更新で既存の`abolitionNotice`を消さないこと。
-- バックフィル: dry-runで書き込まないこと、`--apply`で対象行だけ更新すること。
+- バックフィル: dry-runで書き込まないこと、`--execute`で対象行だけ更新すること。
 - API: 一覧・詳細で`abolitionNotice`が返ること(無い行は`null`)。
 - フロント: バッジ・警告・ラベルの表示。
 - CDK: detail-syncのスケジュールがステートマシンを対象にし、`cron(0 12 ? * TUE *)`であること。
@@ -102,5 +102,5 @@ tickerが`JQuantsYutaiMaster`に残っているものについて`abolitionNotic
 ## リリース手順
 
 1. デプロイ(スケジュール・TDnetバッチ・API・フロント)
-2. バックフィルをdry-run → 対象を確認 → `--apply`
+2. バックフィルをdry-run → 対象を確認 → `--execute`
 3. 取り直し待ちの48件は、最初の火曜の自動実行で処理される(待たずに手動実行してもよい)
