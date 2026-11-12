@@ -202,6 +202,7 @@ test('the yutai list scan projects only the attributes the list returns', async 
     'lastGyakuhibu',
     'sameMonthLastYearGyakuhibu',
     'rsiLabel',
+    'abolitionNotice',
   ]);
   // content / value はDynamoDBの予約語なので素のままでは射影に書けない
   expect(scanInput.ExpressionAttributeNames).toEqual({ '#content': 'content', '#value': 'value' });
@@ -247,6 +248,43 @@ test('GET /yutai/{ticker} returns na and nulls for a row without RSI attributes'
   const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '1234' } }));
 
   expect(body(result)).toMatchObject({ rsi14: null, rsiLabel: 'na', rsiAsOf: null });
+});
+
+test('GET /yutai/forecast returns the abolition notice, and null for rows without one', async () => {
+  const notice = { disclosedAt: '2026-10-13', title: '株主優待制度の廃止に関するお知らせ' };
+  mockSend
+    .mockResolvedValueOnce({
+      Items: [
+        { ticker: '3297', content: '食品', value: 1000, unitShares: 100, rightsMonths: [5], abolitionNotice: notice },
+        { ticker: '5678', content: '自社製品', value: 3000, unitShares: 100, rightsMonths: [8] },
+      ],
+    }) // yutai master scan
+    .mockResolvedValueOnce({ Items: [] }); // forecast scan
+
+  const result = await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: {} }));
+
+  const parsed = body(result) as { tickers: Array<Record<string, unknown>> };
+  expect(parsed.tickers.find((t) => t.ticker === '3297')).toHaveProperty('abolitionNotice', notice);
+  expect(parsed.tickers.find((t) => t.ticker === '5678')).toHaveProperty('abolitionNotice', null);
+});
+
+test('GET /yutai/{ticker} returns the abolition notice, and null when there is none', async () => {
+  const notice = { disclosedAt: '2026-10-13', title: '株主優待制度の廃止に関するお知らせ' };
+  mockSend
+    .mockResolvedValueOnce({ Item: { ticker: '3297', content: '食品', value: 1000, unitShares: 100, rightsMonths: [5], abolitionNotice: notice } })
+    .mockResolvedValueOnce({ Items: [] }) // latest price
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actual history
+  expect(body(await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '3297' } })))).toMatchObject({
+    abolitionNotice: notice,
+  });
+
+  mockSend
+    .mockResolvedValueOnce({ Item: { ticker: '1234', content: 'QUOカード', value: 1000, unitShares: 100, rightsMonths: [8] } })
+    .mockResolvedValueOnce({ Items: [] })
+    .mockResolvedValueOnce({ Items: [] });
+  expect(body(await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '1234' } })))).toMatchObject({
+    abolitionNotice: null,
+  });
 });
 
 test('GET /yutai/forecast filters by keyword against company name and content', async () => {

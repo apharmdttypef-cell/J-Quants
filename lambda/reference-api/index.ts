@@ -5,6 +5,7 @@ import { getLocalTradingCalendar, isTradingDay, nextRightsDate, todayJst } from 
 import { excessRatio, fillRatio, shiftIsoDate } from '../shared/gyakuhibu-forecast';
 import type { GyakuhibuActualRef } from '../shared/gyakuhibu-actual-summary';
 import type { RsiLabel } from '../shared/rsi-calc';
+import type { AbolitionNotice } from '../shared/yutai-abolition';
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
@@ -97,6 +98,8 @@ interface YutaiMasterRow {
   rsi14: number | null;
   rsiLabel: RsiLabel;
   rsiAsOf: string | null;
+  // yutai-tdnet-watch-batchが書く、優待制度そのものの廃止予告。無ければnull。
+  abolitionNotice: AbolitionNotice | null;
   benefitGroups: BenefitGroup[];
 }
 
@@ -127,6 +130,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
     rsi14: item.rsi14 ?? null,
     rsiLabel: item.rsiLabel ?? 'na',
     rsiAsOf: item.rsiAsOf ?? null,
+    abolitionNotice: item.abolitionNotice ?? null,
     benefitGroups: item.benefitGroups ?? [],
   };
 }
@@ -145,7 +149,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
 const YUTAI_LIST_PROJECTION =
   'ticker, companyName, #content, #value, unitShares, rightsMonths, maxGyakuhibu, closePrice, ' +
   'requiredShares, crossEligible, holdingKind, holdingMinMonths, minTierValueYen, benefitParseWarning, ' +
-  'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu, rsiLabel';
+  'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu, rsiLabel, abolitionNotice';
 
 async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
   const rows: YutaiMasterRow[] = [];
@@ -410,6 +414,7 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
       rightsDate: rightsDate ?? null,
       maxGyakuhibu: row.maxGyakuhibu,
       rsiLabel: row.rsiLabel,
+      abolitionNotice: row.abolitionNotice,
       forecast,
       tseForecast: buildTseForecast(forecastByTicker.get(row.ticker)),
       ...buildCrossFields(row),
@@ -490,6 +495,7 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
     rsi14: master.rsi14,
     rsiLabel: master.rsiLabel,
     rsiAsOf: master.rsiAsOf,
+    abolitionNotice: master.abolitionNotice,
     basicInfo: {
       closePrice: price?.close ?? null,
       volume: price?.volume ?? null,
