@@ -192,7 +192,7 @@ claude.aiのカスタムコネクタから、銘柄の逆日歩予測(`get_gyaku
 
 初回の準備:
 
-1. 自分のsubを調べる: `aws cognito-idp list-users --user-pool-id <UserPoolId> --filter 'email = "<自分のメール>"' --query 'Users[].Attributes[?Name==\`sub\`].Value' --output text`
+1. 自分のsubを調べる: `aws cognito-idp list-users --user-pool-id <UserPoolId> --filter 'email = "<自分のメール>"' --query "Users[].Attributes[?Name=='sub'].Value" --output text`
 2. 許可リストを置く(デプロイ前に必須。無いとデプロイが失敗する): `aws ssm put-parameter --name /j-quants/mcp-allowed-subs --type String --value <sub> --overwrite`。止めたいときは`--value none`にして`npx cdk deploy`。
 3. `npx cdk deploy`
 4. シークレットを取り出す: `aws cognito-idp describe-user-pool-client --user-pool-id <UserPoolId> --client-id <McpClientId> --query UserPoolClient.ClientSecret --output text`
