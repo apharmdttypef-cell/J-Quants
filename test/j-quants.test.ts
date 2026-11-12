@@ -70,15 +70,53 @@ describe('Cognito user authentication', () => {
     template.hasResourceProperties('AWS::Cognito::ManagedLoginBranding', { UseCognitoProvidedValues: true });
   });
 
-  test('every API route is protected by the Cognito JWT authorizer', () => {
+  const MCP_ROUTE_KEYS = [
+    'POST /mcp', 'GET /mcp',
+    'GET /.well-known/oauth-protected-resource', 'GET /.well-known/oauth-protected-resource/mcp',
+    'GET /.well-known/oauth-authorization-server', 'GET /.well-known/openid-configuration',
+  ];
+  test('only the MCP and OAuth metadata routes skip the JWT authorizer', () => {
     template.hasResourceProperties('AWS::ApiGatewayV2::Authorizer', { AuthorizerType: 'JWT' });
-    const routes = template.findResources('AWS::ApiGatewayV2::Route');
-    expect(Object.keys(routes).length).toBeGreaterThan(0);
-    for (const route of Object.values(routes)) {
-      const props = (route as { Properties: { AuthorizationType?: string; AuthorizerId?: unknown } }).Properties;
-      expect(props.AuthorizationType).toBe('JWT');
-      expect(props.AuthorizerId).toBeDefined();
+    const routes = Object.values(template.findResources('AWS::ApiGatewayV2::Route')).map(
+      (r) => (r as { Properties: { RouteKey: string; AuthorizationType?: string; AuthorizerId?: unknown } }).Properties);
+    const open = routes.filter((p) => p.AuthorizationType !== 'JWT').map((p) => p.RouteKey).sort();
+    expect(open).toEqual([...MCP_ROUTE_KEYS].sort());
+    for (const p of routes.filter((r) => !MCP_ROUTE_KEYS.includes(r.RouteKey))) {
+      expect(p.AuthorizationType).toBe('JWT');
+      expect(p.AuthorizerId).toBeDefined();
     }
+  });
+
+  test('the Claude MCP client has a secret, the code flow, and the claude.ai callbacks', () => {
+    template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+      ClientName: 'JQuantsClaudeMcpClient',
+      GenerateSecret: true,
+      AllowedOAuthFlows: ['code'],
+      AllowedOAuthFlowsUserPoolClient: true,
+      AllowedOAuthScopes: Match.arrayWith(['openid', 'email']),
+      CallbackURLs: ['https://claude.ai/api/mcp/auth_callback', 'https://claude.com/api/mcp/auth_callback'],
+      EnableTokenRevocation: true,
+      PreventUserExistenceErrors: 'ENABLED',
+    });
+    // ブランディングはクライアントごとに要る(無いとログイン画面が出ない)
+    template.resourceCountIs('AWS::Cognito::ManagedLoginBranding', 2);
+  });
+
+  test('the MCP Lambda gets the Cognito settings and the allowed subs from SSM', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({
+        USER_POOL_ID: Match.anyValue(), MCP_CLIENT_ID: Match.anyValue(), COGNITO_DOMAIN_URL: Match.anyValue(),
+        MCP_ALLOWED_SUBS: Match.anyValue(), YUTAI_MASTER_TABLE_NAME: Match.anyValue(),
+        GYAKUHIBU_FORECAST_TABLE_NAME: Match.anyValue(), GYAKUHIBU_ACTUAL_TABLE_NAME: Match.anyValue(),
+        MARGIN_BALANCE_TABLE_NAME: Match.anyValue(),
+      }) },
+    });
+    const params = template.findParameters('*');
+    expect(JSON.stringify(params)).toContain('/j-quants/mcp-allowed-subs');
+  });
+
+  test('outputs the MCP endpoint and client id', () => {
+    expect(Object.keys(template.findOutputs('*'))).toEqual(expect.arrayContaining(['McpEndpoint', 'McpClientId']));
   });
 
   test('CORS accepts the Authorization header and no longer the shared-password header', () => {

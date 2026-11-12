@@ -30,6 +30,9 @@ const COGNITO_DOMAIN_PREFIX = 'jquants-beta-vqvfk';
 // バッチ失敗の通知先メールアドレスを置くSSM Parameter Store(String)のパラメータ名。
 export const ALERT_EMAIL_PARAMETER_NAME = '/j-quants/alert-email';
 
+// 逆日歩予測MCPに入れてよいCognito subの許可リスト(カンマ区切り。'none'なら誰も通さない)を置くSSMパラメータ名。
+export const MCP_ALLOWED_SUBS_PARAMETER_NAME = '/j-quants/mcp-allowed-subs';
+
 export class JQuantsStack extends cdk.Stack {
   public readonly stockPricesTable: dynamodb.Table;
   public readonly financialSummaryTable: dynamodb.Table;
@@ -678,6 +681,56 @@ export class JQuantsStack extends cdk.Stack {
       useCognitoProvidedValues: true,
     });
 
+    // claude.aiのカスタムコネクタ(逆日歩予測MCP)用。claude.aiはサーバー側でトークン交換するので
+    // シークレットありのconfidentialクライアントにする。CognitoはDynamic Client Registration非対応のため、
+    // クライアントIDとシークレットはコネクタの詳細設定に手で入れる。
+    const mcpClient = this.userPool.addClient('JQuantsClaudeMcpClient', {
+      userPoolClientName: 'JQuantsClaudeMcpClient',
+      generateSecret: true,
+      oAuth: {
+        flows: { authorizationCodeGrant: true },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
+        callbackUrls: ['https://claude.ai/api/mcp/auth_callback', 'https://claude.com/api/mcp/auth_callback'],
+      },
+      supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
+      accessTokenValidity: cdk.Duration.hours(1),
+      idTokenValidity: cdk.Duration.hours(1),
+      refreshTokenValidity: cdk.Duration.days(7),
+      enableTokenRevocation: true,
+      preventUserExistenceErrors: true,
+    });
+    new cognito.CfnManagedLoginBranding(this, 'JQuantsClaudeMcpManagedLoginBranding', {
+      userPoolId: this.userPool.userPoolId,
+      clientId: mcpClient.userPoolClientId,
+      useCognitoProvidedValues: true,
+    });
+
+    const cognitoDomainUrl = `https://${COGNITO_DOMAIN_PREFIX}.auth.${cdk.Aws.REGION}.amazoncognito.com`;
+    const mcpServerFn = new nodejs.NodejsFunction(this, 'McpServerFunction', {
+      entry: path.join(__dirname, '..', 'lambda', 'mcp-server', 'index.ts'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      bundling: { externalModules: ['@aws-sdk/*'] },
+      environment: {
+        USER_POOL_ID: this.userPool.userPoolId,
+        MCP_CLIENT_ID: mcpClient.userPoolClientId,
+        COGNITO_DOMAIN_URL: cognitoDomainUrl,
+        // 自分のCognito subだけを通す(データ規約上、個人利用に限るため)。カンマ区切り。'none'なら誰も通さない。
+        MCP_ALLOWED_SUBS: ssm.StringParameter.valueForStringParameter(this, MCP_ALLOWED_SUBS_PARAMETER_NAME),
+        YUTAI_MASTER_TABLE_NAME: this.yutaiMasterTable.tableName,
+        GYAKUHIBU_FORECAST_TABLE_NAME: this.gyakuhibuForecastTable.tableName,
+        GYAKUHIBU_ACTUAL_TABLE_NAME: this.gyakuhibuActualTable.tableName,
+        MARGIN_BALANCE_TABLE_NAME: this.marginBalanceTable.tableName,
+      },
+    });
+    this.yutaiMasterTable.grantReadData(mcpServerFn);
+    this.gyakuhibuForecastTable.grantReadData(mcpServerFn);
+    this.gyakuhibuActualTable.grantReadData(mcpServerFn);
+    this.marginBalanceTable.grantReadData(mcpServerFn);
+    const mcpIntegration = new HttpLambdaIntegration('McpServerIntegration', mcpServerFn);
+
     // 全ルートでアクセストークンの署名・有効期限・client_idを検証する(Lambda不要)。
     // IDは旧Lambdaオーソライザー('ApiAuthorizer')と変える。同じIDだとCloudFormationが既存の
     // オーソライザーをJWT型へその場で更新しようとし、旧設定のキャッシュTTL(JWTでは使えない)
@@ -729,6 +782,19 @@ export class JQuantsStack extends cdk.Stack {
       integration: referenceApiIntegration,
     });
 
+    // MCPとOAuthメタデータはオーソライザー無し。認証はLambda内で行う(JWTオーソライザーは401に
+    // WWW-Authenticateを付けられず、claude.aiのOAuth検出が始まらないため)。
+    const noAuth = new apigwv2.HttpNoneAuthorizer();
+    this.api.addRoutes({ path: '/mcp', methods: [apigwv2.HttpMethod.POST, apigwv2.HttpMethod.GET], integration: mcpIntegration, authorizer: noAuth });
+    for (const metadataPath of [
+      '/.well-known/oauth-protected-resource',
+      '/.well-known/oauth-protected-resource/mcp',
+      '/.well-known/oauth-authorization-server',
+      '/.well-known/openid-configuration',
+    ]) {
+      this.api.addRoutes({ path: metadataPath, methods: [apigwv2.HttpMethod.GET], integration: mcpIntegration, authorizer: noAuth });
+    }
+
     new cdk.CfnOutput(this, 'ApiEndpoint', { value: this.api.apiEndpoint });
     new cdk.CfnOutput(this, 'FrontendUrl', { value: `https://${this.distribution.distributionDomainName}` });
     new cdk.CfnOutput(this, 'FrontendBucketName', { value: this.frontendBucket.bucketName });
@@ -737,8 +803,8 @@ export class JQuantsStack extends cdk.Stack {
     // フロントの.env(VITE_COGNITO_*)に設定する値。
     new cdk.CfnOutput(this, 'UserPoolId', { value: this.userPool.userPoolId });
     new cdk.CfnOutput(this, 'UserPoolClientId', { value: userPoolClient.userPoolClientId });
-    new cdk.CfnOutput(this, 'CognitoDomain', {
-      value: `https://${COGNITO_DOMAIN_PREFIX}.auth.${cdk.Aws.REGION}.amazoncognito.com`,
-    });
+    new cdk.CfnOutput(this, 'CognitoDomain', { value: cognitoDomainUrl });
+    new cdk.CfnOutput(this, 'McpEndpoint', { value: `${this.api.apiEndpoint}/mcp` });
+    new cdk.CfnOutput(this, 'McpClientId', { value: mcpClient.userPoolClientId });
   }
 }

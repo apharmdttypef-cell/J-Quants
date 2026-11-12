@@ -168,7 +168,9 @@ CSVの値の単位にも要件定義段階の想定との食い違いがあっ�
 | `GET /yutai/{ticker}/forecast` | 銘柄別の予測詳細。予測分布・過去権利日ごとの実績(残高・超過率・充足率・応札・措置)・全銘柄プールのビン別統計・信用残トレンド直近値をまとめて返す。`tseForecast`を含む |
 | `GET /yutai/tdnet-events` | TDnet監視で検知した優待関連イベント(開始/変更/廃止)の一覧。開示日降順、全件返却(ページネーション無し) |
 
-APIは全ルートがGET(書き込み系は無い)。CORSの`allowOrigins`はCloudFrontの配信ドメインと`http://localhost:5173`(ローカル開発用)のみ、`allowHeaders`は`Content-Type`・`Authorization`。
+ただしMCP(`/mcp`)と`/.well-known/*`のOAuthメタデータだけは例外で、オーソライザー無し(Lambda内で検証)。
+
+APIは全ルートがGET(書き込み系は無い。MCPの`POST /mcp`のみ例外で、読み取りだけ行う)。CORSの`allowOrigins`はCloudFrontの配信ドメインと`http://localhost:5173`(ローカル開発用)のみ、`allowHeaders`は`Content-Type`・`Authorization`。
 
 ### フロント配信
 
@@ -183,6 +185,20 @@ APIは全ルートがGET(書き込み系は無い)。CORSの`allowOrigins`はClo
 - フロント: `oidc-client-ts` + `react-oidc-context`。`AuthGate`が未ログインならログイン画面へ送り、ログイン後は元のページへ戻す(戻り先は`/`で始まり`//`で始まらない相対パスだけを許可。外部URLへのオープンリダイレクト防止)。トークンは`sessionStorage`(タブごと)に置き、リフレッシュトークン(7日)でアクセストークン(1時間)を自動更新する。ログアウトはCognitoの`/logout`へ遷移する。
 - API: HTTP APIのJWT authorizer(`HttpUserPoolAuthorizer`)がアクセストークンの署名・有効期限・`client_id`を全ルートで検証する。アクセストークンには既定で`email`が入らないため、Pre Token Generationトリガー(`PreTokenGenerationFunction`、V2)で足している。`ReferenceApiFunction`は検証済みクレームから`getCaller`で`{ sub, email }`を取り出し(ユーザー別データのキーには変わらない`sub`を使う)、`sub`と`routeKey`を構造化ログ(`event: 'api-access'`)に出す。クレームが無ければ401。
 - 権限の差は無い(全ルートがGET)。
+
+### claude.aiから逆日歩予測を使う(MCP)
+
+claude.aiのカスタムコネクタから、銘柄の逆日歩予測(`get_gyakuhibu_forecast`、入力は`ticker`のみ)を呼べる。ツールは1本だけで、許可リストに入れた自分のCognito `sub`だけが使える(データ規約上、個人利用に限るため)。認証はLambda内で行い、トークン無し・無効は401、許可リスト外は403を返す。
+
+初回の準備:
+
+1. 自分のsubを調べる: `aws cognito-idp list-users --user-pool-id <UserPoolId> --filter 'email = "<自分のメール>"' --query 'Users[].Attributes[?Name==\`sub\`].Value' --output text`
+2. 許可リストを置く(デプロイ前に必須。無いとデプロイが失敗する): `aws ssm put-parameter --name /j-quants/mcp-allowed-subs --type String --value <sub> --overwrite`。止めたいときは`--value none`にして`npx cdk deploy`。
+3. `npx cdk deploy`
+4. シークレットを取り出す: `aws cognito-idp describe-user-pool-client --user-pool-id <UserPoolId> --client-id <McpClientId> --query UserPoolClient.ClientSecret --output text`
+5. claude.ai → 設定 → コネクタ → カスタムコネクタを追加。URLは`McpEndpoint`、詳細設定にクライアントIDとシークレット。接続するとCognitoのログイン画面が開く。
+
+許可リストを変えたら`npx cdk deploy`し直す必要がある(SSMの値はデプロイ時に読む)。
 
 ### ユーザー管理(AWS CLI)
 
