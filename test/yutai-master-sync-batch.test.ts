@@ -33,6 +33,7 @@ test('upserts each listed entry with unitShares fixed at 100 and minInvestment c
       companyName: 'コシダカホールディングス',
       content: '割引券（2,000円相当～）',
       rightsMonths: [2, 8],
+      rightsDay: null,
       value: 2000,
       minInvestment: 102200,
     },
@@ -52,8 +53,22 @@ test('upserts each listed entry with unitShares fixed at 100 and minInvestment c
       ':unitShares': 100,
       ':minInvestment': 102200,
       ':rightsMonths': [2, 8],
+      ':rightsDay': null,
     },
   });
+});
+
+test('writes rightsDay for an entry whose rights date is not month-end', async () => {
+  mockFetchAllListings.mockResolvedValueOnce([
+    { ticker: '2678', companyName: 'アスクル', content: 'カタログ（3,000円相当～）', rightsMonths: [5, 11], rightsDay: 20, value: 3000, minInvestment: 150000 },
+  ]);
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  const command = mockSend.mock.calls[0][0];
+  expect(command.UpdateExpression).toContain('rightsDay = :rightsDay');
+  expect(command).toMatchObject({ ExpressionAttributeValues: { ':rightsMonths': [5, 11], ':rightsDay': 20 } });
 });
 
 test('coalesces a missing minInvestment to null rather than leaving it undefined', async () => {

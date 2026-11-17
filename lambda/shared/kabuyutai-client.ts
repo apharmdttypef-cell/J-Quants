@@ -9,6 +9,9 @@ export interface KabuyutaiEntry {
   companyName: string;
   content: string;
   rightsMonths: number[];
+  // 権利確定日の日付。一覧ページで「5月・11月（20日）」のように書かれた銘柄だけが持つ。
+  // nullは月末(書かれていない銘柄)。
+  rightsDay: number | null;
   value: number | undefined;
   // 一覧ページの「必要投資金額」。必要株数の逆算には使わない — 単元株数と異なる銘柄
   // (例: 第一興商は単元100株だが優待には200株必要、2026-09-04発見)の正確な株数は
@@ -67,6 +70,25 @@ function parseRightsMonths(raw: string): number[] {
     .filter((n) => !Number.isNaN(n));
 }
 
+// 【権利確定月】の中身を読む。月末以外の銘柄は
+// `5月・11月<span class="red-bold">（20日）</span>`のように内側のspanで日付が付く。
+// 内側のspanが（N日）の形でないときは、権利日が分からないまま月末扱いにしないよう
+// 'unparsable'を返す。
+type RightsSchedule = { rightsMonths: number[]; rightsDay: number | null };
+
+function parseRightsSchedule(block: string): RightsSchedule | 'missing' | 'unparsable' {
+  const match = block.match(
+    /【権利確定月】<span class="tousi_price">([^<]+)(?:<span class="red-bold">([^<]*)<\/span>)?<\/span>/,
+  );
+  if (!match) return 'missing';
+  const rightsMonths = parseRightsMonths(match[1]);
+  if (match[2] === undefined) return { rightsMonths, rightsDay: null };
+  const dayMatch = match[2].trim().match(/^（(\d{1,2})日）$/);
+  const day = dayMatch ? Number(dayMatch[1]) : NaN;
+  if (!Number.isInteger(day) || day < 1 || day > 31) return 'unparsable';
+  return { rightsMonths, rightsDay: day };
+}
+
 // 優待内容のテキストに埋め込まれた「(XXX円相当〜)」から最低単元の優待価値を抽出する。
 // 全角「（」・半角「(」どちらもあり得るため両対応。マッチしなければundefined。
 function extractValue(content: string): number | undefined {
@@ -121,8 +143,21 @@ export function parseListPage(html: string): KabuyutaiEntry[] {
   for (const block of splitBlocks(html)) {
     const nameMatch = block.match(/<p><a href="([^"]+)" class="kigyoumei">([^<]+)<\/a>（(\d{4})）<\/p>/);
     const contentMatch = block.match(/【優待内容】([^<]+)/);
-    const monthsMatch = block.match(/【権利確定月】<span class="tousi_price">([^<]+)<\/span>/);
-    if (!nameMatch || !contentMatch || !monthsMatch) continue;
+    const schedule = parseRightsSchedule(block);
+    if (!nameMatch || !contentMatch || typeof schedule === 'string') {
+      // 読めないブロックを黙って飛ばすと、20日締めの銘柄のように気づかないまま
+      // マスタから漏れるため、理由と(読めていれば)銘柄コードをログに残す。
+      const ticker = block.match(/class="kigyoumei">[^<]*<\/a>（(\d{4})）/)?.[1] ?? 'unknown';
+      const reason = !nameMatch
+        ? 'company name'
+        : !contentMatch
+          ? 'yutai content'
+          : schedule === 'unparsable'
+            ? 'rights day'
+            : 'rights months';
+      console.warn(`parseListPage: could not parse ${reason} for ticker ${ticker}; skipping`);
+      continue;
+    }
 
     const content = contentMatch[1].trim();
     const minInvestment = extractMinInvestment(block);
@@ -130,7 +165,8 @@ export function parseListPage(html: string): KabuyutaiEntry[] {
       companyName: nameMatch[2],
       ticker: nameMatch[3],
       content,
-      rightsMonths: parseRightsMonths(monthsMatch[1]),
+      rightsMonths: schedule.rightsMonths,
+      rightsDay: schedule.rightsDay,
       value: extractValue(content) ?? estimateValueFromYield(minInvestment, extractYieldPercent(block)),
       minInvestment,
       detailUrl: nameMatch[1],

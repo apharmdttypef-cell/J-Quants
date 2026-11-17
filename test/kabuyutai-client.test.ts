@@ -55,6 +55,7 @@ describe('parseListPage', () => {
         value: 2000,
         minInvestment: 102200,
         detailUrl: 'https://www.kabuyutai.com/kobetu/koshidakaholdings.html',
+        rightsDay: null,
         listBadge: null,
       },
       {
@@ -65,6 +66,7 @@ describe('parseListPage', () => {
         value: 9000,
         minInvestment: 8512,
         detailUrl: 'https://www.kabuyutai.com/kobetu/chiikinews.html',
+        rightsDay: null,
         listBadge: null,
       },
     ]);
@@ -90,6 +92,7 @@ describe('parseListPage', () => {
         value: undefined,
         minInvestment: undefined,
         detailUrl: 'x',
+        rightsDay: null,
         listBadge: null,
       },
     ]);
@@ -114,6 +117,7 @@ describe('parseListPage', () => {
         value: 500,
         minInvestment: undefined,
         detailUrl: 'x',
+        rightsDay: null,
         listBadge: null,
       },
     ]);
@@ -141,6 +145,7 @@ describe('parseListPage', () => {
         value: 7871,
         minInvestment: 303900,
         detailUrl: 'x',
+        rightsDay: null,
         listBadge: null,
       },
     ]);
@@ -184,7 +189,57 @@ describe('parseListPage', () => {
 </div>
 <!-- ▲ランキング_ブロック -->
 `;
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     expect(parseListPage(html)).toEqual([]);
+    warn.mockRestore();
+  });
+
+  function block(ticker: string, name: string, monthsHtml: string): string {
+    return (
+      '<!-- ▼ランキング_ブロック --><div class="table_tr">' +
+      `<p><a href="https://www.kabuyutai.com/kobetu/${ticker}.html" class="kigyoumei">${name}</a>（${ticker}）</p>` +
+      '<p>【優待内容】QUOカード（500円相当～）</p>' +
+      `<p>【権利確定月】<span class="tousi_price">${monthsHtml}</span></p>` +
+      '</div><!-- ▲ランキング_ブロック -->'
+    );
+  }
+
+  test('月末の銘柄はrightsDay: null', () => {
+    const [entry] = parseListPage(block('1111', '月末企業', '2月・8月'));
+    expect(entry.rightsMonths).toEqual([2, 8]);
+    expect(entry.rightsDay).toBeNull();
+  });
+
+  test('（20日）が付いた銘柄はrightsDay: 20で、月も読める', () => {
+    const [entry] = parseListPage(block('2678', 'アスクル', '5月・11月<span class="red-bold">（20日）</span>'));
+    expect(entry.ticker).toBe('2678');
+    expect(entry.rightsMonths).toEqual([5, 11]);
+    expect(entry.rightsDay).toBe(20);
+  });
+
+  test('（15日）が付いた銘柄はrightsDay: 15', () => {
+    const [entry] = parseListPage(block('2664', 'カワチ薬品', '3月・9月<span class="red-bold">（15日）</span>'));
+    expect(entry.rightsMonths).toEqual([3, 9]);
+    expect(entry.rightsDay).toBe(15);
+  });
+
+  test('内側のspanが（N日）の形でなければ飛ばして警告する', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const entries = parseListPage(block('3333', '想定外企業', '6月<span class="red-bold">（末日以外）</span>'));
+    expect(entries).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('3333'));
+    warn.mockRestore();
+  });
+
+  test('権利確定月が読めないブロックは飛ばして、銘柄コード付きで警告する', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const html =
+      '<!-- ▼ランキング_ブロック --><div class="table_tr">' +
+      '<p><a href="x" class="kigyoumei">壊れ企業</a>（4444）</p><p>【優待内容】QUOカード（500円相当～）</p>' +
+      '</div><!-- ▲ランキング_ブロック -->';
+    expect(parseListPage(html)).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('4444'));
+    warn.mockRestore();
   });
 });
 

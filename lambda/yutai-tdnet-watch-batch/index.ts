@@ -185,7 +185,7 @@ export const handler = async (): Promise<void> => {
           // 「未取得」として拾い直す。ここで個別ページを同期取得しないのは、優待関連の
           // 開示が多い週に該当銘柄が増えると14分のタイムアウトに近づくため。
           UpdateExpression:
-            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths, detailUrl = :detailUrl, listBadge = :listBadge' +
+            'SET companyName = :companyName, #content = :content, #value = :value, unitShares = :unitShares, minInvestment = :minInvestment, rightsMonths = :rightsMonths, rightsDay = :rightsDay, detailUrl = :detailUrl, listBadge = :listBadge' +
             setAbolitionNotice +
             ' REMOVE conditionCheckedAt',
           ExpressionAttributeNames: { '#content': 'content', '#value': 'value' },
@@ -196,6 +196,7 @@ export const handler = async (): Promise<void> => {
             ':unitShares': UNIT_SHARES,
             ':minInvestment': entry.minInvestment ?? null,
             ':rightsMonths': entry.rightsMonths,
+            ':rightsDay': entry.rightsDay,
             ':detailUrl': entry.detailUrl ?? null,
             ':listBadge': entry.listBadge ?? null,
             ...(abolitionNotice ? { ':abolitionNotice': abolitionNotice } : {}),

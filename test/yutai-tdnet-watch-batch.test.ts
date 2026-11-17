@@ -64,6 +64,7 @@ test('matches a yutai-related disclosure, looks it up via a single fetchAllListi
       companyName: 'コシダカホールディングス',
       content: '割引券（3,000円相当～）',
       rightsMonths: [2, 8],
+      rightsDay: null,
       value: 3000,
       minInvestment: 150000,
     },
@@ -79,7 +80,7 @@ test('matches a yutai-related disclosure, looks it up via a single fetchAllListi
   expect(mockSend.mock.calls[1][0]).toMatchObject({
     TableName: 'JQuantsYutaiMaster',
     Key: { ticker: '2157' },
-    ExpressionAttributeValues: { ':value': 3000, ':unitShares': 100, ':minInvestment': 150000, ':rightsMonths': [2, 8] },
+    ExpressionAttributeValues: { ':value': 3000, ':unitShares': 100, ':minInvestment': 150000, ':rightsMonths': [2, 8], ':rightsDay': null },
   });
   expect(mockSend.mock.calls[2][0]).toMatchObject({
     TableName: 'JQuantsYutaiTdnetEvent',
@@ -105,6 +106,7 @@ test('upserts a matched ticker with value: null when kabuyutai.com has no extrac
       companyName: 'コシダカホールディングス',
       content: '割引券（金額不明）',
       rightsMonths: [2, 8],
+      rightsDay: null,
       value: undefined,
       minInvestment: 150000,
     },
@@ -118,8 +120,33 @@ test('upserts a matched ticker with value: null when kabuyutai.com has no extrac
   expect(mockSend.mock.calls[1][0]).toMatchObject({
     TableName: 'JQuantsYutaiMaster',
     Key: { ticker: '2157' },
-    ExpressionAttributeValues: { ':value': null, ':unitShares': 100, ':minInvestment': 150000, ':rightsMonths': [2, 8] },
+    ExpressionAttributeValues: { ':value': null, ':unitShares': 100, ':minInvestment': 150000, ':rightsMonths': [2, 8], ':rightsDay': null },
   });
+});
+
+test('writes rightsDay when the matched entry has a non-month-end rights date', async () => {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    text: async () => dayListHtml([{ code: '26780', name: 'アスクル', title: '株主優待制度の一部変更に関するお知らせ' }]),
+  });
+  mockFetchAllListings.mockResolvedValueOnce([
+    {
+      ticker: '2678',
+      companyName: 'アスクル',
+      content: 'カタログ（3,000円相当～）',
+      rightsMonths: [5, 11],
+      rightsDay: 20,
+      value: 3000,
+      minInvestment: 150000,
+    },
+  ]);
+  mockSend.mockResolvedValue({});
+
+  await handler();
+
+  const command = mockSend.mock.calls[1][0];
+  expect(command.UpdateExpression).toContain('rightsDay = :rightsDay');
+  expect(command.ExpressionAttributeValues).toMatchObject({ ':rightsMonths': [5, 11], ':rightsDay': 20 });
 });
 
 test('ignores disclosures whose title has no yutai-related keyword', async () => {
