@@ -7,6 +7,7 @@ import {
   isJpHoliday,
   rightsDateForMonth,
   nextRightsDate,
+  toRightsDay,
   todayJst,
   type CalendarDay,
 } from '../lambda/shared/trading-calendar';
@@ -176,43 +177,43 @@ describe('getLocalTradingCalendar', () => {
 describe('rightsDateForMonth', () => {
   test('2026-08 (月末最終営業日8/31・月曜) -> 2026-08-27(T、2営業日前)', () => {
     const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-31');
-    expect(rightsDateForMonth(calendar, 2026, 8)).toBe('2026-08-27');
+    expect(rightsDateForMonth(calendar, 2026, 8, null)).toBe('2026-08-27');
   });
 
   test('2026-02 (月末最終営業日2/27・金曜) -> 2026-02-25(T、2営業日前)', () => {
     const calendar = getLocalTradingCalendar('2026-02-01', '2026-02-28');
-    expect(rightsDateForMonth(calendar, 2026, 2)).toBe('2026-02-25');
+    expect(rightsDateForMonth(calendar, 2026, 2, null)).toBe('2026-02-25');
   });
 
   test('2026-12 (大納会12/30・水曜) -> 2026-12-28(T、2営業日前)', () => {
     const calendar = getLocalTradingCalendar('2026-12-01', '2026-12-31');
-    expect(rightsDateForMonth(calendar, 2026, 12)).toBe('2026-12-28');
+    expect(rightsDateForMonth(calendar, 2026, 12, null)).toBe('2026-12-28');
   });
 
   test('該当月に営業日が1件も無いカレンダーではundefinedを返す', () => {
     const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-31');
-    expect(rightsDateForMonth(calendar, 2026, 9)).toBeUndefined();
+    expect(rightsDateForMonth(calendar, 2026, 9, null)).toBeUndefined();
   });
 });
 
 describe('nextRightsDate', () => {
   test('returns undefined when rightsMonths is empty', () => {
-    expect(nextRightsDate([])).toBeUndefined();
+    expect(nextRightsDate([], null)).toBeUndefined();
   });
 
   test('returns a date matching the YYYY-MM-DD format for a non-empty rightsMonths', () => {
-    const result = nextRightsDate([8]);
+    const result = nextRightsDate([8], null);
     expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   test('keeps the current month through its rights date and moves to next year the day after', () => {
-    expect(nextRightsDate([10], '2026-10-28')).toBe('2026-10-28');
-    expect(nextRightsDate([10], '2026-10-29')).toBe('2027-10-27');
+    expect(nextRightsDate([10], null, '2026-10-28')).toBe('2026-10-28');
+    expect(nextRightsDate([10], null, '2026-10-29')).toBe('2027-10-27');
   });
 
   test('the returned date is always today or later', () => {
     const today = todayJst();
-    const result = nextRightsDate([1, 4, 7, 10]);
+    const result = nextRightsDate([1, 4, 7, 10], null);
     expect(result).toBeDefined();
     expect(result! >= today).toBe(true);
   });
@@ -222,5 +223,66 @@ describe('todayJst', () => {
   test('uses the JST date, which is a day ahead of UTC between 00:00 and 09:00 JST', () => {
     expect(todayJst(Date.parse('2026-10-28T15:00:00Z'))).toBe('2026-10-29'); // JST 10/29 00:00
     expect(todayJst(Date.parse('2026-10-28T14:59:59Z'))).toBe('2026-10-28'); // JST 10/28 23:59
+  });
+});
+
+describe('rightsDateForMonth with rightsDay', () => {
+  test('20日が平日(2026-05-20水) -> 2026-05-18', () => {
+    const calendar = getLocalTradingCalendar('2026-05-01', '2026-05-31');
+    expect(rightsDateForMonth(calendar, 2026, 5, 20)).toBe('2026-05-18');
+  });
+
+  test('20日が日曜(2026-09-20)なら直前の営業日9/18が権利確定日 -> 2026-09-16', () => {
+    const calendar = getLocalTradingCalendar('2026-09-01', '2026-09-30');
+    expect(rightsDateForMonth(calendar, 2026, 9, 20)).toBe('2026-09-16');
+  });
+
+  test('20日が祝日(2026-03-20春分の日)なら3/19が権利確定日 -> 2026-03-17', () => {
+    const calendar = getLocalTradingCalendar('2026-03-01', '2026-03-31');
+    expect(rightsDateForMonth(calendar, 2026, 3, 20)).toBe('2026-03-17');
+  });
+
+  test('15日(2026-05-15金) -> 2026-05-13', () => {
+    const calendar = getLocalTradingCalendar('2026-05-01', '2026-05-31');
+    expect(rightsDateForMonth(calendar, 2026, 5, 15)).toBe('2026-05-13');
+  });
+
+  test('taisyaku.jpの実績がある日付と一致する(2678: 2025-11-18, 2025-05-16 / 8227: 2026-02-18)', () => {
+    const calendar = getLocalTradingCalendar('2025-01-01', '2026-12-31');
+    expect(rightsDateForMonth(calendar, 2025, 11, 20)).toBe('2025-11-18');
+    expect(rightsDateForMonth(calendar, 2025, 5, 20)).toBe('2025-05-16');
+    expect(rightsDateForMonth(calendar, 2026, 2, 20)).toBe('2026-02-18');
+  });
+
+  test('nullは月末(従来どおり)', () => {
+    const calendar = getLocalTradingCalendar('2026-08-01', '2026-08-31');
+    expect(rightsDateForMonth(calendar, 2026, 8, null)).toBe('2026-08-27');
+  });
+});
+
+describe('nextRightsDate with rightsDay', () => {
+  test('20日締めの5月・11月で、11/17時点の次の権利付き最終日は2026-11-18', () => {
+    expect(nextRightsDate([5, 11], 20, '2026-11-17')).toBe('2026-11-18');
+  });
+
+  test('11/19時点では翌年5月の2027-05-18', () => {
+    expect(nextRightsDate([5, 11], 20, '2026-11-19')).toBe('2027-05-18');
+  });
+});
+
+describe('toRightsDay', () => {
+  test.each([
+    [20, 20],
+    [15, 15],
+    [1, 1],
+    [31, 31],
+    [null, null],
+    [undefined, null],
+    [0, null],
+    [32, null],
+    [20.5, null],
+    ['20', null],
+  ])('toRightsDay(%p) -> %p', (input, expected) => {
+    expect(toRightsDay(input)).toBe(expected);
   });
 });

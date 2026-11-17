@@ -10,6 +10,7 @@ import {
   businessDaysAfter,
   calendarDaysBetween,
   nextRightsDate,
+  toRightsDay,
   type CalendarDay,
 } from '../shared/trading-calendar';
 
@@ -24,6 +25,7 @@ interface MasterRow {
   unitShares: number;
   requiredShares: number | null;
   rightsMonths: number[];
+  rightsDay: number | null;
   // 貸借区分(taisyaku.jpの'貸借' | '貸借融資' | '非貸借')。信用残バッチが書く。東証行が無い銘柄はnull。
   marginName: string | null;
 }
@@ -36,11 +38,11 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
     const result = await ddbDocClient.send(
       new ScanCommand({
         TableName: YUTAI_MASTER_TABLE_NAME,
-        // MasterRowが読む5項目だけを取る。特にbenefitGroups(1銘柄0.7〜2KB × 1,642銘柄)は
+        // MasterRowが読む6項目だけを取る。特にbenefitGroups(1銘柄0.7〜2KB × 1,642銘柄)は
         // ここでは使わないのに、Scanの1MBページングの往復回数を押し上げる。
         // MasterRowに項目を足すときはこの射影にも足すこと(足し忘れると黙ってundefinedに
         // なる)。
-        ProjectionExpression: 'ticker, unitShares, requiredShares, rightsMonths, marginName',
+        ProjectionExpression: 'ticker, unitShares, requiredShares, rightsMonths, rightsDay, marginName',
         ExclusiveStartKey: exclusiveStartKey,
       }),
     );
@@ -53,6 +55,7 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
           // 未取得の銘柄ではnullになり、単元株数で代用する。
           requiredShares: typeof item.requiredShares === 'number' ? item.requiredShares : null,
           rightsMonths: item.rightsMonths ?? [],
+          rightsDay: toRightsDay(item.rightsDay),
           marginName: typeof item.marginName === 'string' ? item.marginName : null,
         });
       }
@@ -180,7 +183,7 @@ export const handler = async (): Promise<void> => {
       const prices = await fetchRecentPrices(row.ticker);
       const closePrice = latestClose(prices);
       const rsi = computeRsiSnapshot(prices, today);
-      const rightsDate = nextRightsDate(row.rightsMonths);
+      const rightsDate = nextRightsDate(row.rightsMonths, row.rightsDay);
       // requiredSharesが未取得(yutai-detail-sync-batchがまだ回っていない)なら
       // 単元株数で代用する。代用したことはsummarizeActualsがbasedOnUnitSharesで
       // 画面に伝える。

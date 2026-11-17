@@ -16,6 +16,10 @@ process.env.MARGIN_BALANCE_TABLE_NAME = 'JQuantsMarginBalance';
 process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'JQuantsGyakuhibuForecast';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { nextRightsDate } = require('../lambda/shared/trading-calendar') as {
+  nextRightsDate: (months: number[], rightsDay: number | null, today?: string) => string | undefined;
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/gyakuhibu-forecast-batch/index') as { handler: () => Promise<void> };
 
 beforeEach(() => {
@@ -324,4 +328,14 @@ test('TSE items survive real DynamoDB marshalling when the current snapshot has 
     expect(tse.bin).toBe('5以上');
     expect(tse.lendingGrowth4w).toBeNull();
   });
+});
+
+test('writes the rights date computed from the master rightsDay (20th-based, not month-end)', async () => {
+  const expected = nextRightsDate([5, 11], 20);
+  expect(expected).not.toBe(nextRightsDate([5, 11], null));
+  mockTables({ master: [{ ticker: '2678', value: 1000, unitShares: 100, rightsMonths: [5, 11], rightsDay: 20, maxGyakuhibu: 5000 }], actual: [] });
+
+  await handler();
+
+  expect(itemOf('2678').rightsDate).toBe(expected);
 });

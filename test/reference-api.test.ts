@@ -1,3 +1,4 @@
+import { nextRightsDate } from '../lambda/shared/trading-calendar';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 
 const mockSend = jest.fn();
@@ -190,6 +191,7 @@ test('the yutai list scan projects only the attributes the list returns', async 
     '#value',
     'unitShares',
     'rightsMonths',
+    'rightsDay',
     'maxGyakuhibu',
     'closePrice',
     'requiredShares',
@@ -996,4 +998,32 @@ test('GET /yutai/:ticker returns the benefit tier groups verbatim', async () => 
   expect(parsed.closePrice).toBeUndefined();
   expect(parsed.requiredInvestment).toBeUndefined();
   expect(parsed.basicInfo.closePrice).toBe(2000);
+});
+
+test('GET /yutai/forecast computes rightsDate from rightsDay (20th-based, not month-end)', async () => {
+  const expected = nextRightsDate([5, 11], 20);
+  expect(expected).not.toBe(nextRightsDate([5, 11], null));
+  mockSend.mockResolvedValueOnce({
+    Items: [{ ticker: '2678', companyName: 'アスクル', content: 'QUOカード', value: 1000, unitShares: 100, rightsMonths: [5, 11], rightsDay: 20, maxGyakuhibu: null, maxRate: null, days: null }],
+  });
+
+  const result = await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: {} }));
+
+  const parsed = body(result) as { tickers: Array<{ rightsDate: string | null }> };
+  expect(parsed.tickers[0].rightsDate).toBe(expected);
+});
+
+test('GET /yutai/{ticker} computes rightsDate from rightsDay (20th-based, not month-end)', async () => {
+  const expected = nextRightsDate([5, 11], 20);
+  expect(expected).not.toBe(nextRightsDate([5, 11], null));
+  mockSend
+    .mockResolvedValueOnce({
+      Item: { ticker: '2678', content: 'QUOカード', value: 1000, unitShares: 100, rightsMonths: [5, 11], rightsDay: 20 },
+    }) // yutai master get
+    .mockResolvedValueOnce({ Items: [] }) // latest price
+    .mockResolvedValueOnce({ Items: [] }); // gyakuhibu actual history
+
+  const result = await handler(makeEvent('GET /yutai/{ticker}', { pathParameters: { ticker: '2678' } }));
+
+  expect(body(result)).toMatchObject({ rightsDate: expected });
 });

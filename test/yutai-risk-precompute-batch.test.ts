@@ -19,6 +19,10 @@ process.env.TABLE_NAME = 'JQuantsStockPrices';
 process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'JQuantsGyakuhibuActual';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { nextRightsDate } = require('../lambda/shared/trading-calendar') as {
+  nextRightsDate: (months: number[], rightsDay: number | null, today?: string) => string | undefined;
+};
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/yutai-risk-precompute-batch/index') as { handler: () => Promise<void> };
 
 beforeEach(() => {
@@ -66,6 +70,7 @@ test('the master scan projects only the attributes the batch reads', async () =>
     'unitShares',
     'requiredShares',
     'rightsMonths',
+    'rightsDay',
     'marginName',
   ]);
   // 判定をやめたので優待価値(value)は読まない
@@ -470,5 +475,33 @@ test('writes the RSI for tickers with no rights month or an unknown margin class
     expect(cmd.ExpressionAttributeValues).toMatchObject({ ':rsi14': 100, ':rsiLabel': 'high' });
     // 最大逆日歩は出せない(権利日なし・区分不明)が、RSIは出す
     expect(cmd.ExpressionAttributeValues).toMatchObject({ ':maxGyakuhibu': null });
+  }
+});
+
+test('picks the same-month-last-year gyakuhibu from the 20th-based rights date (not month-end)', async () => {
+  const fixedToday = '2026-11-19';
+  // 20日基準なら次回は2027年5月、月末基準なら2026年11月になり、対象の月が変わる。
+  const next20 = nextRightsDate([5, 11], 20, fixedToday)!;
+  const nextEnd = nextRightsDate([5, 11], null, fixedToday)!;
+  expect(next20.slice(0, 7)).not.toBe(nextEnd.slice(0, 7));
+  const lastYearSameMonth20 = `${Number(next20.slice(0, 4)) - 1}-${next20.slice(5, 7)}-18`;
+
+  jest.useFakeTimers({
+    doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick'],
+  }).setSystemTime(new Date(`${fixedToday}T00:00:00Z`));
+  try {
+    mockSend
+      .mockResolvedValueOnce({ Items: [{ ticker: '2678', marginName: '貸借', unitShares: 100, requiredShares: 100, rightsMonths: [5, 11], rightsDay: 20 }] })
+      .mockResolvedValueOnce({ Items: [{ close: 2000 }] })
+      .mockResolvedValueOnce({ Items: [{ rightsDate: lastYearSameMonth20, avgRate: 1.0, days: 2 }] })
+      .mockResolvedValueOnce({});
+
+    await handler();
+
+    const values = (updateCalls()[0][0] as { ExpressionAttributeValues: Record<string, unknown> }).ExpressionAttributeValues;
+    const sameMonth = values[':sameMonthLastYearGyakuhibu'] as { rightsDate: string } | null;
+    expect(sameMonth?.rightsDate).toBe(lastYearSameMonth20);
+  } finally {
+    jest.useRealTimers();
   }
 });

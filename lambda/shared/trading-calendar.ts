@@ -145,17 +145,31 @@ export function getLocalTradingCalendar(from: string, to: string): CalendarDay[]
   return days;
 }
 
-// year年month月の最終営業日から2営業日前(権利付き最終日T)を返す。calendarにその月の
-// 営業日が1件も含まれない場合はundefined。優待マスタのrightsMonths(権利確定月)から
-// 実際の権利付き最終日を都度計算するために使う(JQuantsYutaiRightsDateテーブル廃止に伴う)。
-export function rightsDateForMonth(calendar: CalendarDay[], year: number, month: number): string | undefined {
+// year年month月の権利確定日から2営業日前(権利付き最終日T)を返す。権利確定日は、
+// rightsDayがあればその日以前の最後の営業日(20日締めの銘柄で20日が土日祝なら前の営業日)、
+// nullならその月の最後の営業日。calendarにその月の該当営業日が1件も含まれない場合はundefined。
+// 優待マスタのrightsMonths(権利確定月)・rightsDay(権利確定日)から実際の権利付き最終日を
+// 都度計算するために使う(JQuantsYutaiRightsDateテーブル廃止に伴う)。
+export function rightsDateForMonth(
+  calendar: CalendarDay[],
+  year: number,
+  month: number,
+  rightsDay: number | null,
+): string | undefined {
   const prefix = `${year}-${String(month).padStart(2, '0')}`;
   const tradingDays = calendar.filter(isTradingDay).map((d) => d.date).sort();
-  const monthTradingDays = tradingDays.filter((d) => d.startsWith(prefix));
+  const lastAllowed = rightsDay === null ? `${prefix}-31` : `${prefix}-${String(rightsDay).padStart(2, '0')}`;
+  const monthTradingDays = tradingDays.filter((d) => d.startsWith(prefix) && d <= lastAllowed);
   const record = monthTradingDays[monthTradingDays.length - 1];
   if (!record) return undefined;
   const idx = tradingDays.indexOf(record);
   return idx >= 2 ? tradingDays[idx - 2] : undefined;
+}
+
+// DynamoDBの優待マスタ行のrightsDayを読む。1〜31の整数以外(欠損・null・不正値)は
+// すべてnull(月末)として扱う(rightsDayを持たない既存行は月末の銘柄)。
+export function toRightsDay(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 31 ? value : null;
 }
 
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
@@ -165,11 +179,11 @@ export function todayJst(now: number = Date.now()): string {
   return new Date(now + JST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
-// rightsMonthsの各月について、今年・来年の最終営業日から2営業日前(権利付き最終日T)を
+// rightsMonthsの各月について、今年・来年の権利確定日(rightsDay、nullなら月末)から2営業日前(権利付き最終日T)を
 // 計算し、今日以降で最も近いものを返す(JQuantsYutaiRightsDateテーブル廃止に伴う代替)。
 const yearCalendarCache = new Map<number, CalendarDay[]>();
 
-export function nextRightsDate(rightsMonths: number[], today: string = todayJst()): string | undefined {
+export function nextRightsDate(rightsMonths: number[], rightsDay: number | null, today: string = todayJst()): string | undefined {
   if (rightsMonths.length === 0) return undefined;
 
   const year = Number(today.slice(0, 4));
@@ -182,7 +196,7 @@ export function nextRightsDate(rightsMonths: number[], today: string = todayJst(
   const candidates: string[] = [];
   for (const y of [year, year + 1]) {
     for (const month of rightsMonths) {
-      const rightsDate = rightsDateForMonth(calendar, y, month);
+      const rightsDate = rightsDateForMonth(calendar, y, month, rightsDay);
       if (rightsDate) candidates.push(rightsDate);
     }
   }

@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { getLocalTradingCalendar, isTradingDay, nextRightsDate, todayJst } from '../shared/trading-calendar';
+import { getLocalTradingCalendar, isTradingDay, nextRightsDate, todayJst, toRightsDay } from '../shared/trading-calendar';
 import type { GyakuhibuActualRef } from '../shared/gyakuhibu-actual-summary';
 import type { RsiLabel } from '../shared/rsi-calc';
 import type { AbolitionNotice } from '../shared/yutai-abolition';
@@ -80,6 +80,7 @@ interface YutaiMasterRow {
   value: number | null;
   unitShares: number;
   rightsMonths: number[];
+  rightsDay: number | null;
   maxGyakuhibu: number | null;
   maxRate: number | null;
   days: number | null;
@@ -113,6 +114,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
     value: item.value ?? null,
     unitShares: item.unitShares,
     rightsMonths: item.rightsMonths ?? [],
+    rightsDay: toRightsDay(item.rightsDay),
     maxGyakuhibu: item.maxGyakuhibu ?? null,
     maxRate: item.maxRate ?? null,
     days: item.days ?? null,
@@ -146,7 +148,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
 // この射影にも足すこと(足し忘れは型エラーにならず、黙ってnullになる)。
 // content / value はDynamoDBの予約語なので#名で逃がす。
 const YUTAI_LIST_PROJECTION =
-  'ticker, companyName, #content, #value, unitShares, rightsMonths, maxGyakuhibu, closePrice, ' +
+  'ticker, companyName, #content, #value, unitShares, rightsMonths, rightsDay, maxGyakuhibu, closePrice, ' +
   'requiredShares, crossEligible, holdingKind, holdingMinMonths, minTierValueYen, benefitParseWarning, ' +
   'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu, rsiLabel, abolitionNotice';
 
@@ -309,7 +311,7 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
 
   const items = [];
   for (const row of masterRows) {
-    const rightsDate = nextRightsDate(row.rightsMonths);
+    const rightsDate = nextRightsDate(row.rightsMonths, row.rightsDay);
     if (!passesYutaiFilters(row, rightsDate, filters)) continue;
 
     const forecast = buildForecast(forecastByTicker.get(row.ticker));
@@ -391,7 +393,7 @@ async function getYutaiDetail(ticker: string): Promise<APIGatewayProxyResultV2> 
 
   const price = await latestPricePoint(ticker);
 
-  const rightsDate = nextRightsDate(master.rightsMonths);
+  const rightsDate = nextRightsDate(master.rightsMonths, master.rightsDay);
   const history = await gyakuhibuHistory(ticker);
 
   // 判定(forecastStatus)はGET /yutai/{ticker}/forecastが返す。画面は両方を並行して取る。

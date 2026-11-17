@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { fetchTaisyakuCsv, parseTaisyakuCsv, GyakuhibuActualPoint } from './taisyaku-client';
-import { getLocalTradingCalendar, rightsDateForMonth } from '../shared/trading-calendar';
+import { getLocalTradingCalendar, rightsDateForMonth, toRightsDay } from '../shared/trading-calendar';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
 const GYAKUHIBU_ACTUAL_TABLE_NAME = process.env.GYAKUHIBU_ACTUAL_TABLE_NAME!;
@@ -23,6 +23,7 @@ interface MasterRow {
   ticker: string;
   unitShares: number;
   rightsMonths: number[];
+  rightsDay: number | null;
 }
 
 interface RightsDateCandidate {
@@ -42,7 +43,12 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
     );
     for (const item of result.Items ?? []) {
       if (typeof item.ticker === 'string' && typeof item.unitShares === 'number' && Array.isArray(item.rightsMonths)) {
-        rows.push({ ticker: item.ticker, unitShares: item.unitShares, rightsMonths: item.rightsMonths });
+        rows.push({
+          ticker: item.ticker,
+          unitShares: item.unitShares,
+          rightsMonths: item.rightsMonths,
+          rightsDay: toRightsDay(item.rightsDay),
+        });
       } else {
         skippedCount++;
       }
@@ -74,7 +80,7 @@ function pastRightsDateCandidates(rows: MasterRow[]): RightsDateCandidate[] {
   for (const row of rows) {
     for (let year = fromYear; year <= thisYear; year++) {
       for (const month of row.rightsMonths) {
-        const rightsDate = rightsDateForMonth(calendar, year, month);
+        const rightsDate = rightsDateForMonth(calendar, year, month, row.rightsDay);
         if (rightsDate && rightsDate < today) {
           candidates.push({ ticker: row.ticker, rightsDate, unitShares: row.unitShares });
         }

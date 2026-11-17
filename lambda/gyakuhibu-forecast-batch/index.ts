@@ -15,7 +15,7 @@ import {
   type GyakuhibuActualRow,
 } from '../shared/gyakuhibu-forecast';
 import { isGeneralMarginOnly } from '../shared/margin-name';
-import { nextRightsDate } from '../shared/trading-calendar';
+import { nextRightsDate, toRightsDay } from '../shared/trading-calendar';
 import { buildTsePools, buildTseSamples, computeTseForecast, scanMarginSnapshots, type TsePools } from './tse-forecast';
 
 const YUTAI_MASTER_TABLE_NAME = process.env.YUTAI_MASTER_TABLE_NAME!;
@@ -47,6 +47,7 @@ interface MasterRow {
   value: number | null;
   unitShares: number;
   rightsMonths: number[];
+  rightsDay: number | null;
   maxGyakuhibu: number | null;
   // yutai-risk-precompute-batchが毎日J-Quantsから取り込む貸借区分。
   marginName: string | null;
@@ -86,6 +87,7 @@ async function scanYutaiMaster(): Promise<MasterRow[]> {
           value: typeof item.value === 'number' ? item.value : null,
           unitShares: item.unitShares,
           rightsMonths: Array.isArray(item.rightsMonths) ? item.rightsMonths : [],
+          rightsDay: toRightsDay(item.rightsDay),
           maxGyakuhibu: typeof item.maxGyakuhibu === 'number' ? item.maxGyakuhibu : null,
           marginName: typeof item.marginName === 'string' ? item.marginName : null,
         });
@@ -178,7 +180,7 @@ export const handler = async (): Promise<void> => {
   let written = 0;
   for (const row of master) {
     try {
-      const nextDate = nextRightsDate(row.rightsMonths);
+      const nextDate = nextRightsDate(row.rightsMonths, row.rightsDay);
       if (!nextDate) {
         console.warn(`${row.ticker}: no upcoming rights date, skipping`);
         continue;

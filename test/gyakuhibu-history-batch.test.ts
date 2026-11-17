@@ -44,7 +44,7 @@ beforeEach(() => {
 function knownPastRightsDate(): string {
   const lastYear = new Date().getFullYear() - 1;
   const calendar = getLocalTradingCalendar(`${lastYear}-01-01`, `${lastYear}-12-31`);
-  const date = rightsDateForMonth(calendar, lastYear, 3);
+  const date = rightsDateForMonth(calendar, lastYear, 3, null);
   if (!date) throw new Error('test setup: could not compute a known past rights date');
   return date;
 }
@@ -289,4 +289,25 @@ test('re-fetches a rights date whose checkedAt is older than 30 days', async () 
   await handler();
 
   expect(taisyakuClient.fetchTaisyakuCsv).toHaveBeenCalled();
+});
+
+test('derives past rights date candidates from rightsDay (20th-based, not month-end)', async () => {
+  const year = new Date().getFullYear() - 1;
+  const calendar = getLocalTradingCalendar(`${year}-01-01`, `${year}-12-31`);
+  const dateOn20th = rightsDateForMonth(calendar, year, 11, 20)!;
+  const dateAtMonthEnd = rightsDateForMonth(calendar, year, 11, null)!;
+  expect(dateOn20th).not.toBe(dateAtMonthEnd);
+  mockSend.mockResolvedValueOnce({ Items: [{ ticker: '2678', unitShares: 100, rightsMonths: [5, 11], rightsDay: 20 }] }); // yutai master scan
+  mockSend.mockResolvedValue({ Item: undefined }); // isEnriched: 常に未取得
+  taisyakuClient.fetchTaisyakuCsv.mockResolvedValue('csv-body');
+  taisyakuClient.parseTaisyakuCsv.mockReturnValue(undefined);
+
+  await handler();
+
+  const checkedDates = mockSend.mock.calls
+    .map(([cmd]) => cmd as { TableName?: string; Key?: { ticker: string; rightsDate: string } })
+    .filter((cmd) => cmd.TableName === 'JQuantsGyakuhibuActual' && cmd.Key !== undefined)
+    .map((cmd) => cmd.Key!.rightsDate);
+  expect(checkedDates).toContain(dateOn20th);
+  expect(checkedDates).not.toContain(dateAtMonthEnd);
 });

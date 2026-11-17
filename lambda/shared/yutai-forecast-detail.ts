@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { excessRatio, fillRatio, shiftIsoDate } from './gyakuhibu-forecast';
-import { nextRightsDate } from './trading-calendar';
+import { nextRightsDate, toRightsDay } from './trading-calendar';
 import type { AbolitionNotice } from './yutai-abolition';
 
 const ddbDocClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -169,6 +169,7 @@ export async function loadYutaiForecastDetail(ticker: string): Promise<YutaiFore
     unitShares: masterItem.unitShares as number,
     requiredShares: (masterItem.requiredShares as number | null | undefined) ?? null,
     rightsMonths: (masterItem.rightsMonths as number[] | undefined) ?? [],
+    rightsDay: toRightsDay(masterItem.rightsDay),
     maxGyakuhibu: (masterItem.maxGyakuhibu as number | null | undefined) ?? null,
     closePrice: (masterItem.closePrice as number | null | undefined) ?? null,
     abolitionNotice: (masterItem.abolitionNotice as AbolitionNotice | null | undefined) ?? null,
@@ -231,7 +232,7 @@ export async function loadYutaiForecastDetail(ticker: string): Promise<YutaiFore
       }
     : { latest: null };
 
-  const rightsDate = nextRightsDate(master.rightsMonths);
+  const rightsDate = nextRightsDate(master.rightsMonths, master.rightsDay);
 
   return {
     detail: {

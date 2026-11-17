@@ -15,6 +15,8 @@ process.env.GYAKUHIBU_ACTUAL_TABLE_NAME = 'actual';
 process.env.GYAKUHIBU_FORECAST_TABLE_NAME = 'forecast';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { nextRightsDate } = require('../lambda/shared/trading-calendar');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { loadYutaiForecastDetail } = require('../lambda/shared/yutai-forecast-detail');
 
 beforeEach(() => {
@@ -49,4 +51,12 @@ test('abolitionNotice is null when the master row has none', async () => {
   mockSend.mockResolvedValueOnce({ Item: { ticker: '1234', content: 'QUO', unitShares: 100, rightsMonths: [3] } });
   const result = await loadYutaiForecastDetail('1234');
   expect(result?.abolitionNotice).toBeNull();
+});
+
+test('rightsDate is computed from the master row rightsDay (20th-based, not month-end)', async () => {
+  const expected = nextRightsDate([5, 11], 20);
+  expect(expected).not.toBe(nextRightsDate([5, 11], null));
+  mockSend.mockResolvedValueOnce({ Item: { ticker: '2678', content: 'QUO', unitShares: 100, rightsMonths: [5, 11], rightsDay: 20 } });
+  const result = await loadYutaiForecastDetail('2678');
+  expect(result?.detail.rightsDate).toBe(expected);
 });
