@@ -53,7 +53,8 @@ function defaultRightsRange(): { from: string; to: string } {
   const y = Number(today.slice(0, 4));
   const m = Number(today.slice(5, 7));
   const thisMonth = monthRange(y, m);
-  const thisMonthRightsDate = rightsDateForMonth(getLocalTradingCalendar(thisMonth.from, thisMonth.to), y, m);
+  // 案内の既定範囲は月末権利の銘柄を基準にする(20日締めの銘柄はその日を過ぎれば自然に範囲外へ出る)。
+  const thisMonthRightsDate = rightsDateForMonth(getLocalTradingCalendar(thisMonth.from, thisMonth.to), y, m, null);
   if (thisMonthRightsDate === undefined || thisMonthRightsDate >= today) return thisMonth;
   return m === 12 ? monthRange(y + 1, 1) : monthRange(y, m + 1);
 }

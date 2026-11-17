@@ -74,7 +74,8 @@ function pastRightsDateCandidates(rows: MasterRow[]): RightsDateCandidate[] {
   const today = todayIso();
   const thisYear = Number(today.slice(0, 4));
   const fromYear = thisYear - MAX_HISTORY_YEARS;
-  const calendar = getLocalTradingCalendar(`${fromYear}-01-01`, `${thisYear}-12-31`);
+  // 1月の権利確定日が月初だと権利付き最終日が前年12月になるため、前年12月から持つ。
+  const calendar = getLocalTradingCalendar(`${fromYear - 1}-12-01`, `${thisYear}-12-31`);
 
   const candidates: RightsDateCandidate[] = [];
   for (const row of rows) {

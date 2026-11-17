@@ -189,7 +189,8 @@ export function nextRightsDate(rightsMonths: number[], rightsDay: number | null,
   const year = Number(today.slice(0, 4));
   let calendar = yearCalendarCache.get(year);
   if (!calendar) {
-    calendar = getLocalTradingCalendar(`${year}-01-01`, `${year + 1}-12-31`);
+    // 1月の権利確定日が月初(1〜3日)だと権利付き最終日が前年12月になるため、前年12月から持つ。
+    calendar = getLocalTradingCalendar(`${year - 1}-12-01`, `${year + 1}-12-31`);
     yearCalendarCache.set(year, calendar);
   }
 
