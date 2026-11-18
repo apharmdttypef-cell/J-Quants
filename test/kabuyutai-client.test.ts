@@ -210,6 +210,23 @@ describe('parseListPage', () => {
     expect(entry.rightsDay).toBeNull();
   });
 
+  test('英字を含む新しい銘柄コード(245A)も読める', () => {
+    const entries = parseListPage(block('245A', 'INGS', '2月・8月'));
+    expect(entries.map((e) => e.ticker)).toEqual(['245A']);
+    expect(entries[0].rightsMonths).toEqual([2, 8]);
+  });
+
+  test('権利確定月が読めない新しい銘柄コードのブロックは、そのコード付きで警告する', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const html =
+      '<!-- ▼ランキング_ブロック --><div class="table_tr">' +
+      '<p><a href="x" class="kigyoumei">壊れ企業</a>（274A）</p><p>【優待内容】QUOカード（500円相当～）</p>' +
+      '</div><!-- ▲ランキング_ブロック -->';
+    expect(parseListPage(html)).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('274A'));
+    warn.mockRestore();
+  });
+
   test('（20日）が付いた銘柄はrightsDay: 20で、月も読める', () => {
     const [entry] = parseListPage(block('2678', 'アスクル', '5月・11月<span class="red-bold">（20日）</span>'));
     expect(entry.ticker).toBe('2678');

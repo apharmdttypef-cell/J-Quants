@@ -141,13 +141,14 @@ export function parseListPage(html: string): KabuyutaiEntry[] {
   const entries: KabuyutaiEntry[] = [];
 
   for (const block of splitBlocks(html)) {
-    const nameMatch = block.match(/<p><a href="([^"]+)" class="kigyoumei">([^<]+)<\/a>（(\d{4})）<\/p>/);
+    // 銘柄コードは数字4桁に加え、2024年以降の新規上場銘柄の英字入り(例: 245A)もある。
+    const nameMatch = block.match(/<p><a href="([^"]+)" class="kigyoumei">([^<]+)<\/a>（([0-9][0-9A-Z]{3})）<\/p>/);
     const contentMatch = block.match(/【優待内容】([^<]+)/);
     const schedule = parseRightsSchedule(block);
     if (!nameMatch || !contentMatch || typeof schedule === 'string') {
       // 読めないブロックを黙って飛ばすと、20日締めの銘柄のように気づかないまま
       // マスタから漏れるため、理由と(読めていれば)銘柄コードをログに残す。
-      const ticker = block.match(/class="kigyoumei">[^<]*<\/a>（(\d{4})）/)?.[1] ?? 'unknown';
+      const ticker = block.match(/class="kigyoumei">[^<]*<\/a>（([0-9][0-9A-Z]{3})）/)?.[1] ?? 'unknown';
       const reason = !nameMatch
         ? 'company name'
         : !contentMatch
