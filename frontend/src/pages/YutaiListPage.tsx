@@ -476,6 +476,12 @@ export function YutaiListPage() {
       <p className="page-subtitle">
         次回権利日に付きそうな逆日歩を過去の権利日実績から予測し、クロスの判断材料をまとめて表示します。
       </p>
+      <p className="budget-entry">
+        <Link to="/yutai/budget" className="btn">
+          予算から探す
+        </Link>
+        <span>保有現金で買える銘柄を権利確定月ごとに一覧し、購入予定を組み立てます。</span>
+      </p>
 
       {listState.data && (
         <div className="cutoff-banner">

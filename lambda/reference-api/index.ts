@@ -92,6 +92,8 @@ interface YutaiMasterRow {
   minTierValueYen: number | null;
   benefitParseWarning: string | null;
   requiredInvestment: number | null;
+  // kabuyutai一覧の必要投資金額。終値が無い銘柄の必要資金の代わりに予算ページが使う。
+  minInvestment: number | null;
   lastGyakuhibu: GyakuhibuActualRef | null;
   sameMonthLastYearGyakuhibu: GyakuhibuActualRef | null;
   // yutai-risk-precompute-batchが書くRSI(14)。バッチ未実行の行はna/null。
@@ -126,6 +128,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
     minTierValueYen: item.minTierValueYen ?? null,
     benefitParseWarning: item.benefitParseWarning ?? null,
     requiredInvestment: item.requiredInvestment ?? null,
+    minInvestment: item.minInvestment ?? null,
     lastGyakuhibu: item.lastGyakuhibu ?? null,
     sameMonthLastYearGyakuhibu: item.sameMonthLastYearGyakuhibu ?? null,
     rsi14: item.rsi14 ?? null,
@@ -142,7 +145,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
 // ページングするため、使わない属性を運ぶとリクエストあたりの往復回数が増える —
 // 「銘柄数によらずDynamoDB呼び出しを一定にする」という一覧の存在理由そのものを削る。
 //
-// maxRate / days / benefitGroups / minInvestment / detailUrl / listBadge /
+// maxRate / days / benefitGroups / detailUrl / listBadge /
 // conditionCheckedAt は意図的に除いてある。ここに無い属性はtoYutaiMasterRowで
 // 既定値(null / 'unknown' / [])に落ちるので、一覧の返す項目を増やすときは
 // この射影にも足すこと(足し忘れは型エラーにならず、黙ってnullになる)。
@@ -150,7 +153,7 @@ function toYutaiMasterRow(item: Record<string, any>): YutaiMasterRow {
 const YUTAI_LIST_PROJECTION =
   'ticker, companyName, #content, #value, unitShares, rightsMonths, rightsDay, maxGyakuhibu, closePrice, ' +
   'requiredShares, crossEligible, holdingKind, holdingMinMonths, minTierValueYen, benefitParseWarning, ' +
-  'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu, rsiLabel, abolitionNotice';
+  'requiredInvestment, lastGyakuhibu, sameMonthLastYearGyakuhibu, rsiLabel, abolitionNotice, minInvestment';
 
 async function scanYutaiMaster(): Promise<YutaiMasterRow[]> {
   const rows: YutaiMasterRow[] = [];
@@ -323,6 +326,9 @@ async function listYutaiForecast(query: Record<string, string | undefined>): Pro
       content: row.content,
       value: row.value,
       rightsDate: rightsDate ?? null,
+      // 予算ページ(/yutai/budget)用。権利月の絞り込みと、終値が無い銘柄の必要資金の代わり。
+      rightsMonths: row.rightsMonths,
+      minInvestment: row.minInvestment,
       maxGyakuhibu: row.maxGyakuhibu,
       rsiLabel: row.rsiLabel,
       abolitionNotice: row.abolitionNotice,

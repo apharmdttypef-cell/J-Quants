@@ -205,6 +205,7 @@ test('the yutai list scan projects only the attributes the list returns', async 
     'sameMonthLastYearGyakuhibu',
     'rsiLabel',
     'abolitionNotice',
+    'minInvestment',
   ]);
   // content / value はDynamoDBの予約語なので素のままでは射影に書けない
   expect(scanInput.ExpressionAttributeNames).toEqual({ '#content': 'content', '#value': 'value' });
@@ -890,6 +891,22 @@ test('GET /yutai/forecast defaults the cross fields for a row the detail sync ha
   expect(item.holdingKind).toBe('unknown');
   expect(item.lastGyakuhibu).toBeNull();
   expect(item.requiredInvestment).toBeNull();
+});
+
+test('GET /yutai/forecast returns minInvestment and rightsMonths for the budget page', async () => {
+  // 予算ページ(/yutai/budget)は、終値が無い銘柄をminInvestmentで判定し、権利月をrightsMonthsで絞り込む
+  mockSend.mockResolvedValueOnce({
+    Items: [
+      { ticker: '1111', content: '割引券', value: 1000, unitShares: 100, rightsMonths: [3, 9], minInvestment: 125000 },
+      { ticker: '2222', content: '自社製品', value: 2000, unitShares: 100 },
+    ],
+  });
+
+  const tickers = (body(await handler(makeEvent('GET /yutai/forecast', { queryStringParameters: {} }))) as { tickers: AnyItem[] }).tickers;
+
+  expect(tickers.find((t) => t.ticker === '1111')).toMatchObject({ minInvestment: 125000, rightsMonths: [3, 9] });
+  // 欠損はキーを省略せずnull / []で返す
+  expect(tickers.find((t) => t.ticker === '2222')).toMatchObject({ minInvestment: null, rightsMonths: [] });
 });
 
 test('GET /yutai/forecast filters by share price range', async () => {

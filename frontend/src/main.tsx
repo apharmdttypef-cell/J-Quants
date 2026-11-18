@@ -8,6 +8,7 @@ import { Layout } from './components/Layout';
 import { RedirectToYutaiDetail } from './components/RedirectToYutaiDetail';
 import { onSigninCallback, userManager } from './lib/auth';
 import { TickerDetailPage } from './pages/TickerDetailPage';
+import { YutaiBudgetPage } from './pages/YutaiBudgetPage';
 import { YutaiListPage } from './pages/YutaiListPage';
 import { YutaiDetailPage } from './pages/YutaiDetailPage';
 import { YutaiTdnetEventsPage } from './pages/YutaiTdnetEventsPage';
@@ -27,6 +28,7 @@ createRoot(document.getElementById('root')!).render(
               {/* 旧「逆日歩予測」一覧。優待クロス一覧に統合した */}
               <Route path="yutai/forecast" element={<Navigate to="/yutai" replace />} />
               <Route path="yutai/tdnet-events" element={<YutaiTdnetEventsPage />} />
+              <Route path="yutai/budget" element={<YutaiBudgetPage />} />
               <Route path="yutai/:ticker" element={<YutaiDetailPage />} />
               <Route path="yutai/:ticker/forecast" element={<RedirectToYutaiDetail />} />
               <Route path="*" element={<Navigate to="/yutai" replace />} />

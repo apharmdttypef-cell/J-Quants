@@ -562,3 +562,313 @@ a {
   font-size: 0.85rem;
   color: var(--caution);
 }
+
+/* ---- 予算から探す(/yutai/budget) ---- */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.budget-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.8rem;
+  margin: 0 0 1.25rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.budget-entry .btn {
+  text-decoration: none;
+}
+
+.budget-back {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+}
+
+.budget-back a {
+  color: var(--text-muted);
+}
+
+.budget-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem 1.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.budget-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.budget-cash {
+  width: 12rem;
+  min-height: 44px;
+  text-align: right;
+  font-size: 1rem;
+}
+
+.budget-month {
+  width: 7rem;
+  min-height: 44px;
+  font-family: var(--font-body);
+}
+
+.budget-note {
+  margin: 0 0 0 auto;
+  max-width: 18rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.budget-footnote {
+  margin: 0.75rem 0 0;
+  max-width: none;
+  line-height: 1.6;
+}
+
+/* 購入予定(カート)。資金不足では枠と見出しを赤にする */
+.budget-cart {
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 1.5rem;
+}
+
+.budget-cart__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.5rem;
+  padding: 0.85rem 1.25rem;
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.budget-cart--over {
+  border-color: var(--up);
+}
+
+.budget-cart--over .budget-cart__bar {
+  background: var(--up);
+}
+
+.budget-cart__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+}
+
+.budget-cart__count {
+  font-size: 0.85rem;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+.budget-cart__totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.75rem;
+  margin: 0;
+}
+
+.budget-cart__totals div {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.budget-cart__totals dt {
+  font-size: 0.72rem;
+  opacity: 0.85;
+}
+
+.budget-cart__totals dd {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.budget-cart__remaining dd {
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.budget-cart__alert {
+  margin: 0;
+  padding: 0.6rem 1.25rem;
+  background: color-mix(in srgb, var(--up) 12%, var(--surface));
+  color: var(--up);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.budget-cart__empty {
+  margin: 0;
+  padding: 1.4rem 1.25rem;
+  text-align: center;
+  font-size: 0.88rem;
+  color: var(--text-muted);
+}
+
+.budget-scroll {
+  overflow-x: auto;
+}
+
+.budget-table td {
+  vertical-align: middle;
+}
+
+.budget-table .budget-left {
+  text-align: left;
+}
+
+.budget-table .budget-center {
+  text-align: center;
+}
+
+.budget-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.budget-stepper__btn {
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.budget-stepper__value {
+  min-width: 4rem;
+  text-align: center;
+}
+
+.budget-remove {
+  color: var(--up);
+}
+
+.budget-sub {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.budget-fallback {
+  font-size: 0.72rem;
+  color: var(--caution);
+  white-space: normal;
+}
+
+.budget-short {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--up);
+}
+
+.budget-list-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.budget-list-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+}
+
+.budget-list-count {
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.budget-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 44px;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.budget-sort {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.budget-sort:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.budget-row--affordable {
+  cursor: pointer;
+}
+
+.budget-row--inCart td {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.budget-row--unaffordable td {
+  color: var(--text-muted);
+  background: var(--surface-alt);
+}
+
+.budget-add {
+  min-width: 5.5rem;
+  min-height: 2rem;
+  padding: 0 0.7rem;
+  border-radius: 999px;
+  border: none;
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.budget-add--affordable {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+}
+
+.budget-add--inCart {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--text);
+}
+
+.budget-add--unaffordable,
+.budget-add--unknown {
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}

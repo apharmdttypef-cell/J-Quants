@@ -164,6 +164,10 @@ export interface YutaiForecastListItem extends YutaiCrossFields {
   content: string;
   value: number | null;
   rightsDate: string | null;
+  // 権利確定月(1〜12)。予算ページの月の絞り込みに使う
+  rightsMonths: number[];
+  // kabuyutai一覧の必要投資金額。終値が無い銘柄の必要資金の代わりに予算ページが使う
+  minInvestment: number | null;
   maxGyakuhibu: number | null;
   forecast: YutaiForecast;
   tseForecast: YutaiTseForecast | null;
